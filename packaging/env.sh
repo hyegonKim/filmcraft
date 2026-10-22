@@ -5,8 +5,9 @@
 #   ROOT                    workspace root
 #   VERSION                 [workspace.package] version from Cargo.toml (override: FILMCRAFT_VERSION)
 #   DIST                    output directory for release artifacts (default: $ROOT/dist/release)
-#   FILMCRAFT_BUILD_SHA    git commit baked into the binaries (see crates/engine/src/build_info.rs)
+#   FILMCRAFT_BUILD_SHA    git commit baked into the app (see crates/ui-egui/src/build_info.rs)
 #   FILMCRAFT_BUILD_DATE   UTC build date, YYYY-MM-DD
+#   FILMCRAFT_BUILD_NUMBER  numeric bundle build number, distinct from the marketing version
 #   CARGO_TARGET_DIR        cargo's target dir (default: $ROOT/target)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,9 +35,15 @@ export DIST
 
 if [ -z "${FILMCRAFT_BUILD_SHA:-}" ]; then
   FILMCRAFT_BUILD_SHA="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+  if [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
+    FILMCRAFT_BUILD_SHA="$FILMCRAFT_BUILD_SHA-modified"
+  fi
 fi
 export FILMCRAFT_BUILD_SHA
 export FILMCRAFT_BUILD_DATE="${FILMCRAFT_BUILD_DATE:-$(date -u +%Y-%m-%d)}"
+# Apple's bundle build number uses at most three numeric components (4/2/2 digits).
+# Release automation should supply a monotonically increasing build number explicitly.
+export FILMCRAFT_BUILD_NUMBER="${FILMCRAFT_BUILD_NUMBER:-${VERSION%%-*}}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 
 # Emit a GitHub Actions warning (plain stderr outside Actions).

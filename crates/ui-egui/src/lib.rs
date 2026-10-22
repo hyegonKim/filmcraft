@@ -31,6 +31,7 @@ macro_rules! tlf {
 
 pub mod automation;
 pub mod brand;
+pub mod build_info;
 mod cjk;
 pub mod control;
 pub mod crash;
@@ -278,6 +279,9 @@ pub struct FilmcraftApp {
     /// Requests waiting for the UI to show an element: (request, give-up time).
     deferred: Vec<(ControlRequest, f64)>,
     last_ui_time: f64,
+    /// Fresh backend time; egui's input time is frozen during hidden logic-only passes.
+    control_time: f64,
+    last_control_raise: Option<f64>,
     pub(crate) synthetic: Vec<egui::Event>,
     /// BS.1770 loudness of the programme as it plays, and the next sample position to feed.
     pub(crate) loudness: Option<(filmcraft_audio_dsp::LoudnessMeter, i64)>,
@@ -297,7 +301,10 @@ pub struct FilmcraftApp {
     /// Consecutive frames the timeline zoom / scroll has been at rest. `ui.elements` answers from
     /// the frame before the last one, so its timeline rects are final from 2 on.
     pub(crate) timeline_still: u32,
-    input_waiters: Vec<Sender<Value>>,
+    /// Input replies and the deadline for delivery to the first widget pass.
+    input_waiters: Vec<(Sender<Value>, f64)>,
+    /// Once delivery starts, finish the gesture instead of interrupting a partial edit.
+    control_input_started: bool,
     next_token: u64,
     styled: bool,
     /// A panic in the UI pass, shown in an error window until dismissed (see [`crash`]).
@@ -518,6 +525,8 @@ impl FilmcraftApp {
             synthetic_modifiers: egui::Modifiers::NONE,
             deferred: Vec::new(),
             last_ui_time: 0.0,
+            control_time: 0.0,
+            last_control_raise: None,
             synthetic: Vec::new(),
             loudness: None,
             status_seen: (String::new(), 0.0),
@@ -528,6 +537,7 @@ impl FilmcraftApp {
             program_shown: None,
             timeline_still: 0,
             input_waiters: Vec::new(),
+            control_input_started: false,
             next_token: 1,
             styled: false,
             ui_error: None,
@@ -1461,6 +1471,15 @@ impl FilmcraftApp {
 
     /// Make the UI pass run for a control request without stealing the user's keyboard focus.
     pub(crate) fn raise_for_control(&mut self, ctx: &egui::Context) {
+        // Ordering alone cannot restore a hidden/minimized window. Limit native ordering:
+        // hidden logic may tick hundreds of times while AppKit waits on the compositor.
+        if self.last_control_raise.is_some_and(|last| self.control_time - last < 0.25) {
+            ctx.request_repaint();
+            return;
+        }
+        self.last_control_raise = Some(self.control_time);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         if let Some(raise) = self.hooks.raise_without_focus.as_mut() {
             raise();
         }
@@ -1469,12 +1488,12 @@ impl FilmcraftApp {
 
     fn drain_control(&mut self, ctx: &egui::Context) {
         let Some(rx) = self.control_rx.take() else { return };
-        let now = ctx.input(|i| i.time);
+        let now = self.control_time;
         let mut reqs: Vec<(ControlRequest, f64)> = std::mem::take(&mut self.deferred);
         while let Ok(req) = rx.try_recv() {
-            // UI requests need rendered frames: raise the window if `ui` hasn't run recently
-            // (occluded macOS windows stop running `ui`).
-            if req.method.starts_with("ui.") && now - self.last_ui_time > 0.25 {
+            // Only widget input needs a visible UI pass. Queries and state patches must
+            // not synchronously order an AppKit window while background jobs are running.
+            if matches!(req.method.as_str(), "ui.click" | "ui.move" | "ui.drag" | "ui.scroll" | "ui.key" | "ui.type") && now - self.last_ui_time > 0.25 {
                 self.raise_for_control(ctx);
             }
             reqs.push((req, now + 3.0));
@@ -1493,11 +1512,16 @@ impl FilmcraftApp {
                         let _ = reply.send(json!({"ok": false, "error": msg}));
                     }
                 }
-                control::Outcome::AfterInput => self.input_waiters.push(reply),
+                control::Outcome::AfterInput => {
+                    if self.input_waiters.is_empty() {
+                        self.control_input_started = false;
+                    }
+                    self.input_waiters.push((reply, now + 3.0));
+                }
                 control::Outcome::Screenshot { path, crop } => {
                     let token = self.next_token;
                     self.next_token += 1;
-                    let settle = ctx.input(|i| i.time) + 0.25;
+                    let settle = self.control_time + 0.25;
                     self.queued_screenshots.push((token, settle, 0));
                     self.pending_screenshots.push((token, path, crop, reply, settle + SCREENSHOT_TIMEOUT_S));
                 }
@@ -1506,11 +1530,23 @@ impl FilmcraftApp {
         self.control_rx = Some(rx);
     }
 
+    /// A hidden viewport may never deliver a queued gesture. Cancel only an unstarted batch:
+    /// injecting a release to abort an already-started drag could commit a partial edit.
+    fn expire_undelivered_control_input(&mut self) {
+        if !self.control_input_started && self.input_waiters.iter().any(|(_, deadline)| self.control_time >= *deadline) {
+            self.synthetic.clear();
+            self.synthetic_modifiers = egui::Modifiers::NONE;
+            for (reply, _) in self.input_waiters.drain(..) {
+                let _ = reply.send(json!({"ok": false, "error": "UI input was not delivered: window hidden or display unavailable; queued input cancelled"}));
+            }
+        }
+    }
+
     /// Capture once the UI shows the current state (`settled`): after a seek the monitor shows the
     /// nearest cached picture until the exact frame is decoded, and an agent must not be handed
     /// the stand-in.
     fn issue_screenshots(&mut self, ctx: &egui::Context, settled: bool) {
-        let now = ctx.input(|i| i.time);
+        let now = self.control_time;
         let mut any = false;
         self.queued_screenshots.retain_mut(|(token, at, frames)| {
             *frames += 1;
@@ -1828,13 +1864,23 @@ impl FilmcraftApp {
 }
 
 impl eframe::App for FilmcraftApp {
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.control_time = raw_input.time.filter(|t| t.is_finite()).unwrap_or_else(|| ctx.input(|i| i.time));
+        // Use fresh backend time even when egui widget time is frozen by occlusion.
+        // Expire before injecting events so restoring the window cannot execute a stale click.
+        self.expire_undelivered_control_input();
         self.native_window_focused = Some(raw_input.focused);
         if self.control_input_only {
             // Preserve screenshot responses and all viewport lifecycle/geometry metadata.
             raw_input.events.retain(|event| matches!(event, egui::Event::Screenshot { .. }));
             raw_input.hovered_files.clear();
             raw_input.dropped_files.clear();
+        }
+        // Hidden native updates merge pending raw input but run no widget pass. Consuming
+        // press/release there loses their frame separation (and input-only filtering would
+        // erase the pending event on the next hidden update).
+        if raw_input.viewport().visible() == Some(false) {
+            return;
         }
         if self.control_input_only || !self.synthetic.is_empty() {
             // Native modifiers cannot replace those requested by a control gesture. A queued
@@ -1856,6 +1902,7 @@ impl eframe::App for FilmcraftApp {
                     .position(|e| pointer(e) || matches!(e, egui::Event::Key { pressed: false, .. }))
                     .map_or(self.synthetic.len(), |i| if pointer(&self.synthetic[i]) { i.max(1) } else { i + 1 })
             };
+            self.control_input_started = true;
             for event in self.synthetic.drain(..n) {
                 if let egui::Event::ModifiersChanged(modifiers) = event {
                     self.synthetic_modifiers = modifiers;
@@ -1904,11 +1951,17 @@ impl eframe::App for FilmcraftApp {
         }
         if !self.synthetic.is_empty() {
             ctx.request_repaint();
-        } else if !self.input_waiters.is_empty() {
-            for w in self.input_waiters.drain(..) {
-                let _ = w.send(json!({"ok": true, "result": null}));
+        }
+        if !self.input_waiters.is_empty() || !self.deferred.is_empty() {
+            // The last raw event can empty the queue before an occluded window gets a UI
+            // pass. Keep drawing until widgets actually process it and acknowledge below.
+            ctx.request_repaint();
+            if self.control_time - self.last_ui_time > 0.25 || ctx.input(|i| i.viewport().visible()) == Some(false) {
+                self.raise_for_control(ctx);
             }
         }
+        // Input acknowledgements belong to the end of `ui`, after widgets processed the
+        // released gesture. `logic` can run without a visible UI pass on macOS.
         let settled = !std::mem::take(&mut self.monitor_inexact) && self.timeline_still > 0;
         self.issue_screenshots(ctx, settled);
         self.collect_screenshots(ctx);
@@ -1941,7 +1994,8 @@ impl eframe::App for FilmcraftApp {
             ctx.request_repaint();
         } else if !self.input_waiters.is_empty() {
             ctx.request_repaint();
-            for w in self.input_waiters.drain(..) {
+            self.control_input_started = false;
+            for (w, _) in self.input_waiters.drain(..) {
                 let _ = w.send(json!({"ok": true, "result": null}));
             }
         }
@@ -2251,5 +2305,154 @@ mod screen_px_tests {
             let p = screen_px_to_ui((10, 20), ppp, egui::pos2(0.0, 0.0));
             assert!(p.x.is_finite() && p.y.is_finite());
         }
+    }
+}
+
+#[cfg(test)]
+mod hidden_control_input_tests {
+    use super::*;
+    #[test]
+    fn a_started_control_gesture_is_not_discarded_during_occlusion() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = FilmcraftApp::new(Session::default()).with_control_input_only(rx);
+        let (request, reply) = ControlRequest::new("ui.click", json!({"x":10.0,"y":10.0}));
+        tx.send(request).unwrap();
+        app.control_time = 10.0;
+        app.drain_control(&ctx);
+        let mut visible = egui::RawInput { time: Some(10.1), ..Default::default() };
+        visible.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(false);
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut visible);
+        assert!(app.control_input_started);
+        let queued = app.synthetic.len();
+        assert!(queued > 0);
+        let mut hidden = egui::RawInput { time: Some(14.0), ..Default::default() };
+        hidden.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(true);
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut hidden);
+        assert_eq!(app.synthetic.len(), queued, "do not synthesize release or discard a partially delivered gesture");
+        assert!(reply.try_recv().is_err());
+    }
+
+    #[test]
+    fn an_undelivered_hidden_click_expires_without_late_input_or_project_edits() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = FilmcraftApp::new(Session::default()).with_control_input_only(rx);
+        let before = serde_json::to_value(&app.session.project).unwrap();
+        let (request, reply) = ControlRequest::new("ui.click", json!({"x":10.0,"y":10.0}));
+        tx.send(request).unwrap();
+        for seconds in [10.0, 14.0] {
+            let mut raw = egui::RawInput { time: Some(seconds), ..Default::default() };
+            raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(true);
+            eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+            let _ = ctx.run_logic(&raw, |ctx| app.drain_control(ctx));
+        }
+        let response = reply.try_recv().expect("input acknowledgements need a deadline even without UI passes");
+        assert_eq!(response["ok"], false);
+        assert!(response["error"].as_str().unwrap().contains("input"));
+        assert!(app.synthetic.is_empty(), "timed-out input must not click later");
+        assert!(app.input_waiters.is_empty());
+        let mut resumed = egui::RawInput { time: Some(15.0), ..Default::default() };
+        resumed.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(false);
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut resumed);
+        assert!(!resumed.events.iter().any(|e| matches!(e, egui::Event::PointerButton { .. } | egui::Event::Key { .. })));
+        assert_eq!(serde_json::to_value(&app.session.project).unwrap(), before);
+    }
+
+    #[test]
+    fn hidden_state_queries_and_patches_do_not_reorder_the_native_window() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = FilmcraftApp::new(Session::default()).with_control(rx);
+        let raises = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = raises.clone();
+        app.hooks.raise_without_focus = Some(Box::new(move || {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+        let (inspect, inspect_reply) = ControlRequest::new("ui.inspect", json!({}));
+        let (patch, patch_reply) = ControlRequest::new("ui.set", json!({"timeline":{"scroll":5.0}}));
+        tx.send(inspect).unwrap();
+        tx.send(patch).unwrap();
+        let mut raw = egui::RawInput { time: Some(10.0), ..Default::default() };
+        raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(true);
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        let _ = ctx.run_logic(&raw, |ctx| app.drain_control(ctx));
+        assert_eq!(inspect_reply.try_recv().unwrap()["ok"], true);
+        assert_eq!(patch_reply.try_recv().unwrap()["ok"], true);
+        assert_eq!(app.ui.timeline.target_scroll, 5.0);
+        assert_eq!(raises.load(std::sync::atomic::Ordering::SeqCst), 0, "data requests must not synchronously reorder a hidden macOS window");
+    }
+
+    #[test]
+    fn control_raise_restores_visibility_without_focus_and_is_throttled() {
+        let ctx = egui::Context::default();
+        let mut app = FilmcraftApp::new(Session::default());
+        app.control_time = 10.0;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.raise_for_control(ui.ctx());
+            app.raise_for_control(ui.ctx());
+        });
+        output.textures_delta.clear();
+        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert_eq!(commands.iter().filter(|c| matches!(c, egui::ViewportCommand::Visible(true))).count(), 1);
+        assert_eq!(commands.iter().filter(|c| matches!(c, egui::ViewportCommand::Minimized(false))).count(), 1);
+        assert!(!commands.iter().any(|c| matches!(c, egui::ViewportCommand::Focus)));
+    }
+    #[test]
+    fn a_hidden_logic_pass_does_not_consume_a_synthetic_click() {
+        let ctx = egui::Context::default();
+        let mut app = FilmcraftApp::new(Session::default());
+        app.control_input_only = true;
+        let (request, _) = ControlRequest::new("ui.click", json!({"x":10.0,"y":10.0}));
+        assert!(matches!(control::handle(&mut app, &ctx, &request), control::Outcome::AfterInput));
+        let queued = app.synthetic.len();
+        assert!(queued > 0);
+        for _ in 0..10 {
+            let mut raw = egui::RawInput::default();
+            raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(true);
+            eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+            assert_eq!(app.synthetic.len(), queued, "press/release must wait for a visible UI pass");
+        }
+        let mut edges = Vec::new();
+        for _ in 0..10 {
+            let mut raw = egui::RawInput::default();
+            raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(false);
+            eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+            let buttons: Vec<_> = raw
+                .events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::PointerButton { pressed, .. } => Some(*pressed),
+                    _ => None,
+                })
+                .collect();
+            assert!(buttons.len() <= 1, "the click edges must be on different visible frames");
+            edges.extend(buttons);
+        }
+        assert!(app.synthetic.is_empty());
+        assert_eq!(edges, [true, false]);
+    }
+}
+
+#[cfg(test)]
+mod hidden_control_clock_tests {
+    use super::*;
+    #[test]
+    fn missing_widget_retry_expires_even_when_egui_time_is_frozen() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = FilmcraftApp::new(Session::default()).with_control(rx);
+        let (request, reply) = ControlRequest::new("ui.click", json!({"id":"not-yet-rendered"}));
+        tx.send(request).unwrap();
+        for seconds in [10.0, 14.0] {
+            let mut raw = egui::RawInput { time: Some(seconds), ..Default::default() };
+            raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(true);
+            eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+            app.drain_control(&ctx);
+        }
+        let response = reply.try_recv().expect("a hidden window must not keep a retry alive forever");
+        assert_eq!(response["ok"], false);
+        assert!(response["error"].as_str().unwrap().contains("not-yet-rendered"));
+        assert!(app.deferred.is_empty());
     }
 }

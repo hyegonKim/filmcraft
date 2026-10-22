@@ -161,7 +161,7 @@ fn preview(s: &mut Session, p: &Value) -> Result<Value> {
     let base = target_clip(s, p).and_then(|c| s.active_sequence()?.find_item(c).map(|(_, it)| it.item)).and_then(|i| s.project.narrations.get(&i).cloned());
     let mut q = p.clone();
     if q.get("sample").and_then(Value::as_bool).unwrap_or(false) {
-        q["text"] = json!(tts::SAMPLE_SENTENCE);
+        q["text"] = json!(tts::sample_sentence(str_p(p, "voice").or_else(|| base.as_ref().map(|n| n.voice.as_str())).unwrap_or(tts::default_voice_id())));
     }
     let n = settings(cmd, &q, base.as_ref())?;
     let audio = synthesize(s, cmd, &n)?;
@@ -420,7 +420,7 @@ fn render_job(s: &mut Session, p: &Value) -> Result<Value> {
     let base = target_clip(s, p).and_then(|c| s.active_sequence()?.find_item(c).map(|(_, it)| it.item)).and_then(|i| s.project.narrations.get(&i).cloned());
     let mut q = p.clone();
     if q.get("sample").and_then(Value::as_bool).unwrap_or(false) {
-        q["text"] = json!(tts::SAMPLE_SENTENCE);
+        q["text"] = json!(tts::sample_sentence(str_p(p, "voice").or_else(|| base.as_ref().map(|n| n.voice.as_str())).unwrap_or(tts::default_voice_id())));
     }
     let n = settings(cmd, &q, base.as_ref())?;
     let key = cache_key(&n);

@@ -11,10 +11,13 @@ workspace = true
 
 [features]
 default = []
+# Optional adapter to macOS's installed speech service; no voices are redistributed.
+macos-voices = ["dep:filmcraft-media"]
 # Kokoro-82M neural voices on the CPU via candle (pure Rust). Off by default and in wasm builds.
 kokoro = ["dep:candle-core", "dep:candle-nn", "dep:zip", "dep:serde_json", "dep:filmcraft-tts-text", "dep:filmcraft-audio-dsp"]
 
 [dependencies]
+filmcraft-media = { workspace = true, optional = true }
 filmcraft-tts-text = { workspace = true, optional = true }
 filmcraft-audio-dsp = { workspace = true, optional = true }
 serde = { workspace = true }

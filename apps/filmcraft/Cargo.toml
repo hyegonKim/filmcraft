@@ -16,6 +16,7 @@ default = []
 whisper = ["filmcraft-engine/whisper", "filmcraft-engine/speech-download"]
 # Natural Text to Speech voices (Kokoro-82M on the CPU, downloaded on first use).
 neural-voices = ["filmcraft-engine/neural-voices"]
+macos-voices = ["filmcraft-engine/macos-voices"]
 
 [dependencies]
 filmcraft-engine = { workspace = true }

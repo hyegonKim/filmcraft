@@ -87,7 +87,10 @@ fn main() -> eframe::Result {
             return Ok(());
         }
         Ok(Cli::Version) => {
-            tell(&format!("filmcraft {}\n", env!("CARGO_PKG_VERSION")), false);
+            tell(
+                &format!("{} ({}, {})\n", filmcraft_ui_egui::build_info::label(), filmcraft_ui_egui::build_info::DATE, filmcraft_ui_egui::build_info::COMMIT),
+                false,
+            );
             return Ok(());
         }
         Err(e) => {
@@ -96,7 +99,7 @@ fn main() -> eframe::Result {
         }
     };
     let log_dir = data_dir.clone().or_else(default_data_dir).map(|d| d.join(logging::LOG_DIR));
-    log::info!("FilmCraft {} ({} {})", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
+    log::info!("{} ({} {})", filmcraft_ui_egui::build_info::label(), std::env::consts::OS, std::env::consts::ARCH);
     // The log file lives next to the crash logs; opened after the arguments, so `--help`,
     // `--version` and usage errors leave no file behind. Records logged until now go in first.
     if let Some(logger) = logger {
@@ -121,7 +124,7 @@ fn main() -> eframe::Result {
     register_gpu_frame_renderer();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("FilmCraft")
+            .with_title(filmcraft_ui_egui::build_info::label())
             .with_inner_size([1600.0, 980.0])
             .with_min_inner_size([900.0, 560.0])
             .with_drag_and_drop(true)

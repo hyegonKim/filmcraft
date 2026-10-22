@@ -519,6 +519,12 @@ fn auto_transcribe_on_import_and_transcription_defaults() {
     set(&mut s, "mediaAnalysis.autoTranscribeScope", json!("allImported"));
     let r = s.execute("file.import", json!({"paths": [mov.to_string_lossy()]})).unwrap();
     let c = ItemId(r["items"][0].as_u64().unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !s.project.transcripts.contains_key(&c) {
+        s.poll_persistence();
+        assert!(std::time::Instant::now() < deadline, "automatic transcription timed out");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
     assert_eq!(s.project.transcripts[&c].words[0].text, "hello");
     assert!(matches!(s.project.item(c).unwrap().kind, ItemKind::Media(_)));
     // the model setting is validated against the catalogue

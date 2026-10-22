@@ -1,0 +1,7 @@
+#!/bin/sh
+# Never replace a running editor: it may hold unsaved user work or older mapped code.
+if /bin/ps -axo comm= | /usr/bin/awk 'index($0, "/Applications/FilmCraft.app/Contents/MacOS/") == 1 { running=1 } END { exit !running }'; then
+    echo "FilmCraft is running. Save your project and quit FilmCraft before installing." >&2
+    exit 1
+fi
+exit 0

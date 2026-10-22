@@ -12,6 +12,9 @@
 use filmcraft_time::{Tick, TimeRange};
 use serde::{Deserialize, Serialize};
 
+/// Current locally checked filler-interval policy. Older approvals require rechecking.
+pub const FILLER_BOUNDS_REVISION: u8 = 4;
+
 /// One transcribed word.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Word {
@@ -27,6 +30,18 @@ pub struct Word {
     /// Recogniser confidence 0..1 (1 for hand-made or corrected words).
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub confidence: f32,
+    /// Independent local audio recheck completed; not a semantic filler judgement.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub filler_checked: bool,
+    /// Conservative intersection of two independently decoded timings, with edge padding retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filler_bounds: Option<TimeRange>,
+    #[serde(default, skip_serializing_if = "is_zero_revision")]
+    pub filler_bounds_revision: u8,
+}
+
+fn is_zero_revision(v: &u8) -> bool {
+    *v == 0
 }
 
 fn one() -> f32 {
@@ -38,7 +53,7 @@ fn is_one(v: &f32) -> bool {
 
 impl Word {
     pub fn new(text: impl Into<String>, start: Tick, end: Tick) -> Self {
-        Self { text: text.into(), start, end, speaker: None, confidence: 1.0 }
+        Self { text: text.into(), start, end, speaker: None, confidence: 1.0, filler_checked: false, filler_bounds: None, filler_bounds_revision: 0 }
     }
     pub fn range(&self) -> TimeRange {
         TimeRange::from_bounds(self.start, self.end.max(self.start))
@@ -106,6 +121,11 @@ impl Transcript {
                 w.end = w.start;
             }
             w.confidence = w.confidence.clamp(0.0, 1.0);
+            w.filler_bounds = w.filler_bounds.and_then(|r| {
+                let a = r.start.max(w.start);
+                let b = Tick(r.start.0.checked_add(r.duration.0)?).min(w.end);
+                (b > a).then(|| TimeRange::from_bounds(a, b))
+            });
         }
         self.words.sort_by_key(|w| (w.start, w.end));
         for i in 1..self.words.len() {

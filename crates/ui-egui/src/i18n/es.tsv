@@ -3562,3 +3562,28 @@
 	Edit Project Notes	Editar notas del proyecto
 	Notes for this project: to-dos, instructions, frame numbers… Saved with the project.	Notas de este proyecto: tareas pendientes, instrucciones, números de fotograma… Se guardan con el proyecto.
 	Use Effect Shutter Angle	Usar el ángulo de obturación del efecto
+
+# Reviewed Korean transcript cleanup
+	Review pauses and fillers	Revisar pausas y muletillas
+	Review pauses / fillers	Revisar pausas / muletillas
+	Candidates are suggestions, not verified silence. Listen before selecting. Nothing is selected automatically.	Los candidatos son sugerencias, no silencio verificado. Escuche antes de seleccionar. No se selecciona nada automáticamente.
+	Korean speech model	Modelo de voz coreana
+	Download model	Descargar modelo
+	Local multilingual models: base about 293 MB, small about 970 MB. Transcription runs on CPU and may take time.	Modelos multilingües locales: base unos 293 MB, small unos 970 MB. La transcripción usa CPU y puede tardar.
+	Transcribe Korean	Transcribir coreano
+	Minimum pause (s)	Pausa mínima (s)
+	Keep on each side (s)	Conservar a cada lado (s)
+	Filler phrases (comma separated)	Muletillas (separadas por comas)
+	Find candidates	Buscar candidatos
+	{count} candidates	{count} candidatos
+	Pause	Pausa
+	Filler	Muletilla
+	Listen	Escuchar
+	Apply selected (one undo step)	Aplicar seleccionados (un paso para deshacer)
+	Undo restores all selected cuts together. A changed timeline requires a fresh preview.	Deshacer restaura todos los cortes seleccionados juntos. Si cambia la línea de tiempo, obtenga una nueva vista previa.
+	Preview Candidate Range	Previsualizar intervalo candidato
+	Preview Transcript Cleanup	Previsualizar limpieza de transcripción
+	Apply Reviewed Transcript Cleanup	Aplicar limpieza de transcripción revisada
+Open Text to Speech	Abrir texto a voz
+System voices (local)	Voces del sistema (locales)
+Korean speech uses the installed macOS Yuna voice locally. No upload.	La voz coreana utiliza Yuna de macOS localmente. No se suben datos.

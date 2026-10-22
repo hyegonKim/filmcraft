@@ -825,6 +825,7 @@ fn close_project(s: &mut Session, p: &Value) -> Result<Value> {
     if s.is_dirty() && !bool_p(p, "force").unwrap_or(false) {
         return Err(EngineError::Other("the project has unsaved changes: save it first, or pass {\"force\": true} to discard them".into()));
     }
+    crate::transcript_jobs::change_document(s);
     s.project = std::sync::Arc::new(Project::new("Untitled"));
     s.history = Default::default();
     s.history.limit = 200;

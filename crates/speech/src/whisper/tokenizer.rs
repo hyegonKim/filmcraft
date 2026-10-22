@@ -28,7 +28,7 @@ pub struct Tokenizer {
 }
 
 /// GPT-2's byte → printable character table, inverted.
-fn unicode_to_byte() -> HashMap<char, u8> {
+fn unicode_to_byte() -> Result<HashMap<char, u8>, SpeechError> {
     let mut bs: Vec<u32> = (b'!' as u32..=b'~' as u32).chain(0xA1..=0xAC).chain(0xAE..=0xFF).collect();
     let mut cs = bs.clone();
     let mut n = 0;
@@ -39,7 +39,10 @@ fn unicode_to_byte() -> HashMap<char, u8> {
             n += 1;
         }
     }
-    bs.iter().zip(&cs).map(|(&b, &c)| (char::from_u32(c).expect("valid"), b as u8)).collect()
+    bs.iter()
+        .zip(&cs)
+        .map(|(&b, &c)| char::from_u32(c).map(|ch| (ch, b as u8)).ok_or_else(|| SpeechError::Model("invalid byte-to-unicode table".into())))
+        .collect()
 }
 
 impl Tokenizer {
@@ -47,7 +50,7 @@ impl Tokenizer {
         let bad = |m: &str| SpeechError::Model(format!("tokenizer.json: {m}"));
         let v: serde_json::Value = serde_json::from_str(json).map_err(|e| bad(&e.to_string()))?;
         let vocab = v["model"]["vocab"].as_object().ok_or_else(|| bad("no model.vocab"))?;
-        let table = unicode_to_byte();
+        let table = unicode_to_byte()?;
         let max = vocab.values().filter_map(|x| x.as_u64()).max().unwrap_or(0) as usize;
         let mut bytes = vec![Vec::new(); max + 1];
         for (tok, id) in vocab {
@@ -84,6 +87,28 @@ impl Tokenizer {
             special,
             special_by_id,
         })
+    }
+
+    /// Fixed, bounded Korean context, not a general text encoder. Every selected vocabulary
+    /// piece is validated against its bytes; no additional tokenizer dependency is needed.
+    pub fn filler_context(&self) -> Result<Vec<u32>, SpeechError> {
+        let previous = self.special.get("<|startofprev|>").copied().ok_or_else(|| SpeechError::Model("missing previous-context token".into()))?;
+        let mut out = vec![previous];
+        for chunk in [" 음", ",", " 어", ",", " 으음", ",", " 어어", "."] {
+            let mut remaining = chunk.as_bytes();
+            while !remaining.is_empty() {
+                let (id, bytes) = self
+                    .bytes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| !b.is_empty() && remaining.starts_with(b))
+                    .max_by_key(|(_, b)| b.len())
+                    .ok_or_else(|| SpeechError::Model("cannot encode filler context".into()))?;
+                out.push(id as u32);
+                remaining = &remaining[bytes.len()..];
+            }
+        }
+        Ok(out)
     }
 
     pub fn multilingual(&self) -> bool {
@@ -163,4 +188,79 @@ pub fn group_words(tok: &Tokenizer, ids: &[u32]) -> Vec<(String, std::ops::Range
         groups.push((pre, start..ids.len()));
     }
     groups.into_iter().map(|(b, r)| (String::from_utf8_lossy(&b).trim().to_string(), r)).filter(|(t, _)| !t.is_empty()).collect()
+}
+
+/// Tokens used for lexical confidence (text and alignment retain punctuation).
+pub fn confidence_tokens(tok: &Tokenizer, ids: &[u32], range: std::ops::Range<usize>) -> std::ops::Range<usize> {
+    let quiet = |i: usize| {
+        ids.get(i).is_some_and(|id| {
+            std::str::from_utf8(tok.token_bytes(*id))
+                .is_ok_and(|s| !s.is_empty() && s.chars().all(|c| c.is_whitespace() || c.is_ascii_punctuation() || "“”‘’«»¿¡…。，！？：、".contains(c)))
+        })
+    };
+    let mut spoken = range.clone();
+    while spoken.start < spoken.end && quiet(spoken.start) {
+        spoken.start += 1;
+    }
+    while spoken.end > spoken.start && quiet(spoken.end - 1) {
+        spoken.end -= 1;
+    }
+    if spoken.is_empty() { range } else { spoken }
+}
+
+#[cfg(test)]
+mod byte_table_tests {
+    #[test]
+    fn fixed_korean_context_round_trips_without_model_files() {
+        use std::collections::HashMap;
+        let t = super::Tokenizer {
+            bytes: (0..=255u8).map(|b| vec![b]).collect(),
+            special: HashMap::from([("<|startofprev|>".to_string(), 256)]),
+            special_by_id: HashMap::new(),
+            eot: 257,
+            sot: 258,
+            transcribe: 259,
+            translate: None,
+            no_timestamps: 260,
+            no_speech: None,
+            timestamp_begin: 261,
+            languages: Vec::new(),
+        };
+        let tokens = t.filler_context().unwrap();
+        assert_eq!(tokens[0], 256);
+        assert_eq!(t.decode(&tokens[1..]), " 음, 어, 으음, 어어.");
+        assert!(tokens.len() < 64);
+    }
+
+    #[test]
+    fn punctuation_and_space_tokens_do_not_inflate_lexical_confidence() {
+        let t = super::Tokenizer {
+            bytes: (0..=255u8).map(|b| vec![b]).collect(),
+            special: Default::default(),
+            special_by_id: Default::default(),
+            eot: 257,
+            sot: 258,
+            transcribe: 259,
+            translate: None,
+            no_timestamps: 260,
+            no_speech: None,
+            timestamp_begin: 261,
+            languages: Vec::new(),
+        };
+        let ids: Vec<_> = " hello.".bytes().map(u32::from).collect();
+        let words = super::group_words(&t, &ids);
+        assert_eq!(words[0].0, "hello.");
+        assert_eq!(super::confidence_tokens(&t, &ids, words[0].1.clone()), 1..6);
+        let ids: Vec<_> = " 음,".bytes().map(u32::from).collect();
+        assert_eq!(super::confidence_tokens(&t, &ids, 0..ids.len()), 1..4);
+    }
+
+    #[test]
+    fn unicode_table_covers_every_byte_without_panicking() {
+        let table = super::unicode_to_byte().unwrap();
+        assert_eq!(table.len(), 256);
+        let mut bytes: Vec<u8> = table.values().copied().collect();
+        bytes.sort();
+        assert_eq!(bytes, (0..=255u8).collect::<Vec<_>>());
+    }
 }

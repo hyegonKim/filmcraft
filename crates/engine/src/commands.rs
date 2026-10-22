@@ -843,6 +843,7 @@ fn build() -> Vec<CommandSpec> {
         // ================= File =================
         cmd!("file.newProject", "Project…", ["File", "New"], Some("Cmd+Alt+N"), r#"{"name":str}"#, always, |s, p| {
             let name = str_p(p, "name").unwrap_or("Untitled").to_string();
+            crate::transcript_jobs::change_document(s);
             s.project = std::sync::Arc::new(filmcraft_project::Project::new(&name));
             s.history = Default::default();
             s.history.limit = 200;
@@ -857,6 +858,7 @@ fn build() -> Vec<CommandSpec> {
         }),
         cmd!("file.openDemoProject", "Demo Project", ["File", "New"], None, "{}", always, |s, _| {
             let (p, seq) = crate::demo::demo_project(&s.media);
+            crate::transcript_jobs::change_document(s);
             s.project = std::sync::Arc::new(p);
             s.history = Default::default();
             s.history.limit = 200;
@@ -3856,6 +3858,7 @@ fn install_project(s: &mut Session, proj: filmcraft_project::Project, path: Opti
     s.media.set_use_proxies(proxies);
     s.offline = Default::default();
     let first = proj.sequences().next().map(|i| i.id);
+    crate::transcript_jobs::change_document(s);
     s.project = std::sync::Arc::new(proj);
     s.history = Default::default();
     s.history.limit = 200;

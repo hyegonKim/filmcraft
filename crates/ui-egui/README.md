@@ -84,3 +84,20 @@ buttons use `craft-ui::layout::fit_toolbar`; commands beyond the available width
 through More, including their selected state and Source/Program routing. A scrolling fallback
 retains all commands if even More cannot fit. `monitor_geometry` checks the painted readouts,
 control bounds, overflow actions and Source drag payloads across monitor widths and themes.
+
+## Graphics template previews
+
+Browse shares one library snapshot between frames and prepares thumbnail textures only when a
+card becomes visible. Its two-second external-file poll retains prepared textures when template
+content and paths are unchanged; explicit install/remove invalidation rebuilds the snapshot.
+Clipped cards retain layout and automation targets without painting or preparing thumbnails.
+The engine content cache remains responsible for thumbnail identity after actual template edits.
+`unchanged_graphics_cards_do_not_prepare_thumbnails_each_frame` covers warm frames, the file poll
+and explicit invalidation; `graphics_templates_ui` covers search, placement and template export.
+
+Control state queries and patches run in logic without ordering a hidden native window. Widget
+input still waits for actual UI passes. Backend input updates check a three-second delivery
+deadline and drop expired, unstarted batches before a restored window can execute them. This is
+not a wall-clock response guarantee when the backend itself cannot run. A gesture
+whose delivery already started is allowed to finish; it is not forcibly released or rolled back.
+`hidden_control_input_tests` covers these paths and preservation of an undelivered click's project.

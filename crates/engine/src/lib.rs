@@ -52,6 +52,7 @@ pub mod shortcuts;
 pub mod source_monitor;
 pub mod sync;
 pub mod transcript;
+mod transcript_jobs;
 pub mod trim;
 pub mod voiceover;
 
@@ -389,6 +390,8 @@ pub struct Session {
     pub mask_jobs: Vec<masks::PendingTrack>,
     /// Scene Edit Detection jobs whose results are applied when they finish.
     pub scene_jobs: Vec<scene_detect::PendingScene>,
+    pub(crate) transcript_jobs: Vec<transcript_jobs::Task>,
+    pub(crate) document_epoch: u64,
     /// Effect presets (built-in + the user's, persisted in the data directory).
     pub presets: presets::PresetLibrary,
     /// Export presets (built-in + the user's, persisted in the data directory) and favourites.
@@ -445,6 +448,7 @@ impl Job {
             "total": self.progress.total.load(Ordering::Relaxed),
             "status": self.progress.status.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             "finished": res.is_some(),
+            "cancelRequested": self.progress.cancel.load(Ordering::Relaxed),
             "result": match res { Some(Ok(r)) => serde_json::to_value(r).unwrap_or_default(), Some(Err(e)) => serde_json::json!({"error": e}), None => Value::Null },
         })
     }
@@ -492,6 +496,8 @@ impl Session {
             media_jobs: Vec::new(),
             mask_jobs: Vec::new(),
             scene_jobs: Vec::new(),
+            transcript_jobs: Vec::new(),
+            document_epoch: 0,
             presets: Default::default(),
             export_presets: Default::default(),
             export_queue: Default::default(),
@@ -587,6 +593,7 @@ impl Session {
         proxies::poll(self);
         masks::poll(self);
         scene_detect::poll(self);
+        transcript_jobs::poll(self);
         export_tools::pump_queue(self, false);
         panels::log_jobs(self);
         let Some(p) = self.persistence.as_mut() else { return };
@@ -653,6 +660,9 @@ impl Session {
 
     /// Run a command by id.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
+        if self.exec_depth == 0 && id != "jobs.cancel" {
+            transcript_jobs::poll(self);
+        }
         let spec = commands::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
         if self.exec_depth == 0 && spec.journal && self.trim_play.active() {
             self.settle_trim_playback(id);

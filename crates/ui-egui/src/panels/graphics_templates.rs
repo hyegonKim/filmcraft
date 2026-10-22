@@ -17,7 +17,7 @@
 //! dialogs: `exportTemplate.name|category|control.<n>|ok|cancel`, `replaceFonts.from|to|ok|cancel`.
 //! The UI state (`UiState::gfx_templates`) is serde, so agents can read and set it.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use filmcraft_engine::graphic_templates::{LibraryEntry, library, thumbnail_cached};
@@ -81,23 +81,38 @@ type Elems = Vec<(String, Rect, String)>;
 // ------------------------------------------------------------------------------------------------
 
 #[derive(Clone)]
-struct Lib(Arc<(f64, Vec<LibraryEntry>)>);
+struct Lib(Arc<LibrarySnapshot>);
+
+struct LibrarySnapshot {
+    at: f64,
+    entries: Vec<LibraryEntry>,
+    textures: Vec<OnceLock<egui::TextureHandle>>,
+}
 
 fn lib_id() -> egui::Id {
     egui::Id::new("gfx-template-library")
 }
 
 /// The template library, re-read at most every two seconds (or after [`invalidate`]).
-fn cached_library(app: &FilmcraftApp, ctx: &egui::Context) -> Vec<LibraryEntry> {
+fn cached_library(app: &FilmcraftApp, ctx: &egui::Context) -> Arc<LibrarySnapshot> {
     let now = ctx.input(|i| i.time);
-    if let Some(Lib(l)) = ctx.data(|d| d.get_temp::<Lib>(lib_id()))
-        && now - l.0 < 2.0
+    let previous = ctx.data(|d| d.get_temp::<Lib>(lib_id()));
+    if let Some(Lib(l)) = &previous
+        && now - l.at < 2.0
     {
-        return l.1.clone();
+        return Arc::clone(l);
     }
-    let v = library(&app.session);
-    ctx.data_mut(|d| d.insert_temp(lib_id(), Lib(Arc::new((now, v.clone())))));
-    v
+    let entries = library(&app.session);
+    // Poll disk for external edits without re-hashing unchanged template content.
+    let textures = previous
+        .filter(|Lib(l)| {
+            l.entries.len() == entries.len() && l.entries.iter().zip(&entries).all(|(old, new)| old.path == new.path && old.template == new.template)
+        })
+        .map(|Lib(l)| l.textures.clone())
+        .unwrap_or_else(|| entries.iter().map(|_| OnceLock::new()).collect());
+    let snapshot = Arc::new(LibrarySnapshot { at: now, entries, textures });
+    ctx.data_mut(|d| d.insert_temp(lib_id(), Lib(Arc::clone(&snapshot))));
+    snapshot
 }
 
 fn invalidate(ctx: &egui::Context) {
@@ -106,7 +121,12 @@ fn invalidate(ctx: &egui::Context) {
 
 const THUMB_W: u32 = 192;
 
+#[cfg(test)]
+thread_local! { static THUMBNAIL_PREPARES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 fn thumb_texture(ctx: &egui::Context, e: &LibraryEntry) -> egui::TextureHandle {
+    #[cfg(test)]
+    THUMBNAIL_PREPARES.with(|count| count.set(count.get() + 1));
     let px = thumbnail_cached(&e.template, THUMB_W);
     let key = egui::Id::new(("gfx-thumb", e.template.id.as_str(), Arc::as_ptr(&px) as usize));
     if let Some(t) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(key)) {
@@ -164,7 +184,8 @@ pub fn essential_graphics(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect)
 fn browse(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let ctx = ui.ctx().clone();
-    let lib = cached_library(app, &ctx);
+    let snapshot = cached_library(app, &ctx);
+    let lib = &snapshot.entries;
     let mut elems: Elems = Vec::new();
     let mut actions: Vec<(String, Value)> = Vec::new();
     let mut install = false;
@@ -191,9 +212,10 @@ fn browse(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     });
     b.add_space(6.0);
     let q = st.query.to_lowercase();
-    let shown: Vec<&LibraryEntry> = lib
+    let shown: Vec<(usize, &LibraryEntry)> = lib
         .iter()
-        .filter(|e| {
+        .enumerate()
+        .filter(|(_, e)| {
             let tt = &e.template;
             (st.category.is_empty() || tt.category == st.category)
                 && (crate::i18n::matches_query(&tt.name, &q)
@@ -216,34 +238,46 @@ fn browse(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
             for row in shown.chunks(cols) {
                 ui.horizontal(|ui| {
-                    for e in row {
+                    for (index, e) in row {
                         let (r, resp) = ui.allocate_exact_size(card, Sense::click_and_drag());
                         let on = selected.as_deref() == Some(e.template.id.as_str());
-                        ui.painter().rect_filled(
-                            r,
-                            4.0,
+                        if ui.is_rect_visible(r) {
+                            ui.painter().rect_filled(
+                                r,
+                                4.0,
+                                if on {
+                                    t.row_selected
+                                } else if resp.hovered() {
+                                    t.hover
+                                } else {
+                                    t.field_bg
+                                },
+                            );
+                            let ir = Rect::from_min_size(r.min + vec2(5.0, 5.0), vec2(card.x - 10.0, 84.0));
+                            // dark checker-free backdrop so white titles read
+                            ui.painter().rect_filled(ir, 2.0, Color32::from_rgb(0x2a, 0x30, 0x3a));
+                            // Hash template content only once per library snapshot, on first visibility.
+                            let tex = snapshot
+                                .textures
+                                .get(*index)
+                                .map_or_else(|| thumb_texture(ui.ctx(), e), |slot| slot.get_or_init(|| thumb_texture(ui.ctx(), e)).clone());
+                            let sz = tex.size_vec2();
+                            let k = (ir.width() / sz.x).min(ir.height() / sz.y);
+                            let tr = Rect::from_center_size(ir.center(), sz * k);
+                            ui.painter().image(tex.id(), tr, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                            ui.painter().text(
+                                pos2(r.min.x + 6.0, ir.max.y + 6.0),
+                                Align2::LEFT_TOP,
+                                crate::i18n::t(&e.template.name),
+                                Tokens::ui(11.5),
+                                t.text,
+                            );
+                            let category = crate::i18n::t(&e.template.category);
+                            let sub = if e.path.is_some() { tlf!("{category} · My Template", category) } else { category.to_string() };
+                            ui.painter().text(pos2(r.min.x + 6.0, ir.max.y + 20.0), Align2::LEFT_TOP, sub, Tokens::ui(10.0), t.text_faint);
                             if on {
-                                t.row_selected
-                            } else if resp.hovered() {
-                                t.hover
-                            } else {
-                                t.field_bg
-                            },
-                        );
-                        let ir = Rect::from_min_size(r.min + vec2(5.0, 5.0), vec2(card.x - 10.0, 84.0));
-                        // dark checker-free backdrop so white titles read
-                        ui.painter().rect_filled(ir, 2.0, Color32::from_rgb(0x2a, 0x30, 0x3a));
-                        let tex = thumb_texture(ui.ctx(), e);
-                        let sz = tex.size_vec2();
-                        let k = (ir.width() / sz.x).min(ir.height() / sz.y);
-                        let tr = Rect::from_center_size(ir.center(), sz * k);
-                        ui.painter().image(tex.id(), tr, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-                        ui.painter().text(pos2(r.min.x + 6.0, ir.max.y + 6.0), Align2::LEFT_TOP, crate::i18n::t(&e.template.name), Tokens::ui(11.5), t.text);
-                        let category = crate::i18n::t(&e.template.category);
-                        let sub = if e.path.is_some() { tlf!("{category} · My Template", category) } else { category.to_string() };
-                        ui.painter().text(pos2(r.min.x + 6.0, ir.max.y + 20.0), Align2::LEFT_TOP, sub, Tokens::ui(10.0), t.text_faint);
-                        if on {
-                            ui.painter().rect_stroke(r, 4.0, Stroke::new(1.5, t.accent), StrokeKind::Inside);
+                                ui.painter().rect_stroke(r, 4.0, Stroke::new(1.5, t.accent), StrokeKind::Inside);
+                            }
                         }
                         elems.push((format!("gfxTemplates.item.{}", e.template.id), r, e.template.name.clone()));
                         let resp = resp.on_hover_text(crate::i18n::t(&e.template.description));
@@ -787,5 +821,47 @@ fn replace_dialog(app: &mut FilmcraftApp, ctx: &egui::Context) {
         },
         Some(false) => app.ui.gfx_templates.replace = None,
         None => app.ui.gfx_templates.replace = Some(d),
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_graphics_cards_do_not_prepare_thumbnails_each_frame() {
+        let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
+        let workspace = crate::dock::find(&app.workspaces, "Captions and Graphics").unwrap();
+        app.set_workspace(&workspace);
+        THUMBNAIL_PREPARES.with(|count| count.set(0));
+        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(1600.0, 700.0)).build_eframe(move |_cc| app);
+        for _ in 0..6 {
+            let ctx = harness.ctx.clone();
+            let mut raw = std::mem::take(harness.input_mut());
+            eframe::App::raw_input_hook(harness.state_mut(), &ctx, &mut raw);
+            *harness.input_mut() = raw;
+            harness.step();
+        }
+        assert!(THUMBNAIL_PREPARES.with(|count| count.get()) > 0, "must exercise visible graphics cards");
+        THUMBNAIL_PREPARES.with(|count| count.set(0));
+        for _ in 0..3 {
+            let ctx = harness.ctx.clone();
+            let mut raw = std::mem::take(harness.input_mut());
+            eframe::App::raw_input_hook(harness.state_mut(), &ctx, &mut raw);
+            *harness.input_mut() = raw;
+            harness.step();
+        }
+        assert_eq!(THUMBNAIL_PREPARES.with(|count| count.get()), 0, "warm cards must reuse their prepared textures, not reserialize content");
+        // The two-second external-file poll must also retain unchanged thumbnails.
+        let snapshot = cached_library(harness.state(), &harness.ctx);
+        let at = snapshot.at;
+        harness.input_mut().time = Some(at + 2.1);
+        harness.step();
+        assert_eq!(THUMBNAIL_PREPARES.with(|count| count.get()), 0, "library polling must retain unchanged textures");
+        let refreshed = cached_library(harness.state(), &harness.ctx);
+        assert!(refreshed.at > at, "must exercise the external-file poll");
+        invalidate(&harness.ctx);
+        harness.step();
+        assert!(THUMBNAIL_PREPARES.with(|count| count.get()) > 0, "explicit invalidation must prepare the refreshed library");
     }
 }

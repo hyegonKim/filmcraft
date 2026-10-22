@@ -42,6 +42,23 @@ fn system_font() -> Option<Arc<FontData>> {
     .clone()
 }
 
+/// Korean transcript text needs Hangul even when the interface is English.
+fn korean_font() -> Option<Arc<FontData>> {
+    static FONT: OnceLock<Option<Arc<FontData>>> = OnceLock::new();
+    FONT.get_or_init(|| {
+        if cfg!(target_arch = "wasm32") {
+            return None;
+        }
+        filmcraft_text::fonts::scan_system();
+        let face = filmcraft_text::fonts::all_faces()
+            .into_iter()
+            .filter(|f| f.info.origin == "system" && !f.info.italic && f.covers_text("한국어 자동 전사 음 어 으음"))
+            .min_by_key(|f| (f.info.family != "Apple SD Gothic Neo", f.info.weight.abs_diff(400)))?;
+        Some(Arc::new(FontData { font: std::borrow::Cow::Owned(face.data()?), index: face.info.index, tweak: Default::default() }))
+    })
+    .clone()
+}
+
 /// Whether [`install`] has a Chinese face to add: craft-fonts Hans/Hant faces, or an installed
 /// system face (scanned once per process). The Simplified Chinese interface needs one.
 pub(crate) fn available() -> bool {
@@ -52,6 +69,12 @@ pub(crate) fn available() -> bool {
 /// interface's Latin typography and Japanese glyph forms, and covers the simplified and
 /// traditional hanzi in media and track names that Japanese fonts lack.
 pub(crate) fn install(fonts: &mut FontDefinitions) {
+    if let Some(font) = korean_font() {
+        fonts.font_data.insert("system-korean".into(), font);
+        for stack in fonts.families.values_mut() {
+            stack.push("system-korean".into());
+        }
+    }
     let chinese: Vec<_> = craft_fonts().collect();
     if chinese.is_empty() {
         if let Some(font) = system_font() {

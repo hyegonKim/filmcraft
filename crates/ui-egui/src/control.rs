@@ -499,12 +499,18 @@ pub fn inspect(app: &FilmcraftApp, ctx: &egui::Context) -> Value {
         })
     });
     json!({
+        "build": {"label": crate::build_info::label(), "number": crate::build_info::NUMBER,
+            "profile": crate::build_info::PROFILE, "commit": crate::build_info::COMMIT, "date": crate::build_info::DATE},
         "window": [size.x, size.y],
         "pixelsPerPoint": ctx.pixels_per_point(),
         "fps": app.fps,
         "keyboardFocus": keyboard_focus,
         "input": {"mode": if app.control_input_only { "controlOnly" } else { "interactive" },
-            "nativeWindowFocused": app.native_window_focused, "effectiveWindowFocused": ctx.input(|input| input.focused)},
+            "nativeWindowFocused": app.native_window_focused, "effectiveWindowFocused": ctx.input(|input| input.focused),
+            "viewportVisible":ctx.input(|input|input.viewport().visible()),
+            "viewportOccluded":ctx.input(|input|input.viewport().occluded),"viewportMinimized":ctx.input(|input|input.viewport().minimized),
+            "queuedSyntheticEvents":app.synthetic.len(),"pendingInputReplies":app.input_waiters.len(),
+            "deferredRequests":app.deferred.len(),"secondsSinceUiPass":(app.control_time-app.last_ui_time).max(0.0)},
         "ui": app.ui,
         "sourcePlayback": {"playing": app.source_playback.clock.playing, "audioClock": app.source_playback.clock.audio_clock, "playhead": app.session.state.source_playhead.0},
         "playback": {"playing": app.playback.playing, "speed": app.playback.speed, "loop": app.playback.looping, "audioClock": app.playback.audio_clock, "dropped": app.playback.meter.counts().1, "shown": app.playback.meter.counts().0, "preroll": app.playback.preroll.is_some()},

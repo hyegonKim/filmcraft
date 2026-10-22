@@ -43,7 +43,7 @@ fn words(s: &mut Session) -> Vec<String> {
 fn generate_inspect_search_and_rename() {
     let (mut s, item, start) = session();
     assert!(s.execute("transcript.select", json!({"from": 0})).is_err(), "disabled before transcribing");
-    let r = s.execute("transcript.generate", json!({"items": [item.0]})).unwrap();
+    let r = s.execute("transcript.generate", json!({"wait": true, "items": [item.0]})).unwrap();
     assert_eq!(r["items"][0]["words"], 6, "{r}");
     assert_eq!(r["items"][0]["source"], "fixed");
     assert_eq!(s.project.transcripts[&item].words.len(), 6);
@@ -75,7 +75,7 @@ fn generate_inspect_search_and_rename() {
 #[test]
 fn select_extract_and_lift_by_words() {
     let (mut s, item, _) = session();
-    s.execute("transcript.generate", json!({"items": [item.0]})).unwrap();
+    s.execute("transcript.generate", json!({"wait": true, "items": [item.0]})).unwrap();
     let rate = s.sequence_rate();
     let before = s.active_sequence().unwrap().duration();
 
@@ -107,7 +107,7 @@ fn select_extract_and_lift_by_words() {
 #[test]
 fn remove_fillers_pauses_and_create_captions() {
     let (mut s, item, _) = session();
-    s.execute("transcript.generate", json!({"items": [item.0]})).unwrap();
+    s.execute("transcript.generate", json!({"wait": true, "items": [item.0]})).unwrap();
     let before = s.active_sequence().unwrap().duration();
     let r = s.execute("transcript.removeFillers", json!({})).unwrap();
     assert_eq!(r["removed"], 1, "{r}");
@@ -162,13 +162,13 @@ fn set_delete_and_models() {
 fn generate_without_a_transcriber() {
     let (mut s, item, _) = session();
     s.transcriber = None;
-    let e = s.execute("transcript.generate", json!({"items": [item.0], "model": "nope"})).unwrap_err().to_string();
+    let e = s.execute("transcript.generate", json!({"wait": true, "items": [item.0], "model": "nope"})).unwrap_err().to_string();
     // a build without speech-to-text says that first: the command is disabled (#97)
     let why = if filmcraft_speech::available() { "unknown speech model" } else { "not available in this build" };
     assert!(e.contains(why), "{e}");
     if !filmcraft_speech::available() {
         assert!(!s.is_enabled("sequence.transcribe"), "Transcribe Sequence follows transcript.generate");
-        let e = s.execute("transcript.generate", json!({"items": [item.0]})).unwrap_err().to_string();
+        let e = s.execute("transcript.generate", json!({"wait": true, "items": [item.0]})).unwrap_err().to_string();
         assert!(e.contains("whisper") && e.contains("not available"), "{e}");
         #[cfg(not(feature = "speech-download"))]
         assert!(s.execute("transcript.downloadModel", json!({})).unwrap_err().to_string().contains("not available"));
@@ -176,6 +176,248 @@ fn generate_without_a_transcriber() {
     // defaults to the media of the open sequence's audio clips
     s.transcriber = Some(Arc::new(FixedTranscriber { transcript: Transcript::default(), id: "empty".into() }));
     assert!(s.is_enabled("sequence.transcribe"), "an installed recogniser enables Transcribe Sequence");
-    let r = s.execute("transcript.generate", json!({})).unwrap();
+    let r = s.execute("transcript.generate", json!({"wait": true, })).unwrap();
     assert!(r["items"].as_array().unwrap().len() >= 2, "{r}");
+}
+
+fn korean_review_session() -> (Session, serde_json::Value) {
+    let (mut s, item, _) = session();
+    let sin = s.active_sequence().unwrap().audio_tracks[0].items[0].source_in;
+    let mut t = Transcript { language: "ko".into(), ..Default::default() };
+    for (text, start, end) in [("안녕하세요", 0.2, 0.5), ("음,", 0.6, 0.9), ("오늘은", 1.0, 1.4), ("테스트입니다", 2.8, 3.4)] {
+        t.words.push(Word::new(text, sin + Tick::from_seconds_f64(start), sin + Tick::from_seconds_f64(end)));
+    }
+    s.execute("transcript.set", json!({"item": item.0, "transcript": t})).unwrap();
+    let preview = s.execute("transcript.previewCleanup", json!({})).unwrap();
+    (s, preview)
+}
+
+#[test]
+fn reviewed_korean_cleanup_is_read_only_selective_and_one_undo() {
+    let (mut s, preview) = korean_review_session();
+    assert_eq!(preview["candidates"].as_array().unwrap().len(), 2, "{preview}");
+    assert_eq!(preview["candidates"][0]["kind"], "filler");
+    assert_eq!(preview["candidates"][0]["text"], "음,");
+    assert_eq!(preview["candidates"][1]["kind"], "pause");
+    let before = serde_json::to_value(&s.project).unwrap();
+    let revision = s.revision;
+    s.execute("transcript.previewCleanup", json!({})).unwrap();
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), before);
+    assert_eq!(s.revision, revision);
+    s.execute("playhead.set", json!({"seconds": 0.6})).unwrap();
+    let apply = |selected| json!({"token": preview["token"], "params": preview["params"], "selected": selected});
+    let result = s.execute("transcript.applyCleanup", apply(json!([0]))).unwrap();
+    assert_eq!(result["removed"], 1);
+    assert!(!words(&mut s).contains(&"음,".into()));
+    assert!(words(&mut s).contains(&"오늘은".into()));
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), before);
+    let preview = s.execute("transcript.previewCleanup", json!({})).unwrap();
+    let result = s.execute("transcript.applyCleanup", json!({"token": preview["token"], "params": preview["params"], "selected": [0, 1]})).unwrap();
+    assert_eq!(result["removed"], 2);
+    s.active_sequence().unwrap().check().unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), before, "all cuts restored by one undo");
+    s.execute("edit.redo", json!({})).unwrap();
+    assert!(!words(&mut s).contains(&"음,".into()));
+}
+
+#[test]
+fn reviewed_cleanup_rejects_stale_and_hostile_inputs_without_changes() {
+    let (mut s, preview) = korean_review_session();
+    let before = serde_json::to_value(&s.project).unwrap();
+    for selected in [json!([]), json!([99]), json!([0, 0]), json!([-1]), json!(["0"])] {
+        assert!(s.execute("transcript.applyCleanup", json!({"token": preview["token"], "params": preview["params"], "selected": selected})).is_err());
+        assert_eq!(serde_json::to_value(&s.project).unwrap(), before);
+    }
+    for params in [json!({"minSeconds": -1}), json!({"keepSeconds": "bad"}), json!({"fillers": "음"}), json!({"fillers": [null]})] {
+        assert!(s.execute("transcript.previewCleanup", params).is_err());
+    }
+    assert!(s.execute("transcript.applyCleanup", json!({"token": preview["token"], "params": {"fillers": ["오늘은"]}, "selected": [0]})).is_err());
+    s.execute("transcript.extract", json!({"from": 0})).unwrap();
+    let changed = serde_json::to_value(&s.project).unwrap();
+    assert!(s.execute("transcript.applyCleanup", json!({"token": preview["token"], "params": preview["params"], "selected": [0]})).is_err());
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), changed);
+}
+
+#[test]
+fn reviewed_cleanup_refuses_locked_audio_video_desynchronization() {
+    let (mut s, _) = korean_review_session();
+    s.edit_sequence("Lock audio", |q, _, _| {
+        q.audio_tracks[0].locked = true;
+        Ok(())
+    })
+    .unwrap();
+    let preview = s.execute("transcript.previewCleanup", json!({})).unwrap();
+    let before = serde_json::to_value(&s.project).unwrap();
+    assert!(s.execute("transcript.applyCleanup", json!({"token": preview["token"], "params": preview["params"], "selected": [0]})).is_err());
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), before);
+}
+
+#[test]
+fn reviewed_cleanup_refuses_locked_clips_after_the_cut() {
+    let (mut s, _) = korean_review_session();
+    s.edit_sequence("Lock trailing picture", |q, _, _| {
+        let track = &mut q.video_tracks[0];
+        let mut clip = track.items[0].clone();
+        clip.start = Tick::from_seconds_f64(20.0);
+        track.items = vec![clip];
+        track.locked = true;
+        Ok(())
+    })
+    .unwrap();
+    let preview = s.execute("transcript.previewCleanup", json!({})).unwrap();
+    let before = serde_json::to_value(&s.project).unwrap();
+    assert!(s.execute("transcript.applyCleanup", json!({"token": preview["token"], "params": preview["params"], "selected": [0]})).is_err());
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), before);
+}
+
+#[test]
+fn reviewed_cleanup_preserves_hidden_second_track_speech() {
+    let (mut s, _) = korean_review_session();
+    s.edit_sequence("Add another dialogue", |q, ctx, _| {
+        let mut track = q.audio_tracks[0].clone();
+        track.id = filmcraft_project::TrackId(ctx.alloc());
+        track.items.truncate(1);
+        track.items[0].id = filmcraft_project::ClipId(ctx.alloc());
+        // Same media at a different source time is different speech, not a duplicate channel.
+        track.items[0].source_in += Tick::from_seconds_f64(0.5);
+        q.audio_tracks.push(track);
+        Ok(())
+    })
+    .unwrap();
+    let before = serde_json::to_value(&s.project).unwrap();
+    let revision = s.revision;
+    let preview = s.execute("transcript.previewCleanup", json!({})).unwrap();
+    assert_eq!(preview["candidates"][0]["actionable"], false, "hidden second-track speech must block a global ripple cut");
+    assert!(s.execute("transcript.applyCleanup", json!({"token":preview["token"],"params":preview["params"],"selected":[0]})).is_err());
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), before);
+    assert_eq!(s.revision, revision);
+}
+
+#[test]
+fn reviewed_cleanup_cuts_aligned_duplicate_audio_with_exact_undo_redo() {
+    let (mut s, _) = korean_review_session();
+    s.edit_sequence("Duplicate dialogue", |q, ctx, _| {
+        let mut track = q.audio_tracks[0].clone();
+        track.id = filmcraft_project::TrackId(ctx.alloc());
+        for clip in &mut track.items {
+            clip.id = filmcraft_project::ClipId(ctx.alloc());
+        }
+        q.audio_tracks.push(track);
+        Ok(())
+    })
+    .unwrap();
+    let before = serde_json::to_value(&s.project).unwrap();
+    let preview = s.execute("transcript.previewCleanup", json!({})).unwrap();
+    s.execute("transcript.applyCleanup", json!({"token":preview["token"],"params":preview["params"],"selected":[0]})).unwrap();
+    let after = serde_json::to_value(&s.project).unwrap();
+    let q = s.active_sequence().unwrap();
+    let ranges = |track: &filmcraft_project::Track| track.items.iter().map(|clip| (clip.start, clip.duration, clip.source_in)).collect::<Vec<_>>();
+    assert_eq!(ranges(&q.audio_tracks[0]), ranges(q.audio_tracks.last().unwrap()));
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), before);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), after);
+}
+
+#[test]
+fn aligned_source_with_different_audio_channels_is_not_a_duplicate() {
+    let (mut s, _) = korean_review_session();
+    s.edit_sequence("Split other source channel", |q, ctx, _| {
+        let mut track = q.audio_tracks[0].clone();
+        track.id = filmcraft_project::TrackId(ctx.alloc());
+        track.items.truncate(1);
+        track.items[0].id = filmcraft_project::ClipId(ctx.alloc());
+        track.items[0].source_channels = vec![1];
+        q.audio_tracks.push(track);
+        Ok(())
+    })
+    .unwrap();
+    let before = serde_json::to_value(&s.project).unwrap();
+    let preview = s.execute("transcript.previewCleanup", json!({})).unwrap();
+    assert_eq!(preview["candidates"][0]["actionable"], false);
+    assert!(s.execute("transcript.removeFillers", json!({"fillers":["음"]})).is_err());
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), before);
+}
+
+#[test]
+fn automatic_default_stream_transcript_cannot_cut_custom_channels() {
+    let (mut s, _) = korean_review_session();
+    let item = s.active_sequence().unwrap().audio_tracks[0].items[0].item;
+    let mut transcript = s.project.transcripts[&item].as_ref().clone();
+    transcript.source = "whisper-small".into();
+    for word in &mut transcript.words {
+        if word.normalized() == "음" {
+            word.filler_checked = true;
+            word.filler_bounds = Some(word.range());
+            word.filler_bounds_revision = filmcraft_project::transcript::FILLER_BOUNDS_REVISION;
+        }
+    }
+    s.execute("transcript.set", json!({"item":item.0,"transcript":transcript})).unwrap();
+    s.edit_sequence("Select different voice channel", |q, _, _| {
+        q.audio_tracks[0].items[0].source_channels = vec![1];
+        Ok(())
+    })
+    .unwrap();
+    let before = serde_json::to_value(&s.project).unwrap();
+    let preview = s.execute("transcript.previewCleanup", json!({})).unwrap();
+    assert_eq!(preview["candidates"][0]["actionable"], false);
+    assert!(preview["candidates"][0]["reason"].as_str().unwrap().contains("stream/channels"));
+    assert!(s.execute("transcript.applyCleanup", json!({"token":preview["token"],"params":preview["params"],"selected":[0]})).is_err());
+    assert_eq!(serde_json::to_value(&s.project).unwrap(), before);
+}
+
+#[test]
+fn locked_caption_and_legacy_cleanup_also_preserve_the_project() {
+    let (mut s, _) = korean_review_session();
+    s.execute("captions.newTrack", json!({})).unwrap();
+    s.execute("captions.add", json!({"text":"보존할 자막","seconds":20,"durationSeconds":1})).unwrap();
+    s.edit_sequence("Lock captions", |q, _, _| {
+        q.caption_tracks[0].locked = true;
+        Ok(())
+    })
+    .unwrap();
+    let before = serde_json::to_value(&s.project).unwrap();
+    let revision = s.revision;
+    let preview = s.execute("transcript.previewCleanup", json!({})).unwrap();
+    assert_eq!(preview["candidates"][0]["actionable"], false);
+    for (command, params) in [("transcript.removeFillers", json!({"fillers":["음"]})), ("transcript.removePauses", json!({"minSeconds":1}))] {
+        assert!(s.execute(command, params).is_err());
+        assert_eq!(serde_json::to_value(&s.project).unwrap(), before);
+        assert_eq!(s.revision, revision);
+    }
+}
+
+#[test]
+fn zero_duration_transcript_commands_preserve_the_project() {
+    let (mut s, item, _) = session();
+    let source_in = s.active_sequence().unwrap().audio_tracks[0].items[0].source_in;
+    let at = source_in + Tick::from_seconds_f64(0.2);
+    s.execute("transcript.set", json!({"item":item.0,"transcript":{"language":"ko","words":[{"text":"음","start":at.0,"end":at.0}]}})).unwrap();
+    let before = s.project.clone();
+    let revision = s.revision;
+    for command in ["transcript.select", "transcript.extract", "transcript.lift"] {
+        let error = s.execute(command, json!({"from":0})).unwrap_err().to_string();
+        assert!(error.contains("timing"), "{command}: {error}");
+        assert!(Arc::ptr_eq(&s.project, &before));
+        assert_eq!(s.revision, revision);
+    }
+    assert_eq!(s.execute("transcript.inspect", json!({})).unwrap()["words"][0]["timingValid"], false);
+}
+
+#[test]
+fn unconfirmed_automatic_filler_cannot_be_applied_even_with_a_valid_preview_token() {
+    let (mut s, item, _) = session();
+    let source_in = s.active_sequence().unwrap().audio_tracks[0].items[0].source_in;
+    let a = source_in + Tick::from_seconds_f64(0.5);
+    let b = source_in + Tick::from_seconds_f64(1.5);
+    s.execute("transcript.set", json!({"item":item.0,"transcript":{"source":"whisper-small","language":"ko","words":[{"text":"음","start":a.0,"end":b.0}]}}))
+        .unwrap();
+    let preview = s.execute("transcript.previewCleanup", json!({})).unwrap();
+    assert_eq!(preview["candidates"][0]["actionable"], false);
+    let before = s.project.clone();
+    assert!(s.execute("transcript.applyCleanup", json!({"token":preview["token"],"params":preview["params"],"selected":[0]})).is_err());
+    assert!(Arc::ptr_eq(&before, &s.project));
+    assert_eq!(s.execute("transcript.removeFillers", json!({"fillers":["음"]})).unwrap()["removed"], 0);
 }

@@ -453,6 +453,10 @@ fn about_tab(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
     ui.add_space(6.0);
     ui.heading("FilmCraft");
     ui.label(tlf!("Version {version}", version = env!("CARGO_PKG_VERSION")));
+    let identity = crate::build_info::label();
+    let response = ui.label(&identity);
+    app.auto.add("about.build", response.rect, &identity);
+    ui.label(format!("{} · {}", crate::build_info::DATE, crate::build_info::COMMIT));
     ui.label(tl!("A clean-room, pure-Rust non-linear video editor. Part of the ArtCraft family."));
     ui.add_space(10.0);
     let mut link = |ui: &mut egui::Ui, id: &str, icon: Icon, label: &str, url: &str, primary: bool| {

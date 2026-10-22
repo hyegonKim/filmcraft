@@ -60,7 +60,7 @@ impl Default for TtsDraft {
         TtsDraft {
             text: String::new(),
             language: "en-US".into(),
-            voice: if natural_installed() { "kokoro-heart".into() } else { filmcraft_tts::default_voice_id().into() },
+            voice: if natural_installed() { "kokoro-heart".into() } else { default_installed_voice("en-US") },
             pitch: VocalPitch::Default,
             pace: 1.0,
             advanced_open: true,
@@ -76,6 +76,18 @@ impl TtsDraft {
     fn params(&self) -> serde_json::Value {
         json!({"text": self.text, "voice": self.voice, "pitch": self.pitch.id(), "pace": self.pace})
     }
+}
+
+fn default_installed_voice(language: &str) -> String {
+    filmcraft_tts::voices_in(filmcraft_engine::transcript::models_dir().as_deref())
+        .iter()
+        .filter(|v| v.language == language && v.installed)
+        .min_by_key(|v| match v.engine {
+            "system" => 0,
+            "neural" => 1,
+            _ => 2,
+        })
+        .map_or_else(|| filmcraft_tts::default_voice_id().to_string(), |v| v.id.to_string())
 }
 
 /// The natural voice package is downloaded.
@@ -246,8 +258,12 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let lang_name = filmcraft_tts::LANGUAGES.iter().find(|(id, _)| *id == d.language).map_or(d.language.as_str(), |(_, n)| n);
         let cb = egui::ComboBox::from_id_salt("tts-language").selected_text(lang_name).width(w).show_ui(ui, |ui| {
             for (id, name) in filmcraft_tts::LANGUAGES {
-                if ui.selectable_label(d.language == *id, *name).clicked() {
+                let r = ui.selectable_label(d.language == *id, *name);
+                auto.add(&format!("tts.language.{id}"), visible(ui, r.rect), name);
+                if r.clicked() {
                     d.language = id.to_string();
+                    // A language switch must also choose a voice that actually speaks it.
+                    d.voice = default_installed_voice(id);
                 }
             }
         });
@@ -256,11 +272,15 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         label(ui, &t, "Voice");
         let voice_name = voices.iter().find(|v| v.id == d.voice).map_or(d.voice.as_str(), |v| v.name);
         let cb = egui::ComboBox::from_id_salt("tts-voice").selected_text(voice_name).width(w).show_ui(ui, |ui| {
-            for (engine, heading) in [("neural", "Natural voices"), ("basic", "Basic voices (built in)")] {
+            for (engine, heading) in [("system", "System voices (local)"), ("neural", "Natural voices"), ("basic", "Basic voices (built in)")] {
+                if !voices.iter().any(|v| v.language == d.language && v.engine == engine) {
+                    continue;
+                }
                 ui.label(egui::RichText::new(heading).color(t.text_faint).size(11.0));
                 for v in voices.iter().filter(|v| v.language == d.language && v.engine == engine) {
                     let label = if v.engine == "neural" && !v.installed { format!("{} (download)", v.name) } else { v.name.to_string() };
                     let r = ui.selectable_label(d.voice == v.id, label).on_hover_text(v.description);
+                    auto.add(&format!("tts.voice.{}", v.id), visible(ui, r.rect), v.name);
                     if r.clicked() {
                         d.voice = v.id.to_string();
                     }
@@ -268,6 +288,9 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             }
         });
         auto.add("tts.voice", visible(ui, cb.response.rect), "Voice");
+        if d.voice == "macos-yuna" {
+            ui.label(tl!("Korean speech uses the installed macOS Yuna voice locally. No upload."));
+        }
         let natural = filmcraft_tts::catalog::find(&d.voice).is_some();
         if natural && !installed {
             ui.add_space(6.0);

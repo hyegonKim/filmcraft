@@ -182,6 +182,10 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 
 ## G12. AI features
 
+- **Local variant, 2026-10-16:** reviewed Korean transcript cleanup and optional macOS Yuna
+  narration are implemented in this checkout. They do not close the model-based gaps below.
+  See [the evidence and priorities](korean-feature-comparison.md).
+
 - **Missing:** Object Mask (Premiere 26.0, #406, #694), Generative Extend (needs a large video
   model; not reachable locally), media-intelligence search, caption translation, model-based
   Enhance Speech, Auto Reframe beyond heuristics, auto colour, Auto-Tag Audio Types.
@@ -246,6 +250,10 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 
 ## G19. Speech to text off in release builds
 
+- **Local variant, 2026-10-16:** this checkout is built with `whisper,macos-voices`, and Korean
+  transcription / cleanup is verified. Upstream release defaults are unchanged. Synchronous
+  transcription still needs background progress and cancellation (local P1).
+
 - **Missing:** the `whisper` feature is off by default and in releases, so Transcribe Sequence,
   text-based editing and auto captions need a source build.
 - **Estimate:** 5–10 h (model download UX, licence check).
@@ -260,4 +268,5 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-16 | local variant | Recorded Korean reviewed cleanup and macOS narration; distinguished local speech-enabled build from upstream releases. No global parity score changed. |
 | 2026-10-10 | major | Created from ROADMAP.md's "Where we are lacking" (2026-10-05); re-ranked against Premiere 26.5.2 and the 188 open issues; added `.prproj`, 10-bit / 4:2:2 camera decode, launch crashes and missing PR CI, localization, delivery formats |

@@ -111,7 +111,7 @@ fn transcribe_sequence_runs_transcript_generate_on_its_audio() {
     // a project selection must not change what Transcribe Sequence transcribes
     let music = s.project.items.values().find(|i| i.name == "Ambient_Score.wav").unwrap().id;
     s.execute("project.select", json!({"items": [music.0]})).unwrap();
-    let r = s.execute("sequence.transcribe", json!({"track": "A1"})).unwrap();
+    let r = s.execute("sequence.transcribe", json!({"wait": true, "track": "A1"})).unwrap();
     let q = s.active_sequence().unwrap();
     let expected: std::collections::BTreeSet<_> = q.audio_tracks[0].items.iter().map(|i| i.item).collect();
     assert_eq!(r["items"].as_array().unwrap().len(), expected.len(), "{r}");
@@ -119,7 +119,7 @@ fn transcribe_sequence_runs_transcript_generate_on_its_audio() {
         assert!(s.project.transcripts.contains_key(i));
     }
     assert!(!s.project.transcripts.contains_key(&music));
-    assert!(s.execute("sequence.transcribe", json!({"track": "A9"})).is_err());
+    assert!(s.execute("sequence.transcribe", json!({"wait": true, "track": "A9"})).is_err());
 }
 
 #[test]

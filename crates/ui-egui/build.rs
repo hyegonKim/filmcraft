@@ -13,6 +13,13 @@ use std::fmt::Write as _;
 use serde_json::Value;
 
 fn main() {
+    // Build identity belongs to the running executable, never a mutable installed plist.
+    for (key, fallback) in [("FILMCRAFT_BUILD_NUMBER", "local"), ("FILMCRAFT_BUILD_SHA", "unknown"), ("FILMCRAFT_BUILD_DATE", "unknown")] {
+        println!("cargo:rerun-if-env-changed={key}");
+        let value = std::env::var(key).unwrap_or_else(|_| fallback.into());
+        println!("cargo:rustc-env={key}={value}");
+    }
+    println!("cargo:rustc-env=FILMCRAFT_BUILD_PROFILE={}", std::env::var("PROFILE").unwrap_or_else(|_| "unknown".into()));
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contributors");
     let json = read(&dir.join("contributors.json"), "the About window shows no contributors", |t| serde_json::from_str::<Value>(t).map_err(|e| e.to_string()))
         .unwrap_or(Value::Null);

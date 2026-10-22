@@ -217,8 +217,8 @@ fn fillers_are_found_with_phrases_and_removed() {
     more.push("you".into());
     assert_eq!(find_fillers(&w, &more), vec![4..5, 15..16, 18..20]);
     let ranges = filler_ranges(&w, &hits, R);
-    // "Um," 3.70–4.00 → nearest frames 3.68–4.00; "uh" 8.20–8.50 → 8.20–8.48
-    assert_eq!(ranges.iter().map(|r| (r.start, r.end())).collect::<Vec<_>>(), vec![(s(3.68), s(4.00)), (s(8.20), s(8.48))]);
+    // Round inward: "Um," 3.70–4.00 → 3.72–4.00; never delete the preceding 20 ms.
+    assert_eq!(ranges.iter().map(|r| (r.start, r.end())).collect::<Vec<_>>(), vec![(s(3.72), s(4.00)), (s(8.20), s(8.48))]);
     let mut next = 1000;
     let mut ctx = EditCtx { next_id: &mut next, media_duration: &media_dur, media_start: &|_| Tick::ZERO, min_duration: R.frame_duration() };
     ripple_delete_ranges(&mut q, ranges, &mut ctx);
@@ -290,9 +290,118 @@ fn captions_never_overlap_with_dense_words() {
             track: 0,
             speaker: if i % 3 == 0 { Some("A".into()) } else { Some("B".into()) },
             confidence: 1.0,
+            filler_requires_check: false,
+            filler_checked: false,
+            filler_bounds_revision: 0,
+            filler_bounds: None,
         })
         .collect();
     let rules = CaptionRules { gap_frames: 1, ..Default::default() };
     let b = caption_blocks(&words, &rules, R);
     check_blocks(&b, &rules);
+}
+
+#[test]
+fn zero_duration_words_never_invent_a_frame_to_delete() {
+    let mut words = sequence_words(&whole(), &transcripts());
+    words[0].end = words[0].start;
+    assert!(word_range(&words, 0, 0, R).is_none());
+    assert!(word_range(&words, 0, 1, R).is_none());
+    assert!(word_range(&words, usize::MAX, usize::MAX, R).is_none());
+    words[1].start = words[0].end + s(2.0);
+    words[1].end = words[1].start + s(0.2);
+    assert!(find_pauses(&words[..2], s(0.5), s(0.1), R).is_empty());
+    assert!(filler_ranges(&words, &[0..0, usize::MAX..usize::MAX], R).is_empty());
+    let mut t = fixture();
+    t.words[0].end = t.words[0].start;
+    assert!(media_word_range(&t, 0, 0, R).is_none());
+}
+
+#[test]
+fn automatic_fillers_require_verified_interior_bounds() {
+    let mut words = sequence_words(&whole(), &transcripts());
+    words[4].filler_requires_check = true;
+    assert!(filler_ranges(&words, std::slice::from_ref(&(4..5)), R).is_empty());
+    words[4].filler_checked = true;
+    words[4].filler_bounds_revision = filmcraft_project::transcript::FILLER_BOUNDS_REVISION;
+    words[4].filler_bounds = Some(TimeRange::from_bounds(words[4].start + s(0.08), words[4].end - s(0.08)));
+    let bounds = words[4].filler_bounds.unwrap();
+    let cuts = filler_ranges(&words, std::slice::from_ref(&(4..5)), R);
+    assert!(!cuts.is_empty());
+    assert!(cuts[0].start >= bounds.start && cuts[0].end() <= bounds.end());
+}
+
+#[test]
+fn filler_cut_rounds_both_edges_inside_confirmed_audio() {
+    let mut words = sequence_words(&whole(), &transcripts());
+    let start = words[4].start + s(0.091);
+    let end = words[4].end - s(0.071);
+    words[4].filler_requires_check = true;
+    words[4].filler_checked = true;
+    words[4].filler_bounds_revision = filmcraft_project::transcript::FILLER_BOUNDS_REVISION;
+    words[4].filler_bounds = Some(TimeRange::from_bounds(start, end));
+    let cuts = filler_ranges(&words, std::slice::from_ref(&(4..5)), R);
+    assert_eq!(cuts.len(), 1);
+    assert!(cuts[0].start >= start);
+    assert!(cuts[0].end() <= end);
+    assert!(cuts[0].start - start < R.frame_duration());
+    assert!(end - cuts[0].end() < R.frame_duration());
+}
+
+#[test]
+fn automatic_filler_phrases_cannot_bridge_unverified_audio() {
+    let base = sequence_words(&whole(), &transcripts());
+    let mut words = vec![base[4].clone(), base[4].clone()];
+    for (i, word) in words.iter_mut().enumerate() {
+        word.start = s(1.0 + i as f64 * 3.0);
+        word.end = word.start + s(0.6);
+        word.filler_requires_check = true;
+        word.filler_checked = true;
+        word.filler_bounds_revision = filmcraft_project::transcript::FILLER_BOUNDS_REVISION;
+        word.filler_bounds = Some(TimeRange::from_bounds(word.start + s(0.08), word.end - s(0.08)));
+    }
+    assert!(filler_ranges(&words, std::slice::from_ref(&(0..2)), R).is_empty());
+    assert_eq!(filler_ranges(&words, &[0..1, 1..2], R).len(), 2);
+}
+
+#[test]
+fn pause_cut_never_rounds_into_the_next_spoken_word() {
+    let base = sequence_words(&whole(), &transcripts());
+    let mut words = vec![base[4].clone(), base[4].clone()];
+    words[0].start = s(0.2);
+    words[0].end = s(1.013);
+    words[1].start = s(2.027);
+    words[1].end = s(2.5);
+    let cuts = find_pauses(&words, s(0.5), Tick::ZERO, R);
+    assert_eq!(cuts.len(), 1);
+    assert!(cuts[0].start >= words[0].end);
+    assert!(cuts[0].end() <= words[1].start);
+}
+
+#[test]
+fn previous_policy_filler_bounds_must_be_rechecked() {
+    let mut words = sequence_words(&whole(), &transcripts());
+    words[4].filler_requires_check = true;
+    words[4].filler_checked = true;
+    words[4].filler_bounds = Some(TimeRange::from_bounds(words[4].start + s(0.1), words[4].end - s(0.1)));
+    assert!(filler_ranges(&words, std::slice::from_ref(&(4..5)), R).is_empty());
+    words[4].filler_bounds_revision = filmcraft_project::transcript::FILLER_BOUNDS_REVISION;
+    assert_eq!(filler_ranges(&words, std::slice::from_ref(&(4..5)), R).len(), 1);
+}
+
+#[test]
+fn early_transcript_presence_obeys_trim_and_higher_track_masking() {
+    let tr = transcripts();
+    let mut q = whole();
+    assert!(has_sequence_words(&q, &tr));
+    // Higher track has a transcript, but no word inside its trimmed source range;
+    // it nevertheless masks the lower track, exactly as the full projection does.
+    q.audio_tracks[0].items[0].source_in = s(30.0);
+    q.audio_tracks[1].items.push(clip(101, 0.0, 10.0, 0.0));
+    assert!(sequence_words(&q, &tr).is_empty());
+    assert!(!has_sequence_words(&q, &tr));
+    q.audio_tracks[0].items[0].enabled = false;
+    assert!(has_sequence_words(&q, &tr));
+    q.audio_tracks[1].items[0].reverse = true;
+    assert!(!has_sequence_words(&q, &tr));
 }

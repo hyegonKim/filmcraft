@@ -164,6 +164,13 @@ Evidence for the cross-cutting rows:
   Speech and Auto Reframe are DSP / heuristics. Missing: Object Mask (#406, #694), Generative
   Extend, media-intelligence search, caption translation, auto colour.
 
+### Local variant (2026-10-16)
+
+This checkout additionally enables local Whisper and optional macOS Korean narration, and adds
+reviewed pause/filler cleanup. See [the Korean evidence and development priorities](korean-feature-comparison.md).
+This is a focused workflow improvement, not a re-measurement of the global parity scores above;
+the model-based AI, cross-platform and long-form transcription gaps remain.
+
 ## Three readiness numbers
 
 | Audience | Ready % | Opus 5.5 agent wall-clock hours to ~95% | Work that dominates |

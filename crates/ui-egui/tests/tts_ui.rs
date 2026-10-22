@@ -20,7 +20,9 @@ impl Driver {
         session.execute("file.openDemoProject", json!({})).expect("demo project");
         session.execute("file.projectSettings.scratchDisks", json!({"captured": scratch})).expect("scratch disk");
         let (tx, rx) = channel();
-        let app = FilmcraftApp::new(session).with_control(rx);
+        let mut app = FilmcraftApp::new(session).with_control(rx);
+        // General UI regressions remain independent of installed system voices / downloads.
+        app.ui.tts.voice = "basic-female".into();
         let harness = Harness::builder().with_size(egui::vec2(1600.0, 980.0)).with_max_steps(10_000).build_eframe(move |_cc| app);
         let mut d = Driver { harness, tx };
         d.frames(4);
@@ -177,6 +179,26 @@ fn write_add_click_to_edit_and_save_in_place() {
     d.exec("edit.undo", json!({}));
     d.frames(3);
     assert_eq!(d.exec("tts.inspect", json!({"clip": clip}))["narration"]["text"].as_str().unwrap(), text);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn language_switch_selects_a_matching_voice() {
+    if !filmcraft_tts::LANGUAGES.iter().any(|(id, _)| *id == "ko-KR") {
+        return;
+    }
+    let dir = scratch("korean-language");
+    let mut d = Driver::demo(&dir);
+    d.exec("window.panel.TextToSpeech", json!({}));
+    d.frames(3);
+    d.click("tts.language");
+    d.click("tts.language.ko-KR");
+    assert_eq!(d.draft()["language"], "ko-KR");
+    assert_eq!(d.draft()["voice"], "macos-yuna");
+    d.click("tts.language");
+    d.click("tts.language.en-US");
+    assert_eq!(d.draft()["language"], "en-US");
+    assert_eq!(d.draft()["voice"], "macos-samantha");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

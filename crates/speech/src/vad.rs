@@ -27,18 +27,24 @@ pub fn frame_db(audio: &[f32]) -> Vec<f32> {
 
 /// The speech/silence threshold in dBFS.
 pub fn threshold(db: &[f32]) -> f32 {
+    thresholds(db).0
+}
+
+fn thresholds(db: &[f32]) -> (f32, f32) {
     if db.is_empty() {
-        return -60.0;
+        return (-60.0, -60.0);
     }
     // digital silence (< −100 dBFS) would drag the floor far below the recording's own noise
     let mut s: Vec<f32> = db.iter().copied().filter(|v| *v > -100.0).collect();
     if s.is_empty() {
-        return -60.0;
+        return (-60.0, -60.0);
     }
     s.sort_by(f32::total_cmp);
     let q = |p: f32| s[((s.len() - 1) as f32 * p) as usize];
     let (floor, speech) = (q(0.10), q(0.95));
-    (floor + 0.3 * (speech - floor)).max(floor + 6.0)
+    let high = (floor + 0.3 * (speech - floor)).max(floor + 6.0);
+    let low = (floor + 0.12 * (speech - floor)).max(floor + 3.0).min(high);
+    (high, low)
 }
 
 /// Move word bounds inward past silent frames (see the module docs).
@@ -47,7 +53,7 @@ pub fn tighten_words(audio: &[f32], words: &mut [Word]) {
     if db.is_empty() {
         return;
     }
-    let th = threshold(&db);
+    let (th, edge_th) = thresholds(&db);
     let frame_ticks = TICKS_PER_SAMPLE * FRAME as i64;
     for w in words {
         let a = (w.start.0 / frame_ticks).max(0) as usize;
@@ -66,6 +72,16 @@ pub fn tighten_words(audio: &[f32], words: &mut [Word]) {
         // nothing voiced at all: leave the word alone
         if (s..e).all(|f| db[f] < th) {
             continue;
+        }
+        // Keep quiet consonant edges near confirmed speech, not arbitrary low-level
+        // breathing/noise far ahead of it. Limit hysteresis to 30 ms at either edge.
+        let first = s;
+        while s > a && first - s < 3 && db[s - 1] >= edge_th {
+            s -= 1;
+        }
+        let last = e;
+        while e < b && e - last < 3 && db[e] >= edge_th {
+            e += 1;
         }
         if s > a {
             w.start = filmcraft_time::Tick(s as i64 * frame_ticks);
@@ -93,5 +109,40 @@ mod tests {
         assert_eq!(w[0].start, seconds_tick(0.5));
         assert_eq!(w[0].end, seconds_tick(1.0));
         assert_eq!((w[1].start, w[1].end), (seconds_tick(2.0), seconds_tick(2.5)));
+    }
+}
+
+#[cfg(test)]
+mod quiet_edges {
+    use super::*;
+    #[test]
+    fn weak_onset_and_release_are_not_trimmed_like_silence() {
+        // A quiet consonant next to a stronger vowel must not disappear at a hard RMS gate.
+        let mut audio = vec![0.0001; 16000];
+        for (i, sample) in audio.iter_mut().enumerate().take(11200).skip(4800) {
+            let amplitude = if (5280..10720).contains(&i) { 0.3 } else { 0.0005 };
+            *sample = amplitude * (i as f32 * 0.2).sin();
+        }
+        let mut words = vec![Word::new("quiet onset", crate::seconds_tick(0.0), crate::seconds_tick(1.0))];
+        tighten_words(&audio, &mut words);
+        assert!(words[0].start <= crate::seconds_tick(0.3));
+        assert!(words[0].end >= crate::seconds_tick(0.7));
+    }
+}
+
+#[cfg(test)]
+mod distant_noise {
+    use super::*;
+    #[test]
+    fn distant_quiet_noise_is_not_absorbed_as_a_word_onset() {
+        let mut audio = vec![0.0001; 16000];
+        for (i, sample) in audio.iter_mut().enumerate().take(14400).skip(3200) {
+            let amplitude = if i >= 11200 { 0.3 } else { 0.0005 };
+            *sample = amplitude * (i as f32 * 0.2).sin();
+        }
+        let mut words = vec![Word::new("voice after quiet noise", crate::seconds_tick(0.0), crate::seconds_tick(1.0))];
+        tighten_words(&audio, &mut words);
+        assert!(words[0].start >= crate::seconds_tick(0.67));
+        assert!(words[0].start <= crate::seconds_tick(0.7));
     }
 }

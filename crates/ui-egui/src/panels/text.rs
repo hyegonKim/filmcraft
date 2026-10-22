@@ -14,6 +14,45 @@ use crate::FilmcraftApp;
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
 
+const TRANSCRIPT_PAGE_WORDS: usize = 500;
+
+#[derive(Clone, Debug)]
+pub struct TranscriptCache {
+    project: std::sync::Arc<filmcraft_project::Project>,
+    sequence: Option<filmcraft_project::ItemId>,
+    words: std::sync::Arc<Vec<filmcraft_edit::transcript::SeqWord>>,
+    query: String,
+    hits: std::sync::Arc<Vec<std::ops::Range<usize>>>,
+}
+
+impl TranscriptCache {
+    fn search(&mut self, query: &str) -> std::sync::Arc<Vec<std::ops::Range<usize>>> {
+        if self.query != query {
+            self.hits = std::sync::Arc::new(filmcraft_edit::transcript::search(&self.words, query));
+            self.query = query.to_owned();
+        }
+        self.hits.clone()
+    }
+}
+
+pub(super) fn cached_words(app: &mut FilmcraftApp) -> std::sync::Arc<Vec<filmcraft_edit::transcript::SeqWord>> {
+    let valid = app
+        .ui
+        .transcript_cache
+        .as_ref()
+        .is_some_and(|c| std::sync::Arc::ptr_eq(&c.project, &app.session.project) && c.sequence == app.session.state.active_sequence);
+    if !valid {
+        app.ui.transcript_cache = Some(TranscriptCache {
+            project: app.session.project.clone(),
+            sequence: app.session.state.active_sequence,
+            words: std::sync::Arc::new(filmcraft_engine::transcript::sequence_words(&app.session)),
+            query: String::new(),
+            hits: std::sync::Arc::default(),
+        });
+    }
+    app.ui.transcript_cache.as_ref().map(|c| c.words.clone()).unwrap_or_default()
+}
+
 const TABS: [&str; 3] = ["Transcript", "Captions", "Graphics"];
 
 /// The width a tab label needs: 7 px per character, which the strip was laid out with for Latin
@@ -53,12 +92,19 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         }
         x += w + 6.0;
     }
-    let body = Rect::from_min_max(pos2(rect.min.x, rect.min.y + 34.0), rect.max);
+    let review = Rect::from_min_size(pos2(rect.min.x + 12.0, rect.min.y + 34.0), vec2((rect.width() - 24.0).max(0.0), 24.0));
+    let response = ui.put(review, egui::Button::new(tl!("Review pauses / fillers")));
+    app.auto.add("text.transcript.review", response.rect, "Review pauses and fillers");
+    if response.clicked() {
+        app.ui.transcript_review.open = true;
+    }
+    let body = Rect::from_min_max(pos2(rect.min.x, rect.min.y + 64.0), rect.max);
     match app.ui.text_tab.as_str() {
         "Captions" => captions(app, ui, body),
         "Transcript" => transcript(app, ui, body),
         _ => crate::dock::placeholder(ui, body, &t, tl!("Graphics text search arrives with M10.1–M10.2")),
     }
+    super::transcript_review::show(app, ui);
 }
 
 fn tool_button(app: &mut FilmcraftApp, ui: &mut egui::Ui, r: Rect, icon: Icon, id: &str, label: &str, enabled: bool) -> bool {
@@ -159,7 +205,11 @@ fn captions(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             break;
         }
         if tool_button(app, ui, r, icon, id, label, enabled) {
-            actions.push((cmd.into(), params));
+            if cmd == "transcript.removeFillers" {
+                app.ui.transcript_review.open = true;
+            } else {
+                actions.push((cmd.into(), params));
+            }
         }
         x += 28.0;
     }
@@ -278,13 +328,19 @@ fn captions(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
 }
 
 fn transcript(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
+    let mut rect = rect;
+    if !app.session.jobs.is_empty() {
+        let top = Rect::from_min_size(rect.min, vec2(rect.width(), 30.0));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(top), |ui| super::transcript_review::jobs(app, ui));
+        rect.min.y += 32.0;
+    }
     let t = app.tokens;
     if app.session.active_sequence().is_none() {
         crate::dock::placeholder(ui, rect, &t, tl!("Open a sequence to see its transcript"));
         return;
     }
     let mut actions: Vec<(String, Value)> = Vec::new();
-    let words = filmcraft_engine::transcript::sequence_words(&app.session);
+    let words = cached_words(app);
     if words.is_empty() {
         let c = rect.center();
         icons::paint(ui.painter(), Rect::from_center_size(c - vec2(0.0, 70.0), vec2(40.0, 40.0)), Icon::Captions, t.text_dim);
@@ -298,10 +354,13 @@ fn transcript(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let r = Rect::from_center_size(c + vec2(0.0, 26.0), vec2(200.0, 26.0));
         let resp = ui.interact(r, egui::Id::new("text.transcript.generate"), Sense::click());
         ui.painter().rect_filled(r, 13.0, if resp.hovered() { t.accent_hover } else { t.accent });
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, tl!("Transcribe"), Tokens::semibold(12.0), Color32::WHITE);
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, tl!("Transcribe Korean"), Tokens::semibold(12.0), Color32::WHITE);
         app.auto.add("text.transcript.generate", r, "Transcribe");
         if resp.clicked() {
-            actions.push(("transcript.generate".into(), json!({})));
+            actions.push((
+                "transcript.generate".into(),
+                json!({"language": "ko", "model": app.ui.transcript_review.model, "preserveFillers":app.ui.transcript_review.preserve_fillers}),
+            ));
         }
         run(app, ui, actions);
         return;
@@ -315,7 +374,7 @@ fn transcript(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(bar.min, vec2(sw, 24.0))));
     let sresp = crate::widgets::search_field(&mut child, &mut app.ui.transcript_search, tl!("Search"), sw, &t);
     app.auto.add("text.transcript.search", sresp.rect, "Search transcript");
-    let hits: Vec<std::ops::Range<usize>> = filmcraft_edit::transcript::search(&words, &app.ui.transcript_search);
+    let hits = app.ui.transcript_cache.as_mut().map(|c| c.search(&app.ui.transcript_search)).unwrap_or_default();
     let mut x = bar.min.x + sw + 10.0;
     let range = sel.map(|(a, b)| json!({"from": a.min(b), "to": a.max(b)}));
     let tools: [(Icon, &str, &str, bool, &str, Value); 4] = [
@@ -333,23 +392,55 @@ fn transcript(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             if cmd.ends_with("extract") || cmd.ends_with("lift") {
                 app.ui.transcript_sel = None;
             }
-            actions.push((cmd.into(), params));
+            if cmd == "transcript.removeFillers" {
+                app.ui.transcript_review.open = true;
+            } else {
+                actions.push((cmd.into(), params));
+            }
         }
         x += 28.0;
     }
 
     // ---- paragraphs of words
-    let list = Rect::from_min_max(pos2(rect.min.x + 6.0, bar.max.y + 8.0), pos2(rect.max.x - 6.0, rect.max.y - 4.0));
+    let pages = words.len().div_ceil(TRANSCRIPT_PAGE_WORDS).max(1);
+    app.ui.transcript_page = app.ui.transcript_page.min(pages - 1);
+    let page_rect = Rect::from_min_size(pos2(rect.min.x + 10.0, bar.max.y + 4.0), vec2((rect.width() - 20.0).max(0.0), 24.0));
+    let mut navigation = ui.new_child(egui::UiBuilder::new().max_rect(page_rect));
+    navigation.horizontal(|ui| {
+        for (id, label, next) in [
+            ("previous", "<", app.ui.transcript_page.saturating_sub(1)),
+            ("next", ">", (app.ui.transcript_page + 1).min(pages - 1)),
+            ("last", "Last", pages - 1),
+        ] {
+            let r = ui.add_enabled(next != app.ui.transcript_page, egui::Button::new(label));
+            app.auto.add(&format!("text.transcript.page.{id}"), r.rect, label);
+            if r.clicked() {
+                app.ui.transcript_page = next;
+            }
+        }
+        ui.label(format!("{} / {} · {} words", app.ui.transcript_page + 1, pages, words.len()));
+        if let Some(hit) = hits.first() {
+            let r = ui.button("Match");
+            app.auto.add("text.transcript.page.match", r.rect, "Go to first search match");
+            if r.clicked() {
+                app.ui.transcript_page = hit.start / TRANSCRIPT_PAGE_WORDS;
+            }
+        }
+    });
+    let page_start = app.ui.transcript_page * TRANSCRIPT_PAGE_WORDS;
+    let page_end = page_start.saturating_add(TRANSCRIPT_PAGE_WORDS).min(words.len());
+    let list = Rect::from_min_max(pos2(rect.min.x + 6.0, bar.max.y + 34.0), pos2(rect.max.x - 6.0, rect.max.y - 4.0));
     ui.painter().rect_filled(list, 3.0, t.app_bg);
     let ph = app.session.playhead();
     let current = filmcraft_edit::transcript::word_at(&words, ph);
-    let paras = filmcraft_edit::transcript::paragraphs(&words, filmcraft_time::Tick::from_seconds_f64(1.5));
+    let paras = filmcraft_edit::transcript::paragraphs(&words[page_start..page_end], filmcraft_time::Tick::from_seconds_f64(1.5));
     let rate = app.session.sequence_rate();
     let df = app.session.active_sequence().is_some_and(|q| q.settings.drop_frame);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(list.shrink(6.0)).id_salt("transcript-list"));
     egui::ScrollArea::vertical().auto_shrink([false, false]).id_salt("transcript-scroll").show(&mut child, |ui| {
         ui.set_width(list.width() - 16.0);
-        for (pi, pr) in paras.iter().enumerate() {
+        for (pi, local) in paras.iter().enumerate() {
+            let pr = (local.start + page_start)..(local.end + page_start);
             let w0 = &words[pr.start];
             let head = format!("{}  {}", w0.speaker.as_deref().unwrap_or(tl!("Speaker")), format_time(w0.start, rate, df, TimeDisplay::Timecode, 48_000));
             let hr = ui.label(egui::RichText::new(head).size(11.0).color(t.text_dim).strong());
@@ -359,7 +450,7 @@ fn transcript(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 for i in pr.clone() {
                     let w = &words[i];
                     let in_sel = sa.is_some_and(|a| i >= a) && sb.is_some_and(|b| i <= b);
-                    let hit = hits.iter().any(|h| h.contains(&i));
+                    let hit = hits.get(hits.partition_point(|h| h.end <= i)).is_some_and(|h| h.contains(&i));
                     let mut text = egui::RichText::new(&w.text).size(13.0).color(if Some(i) == current { t.hot_text } else { t.text });
                     if in_sel {
                         text = text.background_color(t.row_selected);
@@ -385,7 +476,7 @@ fn transcript(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     run(app, ui, actions);
 }
 
-fn filmcraft_speech_available(app: &FilmcraftApp) -> bool {
+pub(super) fn filmcraft_speech_available(app: &FilmcraftApp) -> bool {
     app.session.transcriber.is_some() || filmcraft_engine::transcript::speech_available()
 }
 
@@ -497,5 +588,20 @@ mod tests {
         for ((width, chars), label) in widths[3..].iter().zip([5.0_f32, 6.0, 7.0]).zip(&labels[3..]) {
             assert!(*width > chars * 7.0 * 1.5, "{label}: {width} px");
         }
+    }
+}
+
+#[cfg(test)]
+mod search_cache_tests {
+    use super::*;
+    #[test]
+    fn search_reuses_results_until_query_or_project_changes() {
+        let project = std::sync::Arc::new(filmcraft_project::Project::default());
+        let mut cache = TranscriptCache { project, sequence: None, words: std::sync::Arc::default(), query: String::new(), hits: std::sync::Arc::default() };
+        let first = cache.search("한국어");
+        let second = cache.search("한국어");
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert!(!std::sync::Arc::ptr_eq(&first, &cache.search("다른 검색")));
+        assert!(cache.search("").is_empty());
     }
 }

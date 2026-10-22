@@ -39,6 +39,10 @@ pub struct SeqWord {
     pub track: usize,
     pub speaker: Option<String>,
     pub confidence: f32,
+    pub filler_requires_check: bool,
+    pub filler_checked: bool,
+    pub filler_bounds_revision: u8,
+    pub filler_bounds: Option<TimeRange>,
 }
 
 impl SeqWord {
@@ -60,7 +64,22 @@ fn ticks(t: f64) -> Tick {
 /// The sequence transcript: words of every transcribed clip on the audio tracks, in sequence
 /// time order (see the module docs for the rules).
 pub fn sequence_words(seq: &Sequence, transcripts: &Transcripts) -> Vec<SeqWord> {
-    let mut out: Vec<SeqWord> = Vec::new();
+    let mut out = Vec::new();
+    visit_sequence_words(seq, transcripts, |word| {
+        out.push(word);
+        false
+    });
+    out.sort_by_key(|w| (w.start, w.track));
+    out
+}
+
+/// Same visibility rules as `sequence_words`, stopping at the first visible word. Menu
+/// enablement must not clone and sort an hour-long transcript several times per UI frame.
+pub fn has_sequence_words(seq: &Sequence, transcripts: &Transcripts) -> bool {
+    visit_sequence_words(seq, transcripts, |_| true)
+}
+
+fn visit_sequence_words(seq: &Sequence, transcripts: &Transcripts, mut visit: impl FnMut(SeqWord) -> bool) -> bool {
     // timeline ranges already served by a higher track's transcribed clips
     let mut claimed: Vec<TimeRange> = Vec::new();
     for (ti, track) in seq.audio_tracks.iter().enumerate() {
@@ -81,7 +100,7 @@ pub fn sequence_words(seq: &Sequence, transcripts: &Transcripts) -> Vec<SeqWord>
                 if mid < it.start || mid >= it.end() || claimed.iter().any(|r| r.contains(mid)) {
                     continue;
                 }
-                out.push(SeqWord {
+                if visit(SeqWord {
                     text: w.text.clone(),
                     start: a.max(it.start),
                     end: b.min(it.end()).max(a.max(it.start)),
@@ -91,13 +110,22 @@ pub fn sequence_words(seq: &Sequence, transcripts: &Transcripts) -> Vec<SeqWord>
                     track: ti,
                     speaker: tr.speaker_name(w),
                     confidence: w.confidence,
-                });
+                    filler_requires_check: tr.language == "ko" && tr.source.starts_with("whisper"),
+                    filler_checked: w.filler_checked,
+                    filler_bounds_revision: w.filler_bounds_revision,
+                    filler_bounds: w.filler_bounds.and_then(|r| {
+                        let start = to_tl(r.start).max(a.max(it.start));
+                        let end = to_tl(Tick(r.start.0.checked_add(r.duration.0)?)).min(b.min(it.end()));
+                        (end > start).then(|| TimeRange::from_bounds(start, end))
+                    }),
+                }) {
+                    return true;
+                }
             }
         }
         claimed.extend(mine);
     }
-    out.sort_by_key(|w| (w.start, w.track));
-    out
+    false
 }
 
 /// Index of the word being spoken at `t` (the last word starting at or before `t` whose end is
@@ -144,6 +172,10 @@ pub fn search(words: &[SeqWord], query: &str) -> Vec<std::ops::Range<usize>> {
 /// Timeline range of words `a..=b`, snapped outward to frames.
 pub fn word_range(words: &[SeqWord], a: usize, b: usize, rate: FrameRate) -> Option<TimeRange> {
     let (a, b) = (a.min(b), a.max(b));
+    let selected = words.get(a..=b)?;
+    if selected.iter().any(|w| w.end <= w.start) {
+        return None;
+    }
     let (s, e) = (words.get(a)?.start, words.get(b)?.end);
     let s = rate.snap(s);
     let mut e2 = rate.snap(e);
@@ -157,6 +189,10 @@ pub fn word_range(words: &[SeqWord], a: usize, b: usize, rate: FrameRate) -> Opt
 /// Source-monitor In/Out from a text selection).
 pub fn media_word_range(t: &Transcript, a: usize, b: usize, rate: FrameRate) -> Option<TimeRange> {
     let (a, b) = (a.min(b), a.max(b));
+    let selected = t.words.get(a..=b)?;
+    if selected.iter().any(|w| w.end <= w.start) {
+        return None;
+    }
     let (s, e) = (t.words.get(a)?.start, t.words.get(b)?.end);
     let s = rate.snap(s);
     let mut e2 = rate.snap(e);
@@ -172,6 +208,9 @@ pub fn media_word_range(t: &Transcript, a: usize, b: usize, rate: FrameRate) -> 
 pub fn find_pauses(words: &[SeqWord], min: Tick, keep: Tick, rate: FrameRate) -> Vec<TimeRange> {
     let mut out = Vec::new();
     for p in words.windows(2) {
+        if p.iter().any(|w| w.end <= w.start) {
+            continue;
+        }
         let (a, b) = (p[0].end, p[1].start);
         if b - a < min || b <= a {
             continue;
@@ -219,14 +258,35 @@ pub fn find_fillers(words: &[SeqWord], fillers: &[String]) -> Vec<std::ops::Rang
     out
 }
 
-/// Timeline ranges removing the filler words `hits`: each word range snapped to the nearest frames
-/// (never into the neighbouring words' frames).
+/// Conservative filler edit ranges: automatic Korean words need independently confirmed bounds,
+/// snapped inward so frame rounding never expands the approved cut.
 pub fn filler_ranges(words: &[SeqWord], hits: &[std::ops::Range<usize>], rate: FrameRate) -> Vec<TimeRange> {
     let mut out = Vec::new();
     for h in hits {
+        let Some(selected) = words.get(h.clone()).filter(|w| !w.is_empty()) else { continue };
+        if selected.iter().any(|w| w.end <= w.start) {
+            continue;
+        }
+        if words.get(h.start.wrapping_sub(1)).is_some_and(|w| w.end <= w.start) || words.get(h.end).is_some_and(|w| w.end <= w.start) {
+            continue;
+        }
+        if selected.iter().any(|w| w.filler_requires_check)
+            && (selected.len() != 1
+                || selected.iter().any(|w| {
+                    !w.filler_checked || w.filler_bounds.is_none() || w.filler_bounds_revision != filmcraft_project::transcript::FILLER_BOUNDS_REVISION
+                }))
+        {
+            // Separate confirmed words do not confirm the audio between them.
+            continue;
+        }
         let (a, b) = (h.start, h.end - 1);
-        let mut s = rate.snap_nearest(words[a].start);
-        let mut e = rate.snap_nearest(words[b].end);
+        let start = words[a].filler_bounds.map(|r| r.start).unwrap_or(words[a].start);
+        let end = words[b].filler_bounds.map(|r| r.end()).unwrap_or(words[b].end);
+        let mut s = rate.snap(start);
+        if s < start {
+            s += rate.frame_duration();
+        }
+        let mut e = rate.snap(end);
         if a > 0 && s < words[a - 1].end {
             s = rate.snap(words[a - 1].end) + rate.frame_duration();
         }

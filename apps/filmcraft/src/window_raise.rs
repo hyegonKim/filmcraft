@@ -13,9 +13,15 @@ pub fn raise_without_focus() -> bool {
     {
         let Some(mtm) = objc2::MainThreadMarker::new() else { return false };
         let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+        if app.isHidden() {
+            app.unhideWithoutActivation();
+        }
         let windows = app.windows();
         for w in windows.iter() {
-            if w.isVisible() || w.isMiniaturized() {
+            if w.isMiniaturized() {
+                w.deminiaturize(None);
+            }
+            if w.isVisible() {
                 w.orderFrontRegardless();
             }
         }

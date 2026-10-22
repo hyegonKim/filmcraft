@@ -489,6 +489,12 @@ pub struct UiState {
     /// Text panel ▸ Transcript: search text.
     #[serde(default)]
     pub transcript_search: String,
+    #[serde(default)]
+    pub transcript_page: usize,
+    #[serde(skip)]
+    pub transcript_cache: Option<crate::panels::text::TranscriptCache>,
+    #[serde(default)]
+    pub transcript_review: crate::panels::transcript_review::ReviewUi,
     /// Preferences ▸ Playback: play the rendered range when a preview render finishes.
     #[serde(default = "yes")]
     pub play_after_render: bool,
@@ -974,7 +980,10 @@ impl Default for UiState {
             text_tab: captions_tab(),
             caption_search: String::new(),
             transcript_sel: None,
+            transcript_page: 0,
+            transcript_cache: None,
             transcript_search: String::new(),
+            transcript_review: Default::default(),
             play_after_render: true,
             mixer_fx_open: false,
             mixer_hidden: Vec::new(),

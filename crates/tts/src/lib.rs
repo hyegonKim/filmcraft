@@ -13,6 +13,8 @@ pub mod catalog;
 pub mod formant;
 #[cfg(feature = "kokoro")]
 pub mod kokoro;
+#[cfg(all(target_os = "macos", feature = "macos-voices"))]
+pub mod macos;
 #[cfg(feature = "kokoro")]
 pub mod neural;
 pub mod script;
@@ -122,14 +124,22 @@ pub trait Voice: Send + Sync {
     fn synthesize(&self, text: &str, params: &Params) -> Result<Audio, TtsError>;
 }
 
-/// Languages offered (English only for now).
+/// Languages offered by this build.
+#[cfg(not(all(target_os = "macos", feature = "macos-voices")))]
 pub const LANGUAGES: &[(&str, &str)] = &[("en-US", "English (United States)")];
+#[cfg(all(target_os = "macos", feature = "macos-voices"))]
+pub const LANGUAGES: &[(&str, &str)] = &[("en-US", "English (United States)"), ("ko-KR", "한국어 (대한민국)")];
 
 /// Every voice FilmCraft knows: the built-in voices, then the neural voices (installed when their
 /// package is downloaded into `models_dir`).
 pub fn voices_in(models_dir: Option<&std::path::Path>) -> Vec<VoiceInfo> {
     let installed = models_dir.is_some_and(catalog::installed) && cfg!(feature = "kokoro");
-    formant::VOICES.iter().map(|v| v.info).chain(catalog::VOICES.iter().map(|v| VoiceInfo { installed, ..v.info })).collect()
+    let mut voices: Vec<_> = formant::VOICES.iter().map(|v| v.info).chain(catalog::VOICES.iter().map(|v| VoiceInfo { installed, ..v.info })).collect();
+    #[cfg(all(target_os = "macos", feature = "macos-voices"))]
+    voices.extend([macos::INFO, macos::ENGLISH_INFO]);
+    // Also builds without the optional platform adapter.
+    let _ = &mut voices;
+    voices
 }
 
 /// The built-in voices (always available).
@@ -148,6 +158,11 @@ pub fn voice(id: &str) -> Result<Box<dyn Voice>, TtsError> {
 
 /// The voice `id`: built in, or (feature `kokoro`) a neural voice from the package in `models_dir`.
 pub fn voice_in(id: &str, models_dir: Option<&std::path::Path>) -> Result<Box<dyn Voice>, TtsError> {
+    #[cfg(all(target_os = "macos", feature = "macos-voices"))]
+    if id == macos::INFO.id || id == macos::ENGLISH_INFO.id {
+        let (info, system_name) = if id == macos::INFO.id { (macos::INFO, "Yuna") } else { (macos::ENGLISH_INFO, "Samantha") };
+        return Ok(Box::new(macos::SystemVoice { info, system_name }));
+    }
     if catalog::find(id).is_some() {
         #[cfg(feature = "kokoro")]
         {
@@ -170,6 +185,10 @@ pub fn default_voice_id() -> &'static str {
 
 /// The sentence "Hear this voice" plays.
 pub const SAMPLE_SENTENCE: &str = "Hello! This is how I sound when I read your script.";
+
+pub fn sample_sentence(voice: &str) -> &'static str {
+    if voice == "macos-yuna" { "안녕하세요. 한국어 나레이션 목소리를 미리 들어보세요." } else { SAMPLE_SENTENCE }
+}
 
 /// Validate a script before synthesis: length, and that it says something.
 pub fn check_text(text: &str) -> Result<(), TtsError> {

@@ -69,6 +69,8 @@ impl From<std::io::Error> for SpeechError {
 /// Transcription options.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Options {
+    /// Experimental Korean filler context. Off by default: prompting can also hallucinate fillers.
+    pub preserve_fillers: bool,
     /// ISO 639-1 language code; `None` = detect from the first 30 s.
     pub language: Option<String>,
     /// Label speakers ([`diarize`]); otherwise every word gets speaker 0.
@@ -79,7 +81,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { language: None, diarize: true, max_speakers: 6 }
+        Self { preserve_fillers: false, language: None, diarize: true, max_speakers: 6 }
     }
 }
 

@@ -38,6 +38,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("source.playback.toggle", "Source Play/Stop", [], None),
     uic!("source.playback.play", "Play Source", [], None),
     uic!("source.playback.stop", "Stop Source", [], None),
+    uic!("playback.previewRange", "Preview Candidate Range", [], None),
     uic!("playback.toggle", "Play/Stop", [], Some("Space")),
     uic!("playback.forward", "Shuttle Right", [], Some("L")),
     uic!("playback.stop", "Shuttle Stop", [], Some("K")),
@@ -327,6 +328,18 @@ pub fn invoke(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut params:
         {
             app.toggle_source_play()?;
             return Ok(json!({"playing": app.source_playback.clock.playing}));
+        }
+        "playback.previewRange" => {
+            let start = params.get("start").and_then(Value::as_i64).ok_or("start must be ticks")?;
+            let end = params.get("end").and_then(Value::as_i64).ok_or("end must be ticks")?;
+            let duration = app.session.active_sequence().ok_or("no sequence")?.duration().0;
+            if start < 0 || end <= start || end > duration {
+                return Err("invalid candidate range".into());
+            }
+            app.session.execute("playhead.set", json!({"time": start})).map_err(|e| e.to_string())?;
+            app.play(1.0);
+            app.playback.stop_at = Some(filmcraft_time::Tick(end));
+            return Ok(json!({"playing": true}));
         }
         "playback.toggle" => {
             app.toggle_play(1.0);

@@ -46,11 +46,24 @@ Speed: 2.2–2.3× real time on one desktop CPU (Linux x86-64, load average ≈ 
 builds), e.g. 186 s of speech in 84 s; model load 0.5 s. Reproduce with the `narrate` example and
 `filmcraft-speech`'s `transcribe` example.
 
+## Optional macOS Korean and English voices
+
+The `macos-voices` feature on macOS adds `macos-yuna` and `macos-samantha` through the installed OS speech client
+`/usr/bin/say`. The adapter is Rust, invokes no shell, reuses FilmCraft's WAV reader and does not
+bundle an executable or voice assets. Yuna and Samantha must already be installed; OS voice terms apply.
+Scripts remain local. Pace, base pitch and exact `[pause 1s]` markers are supported. Embedded
+macOS control tags in user text are refused. Input length/segment count, runtime and output size
+are bounded; temporary speech files are private and cleaned after completion or an error.
+
+`FILMCRAFT_TEST_SYSTEM_VOICE=1 cargo test -p filmcraft-tts --features macos-voices` exercises the
+installed voice; hostile-parameter tests run without that environment flag too. This is an
+optional Mac adapter, not an additional bundled neural model for Windows/Linux/web.
+
 ## Limitations
 
 - The built-in voices are **robotic** and nearly unintelligible to a recogniser (above); they are
   the no-download fallback and the test voice.
-- English (United States) only. Words outside CMUdict go through letter-to-sound rules and are
+- The formant and Kokoro voices support English (United States) only. Words outside CMUdict go through letter-to-sound rules and are
   often mispronounced (see `crates/tts-text/README.md`); homographs take the first pronunciation.
 - About 2× faster than real time on the CPU: a one-minute narration takes about 30 s. The UI runs
   synthesis as a background job.
