@@ -121,6 +121,33 @@ fn menu_items_toggles_and_help() {
     assert_eq!(d.call("ui.menu.invoke", json!({"id": "file.importFromMediaBrowser"}))["ok"], false);
 }
 
+/// #2623: the engine's on/off commands in the Sequence and Markers menus show their state, so
+/// choosing one visibly turns it on or off.
+#[test]
+fn engine_toggles_show_their_checkmark() {
+    let mut d = Driver::new();
+    let checked = |d: &mut Driver, id: &str| {
+        let menus = d.ok("ui.menu.list", json!({}));
+        menus.as_array().unwrap().iter().find(|m| m["id"] == id).unwrap_or_else(|| panic!("{id} not in menus"))["checked"].clone()
+    };
+    for (id, on) in [
+        ("sequence.snap", true),
+        ("sequence.linkedSelection", true),
+        ("sequence.selectionFollowsPlayhead", false),
+        ("sequence.showThroughEdits", false),
+        ("markers.rippleSequenceMarkers", false),
+        ("markers.copyPasteIncludesSequenceMarkers", false),
+    ] {
+        assert_eq!(checked(&mut d, id), json!(on), "{id} before");
+        d.menu(id);
+        assert_eq!(checked(&mut d, id), json!(!on), "{id} after choosing it");
+    }
+    assert!(d.app().session.state.ripple_sequence_markers);
+    d.menu("markers.rippleSequenceMarkers");
+    assert_eq!(checked(&mut d, "markers.rippleSequenceMarkers"), json!(false));
+    assert!(!d.app().session.state.ripple_sequence_markers);
+}
+
 #[test]
 fn import_image_sequence_from_the_file_menu_and_media_browser() {
     let dir = std::env::temp_dir().join(format!("fc-ui-imgseq-{}", std::process::id()));
@@ -147,6 +174,32 @@ fn import_image_sequence_from_the_file_menu_and_media_browser() {
     let r = d.ok("ui.menu.invoke", json!({"id": "file.importFromMediaBrowser", "params": {"imageSequence": true}}));
     assert_eq!(r["imageSequences"][0]["frames"], 3);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn find_dialog_handles_short_or_malformed_rows_without_panicking() {
+    for rows in
+        [json!([]), json!([{"column": "Name", "operator": "contains", "text": "ocean"}]), Value::Null, json!(["invalid row"]), json!({"invalid": "array"})]
+    {
+        let mut d = Driver::new();
+        d.ok("ui.set", json!({"focused": "Project"}));
+        d.menu("edit.find");
+        d.app().ui.extras.dialog.as_mut().unwrap().params["rows"] = rows.clone();
+        d.frames(3);
+        assert!(d.has("find.row.0.text") && d.has("find.row.1.text") && d.has("find.ok"), "Find must remain usable for {rows}");
+        d.click("find.ok");
+        if !d.app().ui.extras.dialog.as_ref().unwrap().error.is_empty() {
+            // An empty query is a validation error, not a rendering failure. It must
+            // remain editable so the user can supply text and run a valid search.
+            d.click("find.row.0.text");
+            d.ok("ui.type", json!({"text": "ocean"}));
+            d.click("find.ok");
+        }
+        let draft = d.app().ui.extras.dialog.as_ref().unwrap();
+        assert!(draft.error.is_empty(), "{rows}: {}", draft.error);
+        d.click("find.cancel");
+        assert!(!d.dialog_open());
+    }
 }
 
 #[test]

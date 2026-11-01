@@ -35,6 +35,8 @@ mod file_filters;
 mod graphics;
 mod logging;
 #[cfg(target_os = "macos")]
+mod native_color;
+#[cfg(target_os = "macos")]
 mod native_menu;
 mod window_raise;
 
@@ -80,7 +82,7 @@ fn tell(text: &str, error: bool) {
 fn main() -> eframe::Result {
     // Windows: the update helper is a copy of this program started with `--finish-update`.
     #[cfg(windows)]
-    if let Some(result) = craft_update::self_update::finish(&craft_update::suite::FILMCRAFT, &std::env::args_os().skip(1).collect::<Vec<_>>()) {
+    if let Some(result) = craft_update::self_update::finish(&filmcraft_ui_egui::UPDATE_APP, &std::env::args_os().skip(1).collect::<Vec<_>>()) {
         std::process::exit(i32::from(result.is_err()));
     }
     // First, so the panic hook and every start-up record are logged (`logging`).
@@ -164,6 +166,15 @@ fn main() -> eframe::Result {
     // The window could not be created (no usable GPU / graphics driver, no display): say so
     // instead of exiting silently, and keep the reason in the crash log.
     if let Err(e) = &started {
+        // `--control-input-only` without a control server: the session is unreachable by design,
+        // and an unattended launch cannot dismiss a dialog. Exit directly with the reason in the
+        // log (#3436); every other start failure keeps the window-failure dialog below.
+        if let eframe::Error::AppCreation(inner) = e
+            && inner.downcast_ref::<control_server::ControlServerRequired>().is_some()
+        {
+            log::error!("{inner}");
+            std::process::exit(1);
+        }
         let msg = format!("FilmCraft could not start its window: {e}\n\nUpdating the graphics driver usually fixes this.");
         log::error!("{msg}");
         filmcraft_ui_egui::crash::record(&msg);
@@ -200,6 +211,13 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
     Box::new(move |cc| {
         filmcraft_ui_egui::install_ime_reset_callbacks(&cc.egui_ctx);
         created.store(true, Ordering::Relaxed);
+        // Start the control server before anything touches recovery state: `file.recover`
+        // consumes its candidate, and an input-only session that must abort (no server) may not
+        // take that step first, or the recovered work is lost (#3436).
+        let control = control_port.map(|port| control_server::start(port, cc.egui_ctx.clone()));
+        if control_input_only && let Some((_, _, Some(why))) = &control {
+            return Err(Box::new(control_server::ControlServerRequired(why.reason())));
+        }
         // A fallback graphics mode says so in the window, with a button back to the default.
         let notice = graphics.degraded().then(|| {
             let start = graphics.clone();
@@ -339,19 +357,30 @@ fn app_creator(launch: Launch, graphics: graphics::GraphicsStart, created: Arc<A
         app.hooks.pick_open_project = Some(Box::new(|| {
             rfd::FileDialog::new()
                 .add_filter(filmcraft_ui_egui::i18n::t("FilmCraft Project"), &file_filters::extensions(&["fcproj", "prproj"]))
+                // #1644: where the system MIME database doesn't know `.fcproj`, the project
+                // filter hides every saved project; "All files" keeps them reachable.
+                .add_filter(filmcraft_ui_egui::i18n::t("All files"), &file_filters::all_files())
                 .pick_file()
                 .map(|p| p.to_string_lossy().to_string())
         }));
         #[cfg(target_os = "macos")]
         {
-            let (rx, update) = native_menu::install(&app, cc.egui_ctx.clone());
+            let (rx, update, text_menu) = native_menu::install(&app, cc.egui_ctx.clone());
+            app.hooks.pick_color = Some(native_color::picker(text_menu));
             app.command_inbox = Some(rx);
             app.hooks.menu_changed = Some(update);
             app.ui.show_menu_bar = false;
         }
-        if let Some(port) = control_port {
-            let rx = control_server::start(port, cc.egui_ctx.clone());
+        if let Some((rx, ready, disabled)) = control {
             app = if control_input_only { app.with_control_input_only(rx) } else { app.with_control(rx) };
+            // The token cause is shown in the app as a fully translated sentence (the English
+            // `reason()` stays for the log and the input-only error); a bind failure stays in the
+            // log for now — port-collision reporting is #3318's rework.
+            if let Some(control_server::DisabledWhy::Token) = &disabled {
+                app = app.with_control_notice(filmcraft_ui_egui::ControlNotice::Token);
+            }
+            // From here the app drains the queue on its first pass: stop rejecting requests.
+            ready.store(true, Ordering::Relaxed);
         }
         Ok(Box::new(app))
     })
@@ -371,8 +400,8 @@ fn clipboard_media() -> Option<filmcraft_ui_egui::ClipboardMedia> {
 
 /// Open a file in its default application, or reveal it in the file manager (Edit Original,
 /// Reveal Log Files).
-fn open_path(path: &str, reveal: bool) -> Result<(), String> {
-    let mut cmd = if cfg!(target_os = "macos") {
+fn open_path_command(path: &str, reveal: bool) -> std::process::Command {
+    if cfg!(target_os = "macos") {
         let mut c = std::process::Command::new("open");
         if reveal {
             c.arg("-R");
@@ -381,11 +410,14 @@ fn open_path(path: &str, reveal: bool) -> Result<(), String> {
         c
     } else if cfg!(target_os = "windows") {
         let mut c = std::process::Command::new("explorer");
+        // Project/media paths may use either separator, but Explorer's /select parser
+        // does not resolve forward-slash paths as filesystem objects.
+        let path = path.replace('/', "\\");
         if reveal {
-            c.arg(format!("/select,{path}"));
-        } else {
-            c.arg(path);
+            // Keep the switch outside the path's automatic quoting when it contains spaces.
+            c.arg("/select,");
         }
+        c.arg(path);
         c
     } else {
         // Linux file managers have no select-file flag: open the parent folder instead.
@@ -393,8 +425,11 @@ fn open_path(path: &str, reveal: bool) -> Result<(), String> {
         let p = std::path::Path::new(path);
         c.arg(if reveal { p.parent().unwrap_or(p) } else { p });
         c
-    };
-    cmd.spawn().map(|_| ()).map_err(|e| format!("can't open {path}: {e}"))
+    }
+}
+
+fn open_path(path: &str, reveal: bool) -> Result<(), String> {
+    open_path_command(path, reveal).spawn().map(|_| ()).map_err(|e| format!("can't open {path}: {e}"))
 }
 
 /// The GPU export frame renderer (filmcraft-gpu's off-screen compositor behind filmcraft-export's
@@ -468,6 +503,8 @@ fn run_dialog_off_thread(dialog: filmcraft_ui_egui::native_dialogs::FileDialog) 
     let t = |s: &str| filmcraft_ui_egui::i18n::t(s).to_string();
     let media = t("Media");
     let project = t("FilmCraft Project");
+    let all_files = t("All files");
+    let all_files_exts = file_filters::all_files();
     let project_exts = project_patterns();
     let dialog = prepare_dialog(dialog);
     let (tx, rx) = std::sync::mpsc::channel();
@@ -480,11 +517,19 @@ fn run_dialog_off_thread(dialog: filmcraft_ui_egui::native_dialogs::FileDialog) 
                 }
                 FileDialog::OpenFile { filter, exts } => rfd::FileDialog::new().add_filter(&filter, &exts).pick_file().map(path).into_iter().collect(),
                 FileDialog::Relink { exts, .. } => rfd::FileDialog::new().add_filter(&media, &exts).pick_file().map(path).into_iter().collect(),
-                FileDialog::OpenProject => rfd::FileDialog::new().add_filter(&project, &project_exts).pick_file().map(path).into_iter().collect(),
+                FileDialog::OpenProject => rfd::FileDialog::new()
+                    .add_filter(&project, &project_exts)
+                    // #1644: same "All files" fallback as the synchronous picker, so a
+                    // project hidden by an unregistered `.fcproj` MIME type stays openable.
+                    .add_filter(&all_files, &all_files_exts)
+                    .pick_file()
+                    .map(path)
+                    .into_iter()
+                    .collect(),
                 FileDialog::SaveProject { name } => {
                     rfd::FileDialog::new().add_filter(&project, &project_exts).set_file_name(name).save_file().map(path).into_iter().collect()
                 }
-                FileDialog::SaveAs { filter, exts, name } => {
+                FileDialog::SaveAs { filter, exts, name, .. } => {
                     rfd::FileDialog::new().add_filter(&filter, &exts).set_file_name(name).save_file().map(path).into_iter().collect()
                 }
                 FileDialog::Folder { at } => {
@@ -521,7 +566,7 @@ fn prepare_dialog(dialog: filmcraft_ui_egui::native_dialogs::FileDialog) -> film
     match dialog {
         FileDialog::OpenFiles { exts } => FileDialog::OpenFiles { exts: patterns(exts) },
         FileDialog::OpenFile { filter, exts } => FileDialog::OpenFile { filter: t(&filter), exts: patterns(exts) },
-        FileDialog::SaveAs { filter, exts, name } => FileDialog::SaveAs { filter: t(&filter), exts: patterns(exts), name },
+        FileDialog::SaveAs { filter, exts, name, adds_ext } => FileDialog::SaveAs { filter: t(&filter), exts: patterns(exts), name, adds_ext },
         FileDialog::Relink { exts, hint } => FileDialog::Relink { exts: patterns(exts), hint },
         other => other,
     }
@@ -535,6 +580,24 @@ fn project_patterns() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn explorer_commands_use_windows_separators() {
+        for (input, expected) in [
+            ("C:/QA folder/한글 프로젝트.fcproj", r"C:\QA folder\한글 프로젝트.fcproj"),
+            (r"C:\QA folder/clip,one.mp4", r"C:\QA folder\clip,one.mp4"),
+            ("//server/share/clip.mp4", r"\\server\share\clip.mp4"),
+        ] {
+            for reveal in [false, true] {
+                let command = super::open_path_command(input, reveal);
+                assert_eq!(command.get_program(), "explorer");
+                let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+                let expected = if reveal { vec!["/select,".to_string(), expected.to_string()] } else { vec![expected.to_string()] };
+                assert_eq!(args, expected, "reveal={reveal}, input={input}");
+            }
+        }
+    }
+
     /// Start-up registers the hardware decoders whether or not anything is logged (no logger is
     /// installed here, as in a normal run).
     #[test]
@@ -559,7 +622,7 @@ mod tests {
         for dialog in [
             FileDialog::OpenFiles { exts: mp4() },
             FileDialog::OpenFile { filter: "Media".into(), exts: mp4() },
-            FileDialog::SaveAs { filter: "Media".into(), exts: mp4(), name: "clip.mp4".into() },
+            FileDialog::SaveAs { filter: "Media".into(), exts: mp4(), name: "clip.mp4".into(), adds_ext: true },
             FileDialog::Relink { exts: mp4(), hint },
         ] {
             let exts = match super::prepare_dialog(dialog) {
@@ -572,5 +635,7 @@ mod tests {
         let project = super::project_patterns();
         assert_eq!(project.first().map(String::as_str), Some("fcproj"));
         assert!(project.iter().any(|e| e == "[fF][cC][pP][rR][oO][jJ]"), "{project:?}");
+        // #1644: the Open Project dialog's "All files" fallback is a single `*`.
+        assert_eq!(super::file_filters::all_files(), ["*"]);
     }
 }

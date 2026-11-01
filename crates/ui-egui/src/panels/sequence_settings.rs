@@ -75,6 +75,7 @@ pub fn open(app: &mut FilmcraftApp) {
     let name = app.session.state.active_sequence.and_then(|id| app.session.project.item(id)).map(|i| i.name.clone()).unwrap_or_default();
     app.ui.sequence_settings = SequenceSettingsDraft {
         tab: "general".into(),
+        bin: None,
         name,
         new_sequence: false,
         video_tracks: 3,
@@ -102,6 +103,7 @@ pub fn open_new(app: &mut FilmcraftApp) {
     let n = app.session.project.sequences().count() + 1;
     app.ui.sequence_settings = SequenceSettingsDraft {
         tab: "general".into(),
+        bin: None,
         new_sequence: true,
         video_tracks: 3,
         audio_tracks: 3,
@@ -127,6 +129,9 @@ pub fn open_new(app: &mut FilmcraftApp) {
 /// on the new sequence; empty when they are the defaults.
 fn new_sequence_params(d: &SequenceSettingsDraft) -> (Map<String, Value>, Map<String, Value>) {
     let mut p = Map::new();
+    if let Some(bin) = d.bin {
+        p.insert("bin".into(), json!(bin));
+    }
     let name = d.name.trim();
     if !name.is_empty() {
         p.insert("name".into(), json!(name));
@@ -270,7 +275,9 @@ fn row<R>(ui: &mut egui::Ui, label_w: f32, label: &str, enabled: bool, add: impl
 /// A greyed-out list showing `value`, with the "not supported yet" hint (or `hint`).
 fn fixed_combo(ui: &mut egui::Ui, elems: &mut Elems, id: &str, value: &str, width: f32, hint: &str) {
     let r = ui
-        .add_enabled_ui(false, |ui| egui::ComboBox::from_id_salt(("seq-settings-fixed", id)).selected_text(t(value)).width(width).show_ui(ui, |_| {}).response)
+        .add_enabled_ui(false, |ui| {
+            craft_ui::ComboBox::from_id_salt(("seq-settings-fixed", id)).selected_text(t(value)).width(width).show_ui(ui, |_| {}).response
+        })
         .inner
         .on_disabled_hover_text(t(hint));
     elems.push((format!("sequenceSettings.{id}"), r.rect, value.to_string()));
@@ -313,7 +320,7 @@ fn general(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, cur: &SequenceSetti
         // no row limit of our own: the list grows to egui's popup limit (`Spacing::default_area_size`,
         // 400 px), so every rate up to 119.88 shows without scrolling (the default 200 px stopped
         // before 29.97)
-        let resp = egui::ComboBox::from_id_salt("seq-settings-timebase").selected_text(&shown).width(list_w).height(f32::INFINITY).show_ui(ui, |ui| {
+        let resp = craft_ui::ComboBox::from_id_salt("seq-settings-timebase").selected_text(&shown).width(list_w).height(f32::INFINITY).show_ui(ui, |ui| {
             for (num, den) in choices {
                 let label = timebase_label(FrameRate { num, den });
                 let o = ui.selectable_label((d.fps_num, d.fps_den) == (num, den), &label);
@@ -351,7 +358,7 @@ fn general(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, cur: &SequenceSetti
             let formats = timecode_formats(r);
             let chosen = if r.supports_drop_frame() { if d.drop_frame { "df" } else { "ndf" } } else { "tc" };
             let shown = formats.iter().find(|(id, _)| *id == chosen).map(|(_, l)| l.clone()).unwrap_or_default();
-            let resp = egui::ComboBox::from_id_salt("seq-settings-video-display").selected_text(&shown).width(list_w).show_ui(ui, |ui| {
+            let resp = craft_ui::ComboBox::from_id_salt("seq-settings-video-display").selected_text(&shown).width(list_w).show_ui(ui, |ui| {
                 for (id, label) in &formats {
                     let o = ui.selectable_label(*id == chosen, label);
                     if o.clicked() {
@@ -369,7 +376,7 @@ fn general(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, cur: &SequenceSetti
     section(ui, "Audio", |ui| {
         row(ui, label_w, "Channel Format:", true, |ui| {
             let shown = d.mix.clone();
-            let resp = egui::ComboBox::from_id_salt("seq-settings-mix").selected_text(t(&shown)).width(120.0).show_ui(ui, |ui| {
+            let resp = craft_ui::ComboBox::from_id_salt("seq-settings-mix").selected_text(t(&shown)).width(120.0).show_ui(ui, |ui| {
                 for m in MIXES {
                     let o = ui.selectable_value(&mut d.mix, m.to_string(), t(m));
                     elems.push((format!("sequenceSettings.channelFormat.option.{m}"), o.rect, m.to_string()));
@@ -391,7 +398,7 @@ fn general(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, cur: &SequenceSetti
                 rates.insert(0, d.sample_rate);
             }
             let shown = format!("{} Hz", d.sample_rate);
-            let resp = egui::ComboBox::from_id_salt("seq-settings-sample-rate").selected_text(&shown).width(list_w).show_ui(ui, |ui| {
+            let resp = craft_ui::ComboBox::from_id_salt("seq-settings-sample-rate").selected_text(&shown).width(list_w).show_ui(ui, |ui| {
                 for hz in rates {
                     let label = format!("{hz} Hz");
                     let o = ui.selectable_value(&mut d.sample_rate, hz, &label);
@@ -432,7 +439,7 @@ fn color(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, elems: &mut Elems) {
     let label_w = ui.painter().layout_no_wrap(tl!("Working Color Space:").to_string(), font, egui::Color32::WHITE).size().x;
     row(ui, label_w, "Working Color Space:", true, |ui| {
         let shown = WorkingSpace::parse(&d.working_space).map_or(d.working_space.clone(), |w| t(w.label()).to_string());
-        let resp = egui::ComboBox::from_id_salt("seq-settings-working-space").selected_text(&shown).width(220.0).show_ui(ui, |ui| {
+        let resp = craft_ui::ComboBox::from_id_salt("seq-settings-working-space").selected_text(&shown).width(220.0).show_ui(ui, |ui| {
             for w in WorkingSpace::ALL {
                 let o = ui.selectable_value(&mut d.working_space, w.id().to_string(), t(w.label()));
                 elems.push((format!("sequenceSettings.workingSpace.option.{}", w.id()), o.rect, w.label().to_string()));

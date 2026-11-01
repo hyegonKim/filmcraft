@@ -159,6 +159,9 @@ fn write_add_click_to_edit_and_save_in_place() {
     d.click("tts.text");
     d.ok("ui.key", json!({"key": "Cmd+A"}));
     d.type_text("Something else");
+    // the new narration track can sit below the audio pane's visible rows: scroll to the end
+    d.harness.state_mut().ui.timeline.a_scroll = f32::MAX;
+    d.frames(3);
     let at = d.ok("ui.timeline.locate", json!({"clip": clip}));
     d.ok("ui.click", json!({"x": at["x"], "y": at["y"]}));
     d.frames(4);
@@ -224,5 +227,40 @@ fn settings_controls_and_hear_this_voice() {
     assert!(!d.ids("tts.").iter().any(|i| i == "tts.pitch"));
     d.click("tts.advanced");
     assert!(d.ids("tts.").iter().any(|i| i == "tts.pitch"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn natural_voice_controls_follow_build_capability() {
+    let dir = scratch("natural-capability");
+    let mut d = Driver::demo(&dir);
+    let package = d.exec("tts.voices", json!({}))["package"].clone();
+    d.exec("window.panel.TextToSpeech", json!({}));
+    d.frames(3);
+    d.click("tts.voice");
+    if package["available"] == false {
+        d.harness.state_mut().ui.tts.confirm_download = true;
+    }
+    d.click("tts.voice.kokoro-heart");
+    if package["available"] == true {
+        assert!(!d.ids("tts.").iter().any(|id| id == "tts.unavailable"));
+        if package["installed"] == false {
+            assert!(d.ids("tts.").iter().any(|id| id == "tts.download"));
+        }
+    } else {
+        assert!(d.ids("tts.").iter().any(|id| id == "tts.unavailable"), "unsupported voices must explain the build limitation");
+        assert!(d.ids("tts.download").is_empty(), "a download cannot enable an absent backend");
+        assert_eq!(d.draft()["confirmDownload"], false, "discard a stale download confirmation");
+        d.click("tts.text");
+        d.type_text("Unavailable voices must not start work.");
+        assert_eq!(d.draft()["text"], "Unavailable voices must not start work.");
+        let jobs = d.harness.state().session.jobs.len();
+        for id in ["tts.hearVoice", "tts.preview", "tts.save"] {
+            d.click(id);
+            assert!(d.draft()["pending"].is_null(), "{id} started synthesis");
+            assert_eq!(d.harness.state().session.jobs.len(), jobs, "{id} started a job");
+        }
+        assert!(d.narration_clips().is_empty());
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

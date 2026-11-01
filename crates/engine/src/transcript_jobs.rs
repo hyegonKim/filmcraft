@@ -1,7 +1,7 @@
 //! Transcription workers only publish complete results; the session commits one undo step.
 use crate::commands::{bad, bool_p, str_p, u64_p};
 use crate::{EngineError, Result, Session};
-use filmcraft_project::{ItemId, Project, Transcript};
+use filmcraft_project::{ClipId, ItemId, Project, Transcript};
 use filmcraft_speech::{Options, Transcriber};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex, atomic::Ordering};
@@ -15,6 +15,13 @@ pub(crate) struct Task {
     items: Vec<ItemId>,
     output: Arc<Mutex<Option<Output>>>,
     applied: bool,
+    automatic: Option<Automatic>,
+}
+
+#[derive(Clone)]
+pub(crate) struct Automatic {
+    pub command: String,
+    pub placements: Vec<(ItemId, ClipId, ItemId)>,
 }
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -32,6 +39,14 @@ pub(crate) fn change_document(s: &mut Session) {
 }
 
 pub(crate) fn start(s: &mut Session, p: &Value, items: Vec<ItemId>, opts: Options) -> Result<Value> {
+    start_task(s, p, items, opts, None)
+}
+
+pub(crate) fn start_automatic(s: &mut Session, p: &Value, items: Vec<ItemId>, opts: Options, origin: Automatic) -> Result<Value> {
+    start_task(s, p, items, opts, Some(origin))
+}
+
+fn start_task(s: &mut Session, p: &Value, items: Vec<ItemId>, opts: Options, automatic: Option<Automatic>) -> Result<Value> {
     poll(s);
     if s.transcript_jobs.iter().any(|t| !t.applied) {
         return Err(EngineError::Other("a transcription is already running; cancel it first".into()));
@@ -126,7 +141,7 @@ pub(crate) fn start(s: &mut Session, p: &Value, items: Vec<ItemId>, opts: Option
         std::thread::Builder::new().name("filmcraft-transcribe".into()).spawn(run).map_err(|e| EngineError::Other(e.to_string()))?;
     }
     s.jobs.push(job);
-    s.transcript_jobs.push(Task { id, epoch: s.document_epoch, before: s.project.clone(), params, items, output, applied: false });
+    s.transcript_jobs.push(Task { id, epoch: s.document_epoch, before: s.project.clone(), params, items, output, applied: false, automatic });
     if wait {
         poll(s);
         let j = s.jobs.iter().find(|j| j.id == id).ok_or_else(|| EngineError::Other("missing job".into()))?;
@@ -148,17 +163,27 @@ pub(crate) fn poll(s: &mut Session) {
         }
         let id = s.transcript_jobs[index].id;
         let Some(job) = s.jobs.iter().find(|j| j.id == id).cloned() else { continue };
-        let output = lock(&s.transcript_jobs[index].output).take();
-        let Some(output) = output else {
-            if let Some(Err(error)) = &*lock(&job.result) {
-                *lock(&job.progress.status) = error.clone();
-                s.transcript_jobs[index].applied = true;
-            }
-            continue;
+        let output = match lock(&s.transcript_jobs[index].output).take() {
+            Some(output) => output,
+            None => match lock(&job.result).as_ref().and_then(|r| r.as_ref().err()).cloned() {
+                Some(error) => Err(error),
+                None => continue,
+            },
         };
         let task = &s.transcript_jobs[index];
+        let automatic = task.automatic.clone();
         let valid = task.epoch == s.document_epoch
-            && task.items.iter().all(|i| s.project.item(*i) == task.before.item(*i) && s.project.transcripts.get(i) == task.before.transcripts.get(i));
+            && task.items.iter().all(|i| s.project.item(*i) == task.before.item(*i) && s.project.transcripts.get(i) == task.before.transcripts.get(i))
+            && automatic.as_ref().is_none_or(|origin| {
+                origin.placements.iter().all(|(seq, clip, item)| {
+                    s.project
+                        .sequence(*seq)
+                        .is_some_and(|q| q.audio_tracks.iter().flat_map(|t| &t.items).any(|c| c.id == *clip && c.item == *item && c.enabled))
+                })
+            });
+        // With no intervening project edit, retain the placement's single undo step. If newer
+        // edits exist, append the transcript's own step rather than rewriting their history.
+        let fold_history = (automatic.is_some() && Arc::ptr_eq(&s.project, &task.before)).then(|| s.history.clone());
         let result = if job.progress.cancel.load(Ordering::Relaxed) {
             Err("stopped: nothing was changed".into())
         } else if !valid {
@@ -174,6 +199,17 @@ pub(crate) fn poll(s: &mut Session) {
                 .map_err(|e| e.to_string())
             })
         };
+        if let Some(history) = fold_history {
+            s.history = history;
+        }
+        if let Some(origin) = &automatic
+            && let Err(error) = &result
+        {
+            let detail = if error.contains("internal error") { format!("internal error during automatic transcription: {error}") } else { error.clone() };
+            let message = format!("Automatic transcription: {detail}");
+            s.log.push(crate::panels::Level::Warning, &origin.command, message.clone());
+            s.events.push(crate::Event::Toast { message, error: true });
+        }
         let status = match &result {
             Ok(()) => "Transcription complete".into(),
             Err(e) => e.clone(),
@@ -350,5 +386,64 @@ mod tests {
         finish(&mut s);
         assert!(Arc::ptr_eq(&s.project, &before));
         assert_eq!(list(&mut s, &json!({})).unwrap()[0]["canRetry"], false);
+    }
+    fn automatic_setup() -> (Session, ItemId, Arc<Controlled>) {
+        let (mut s, item, c) = setup(false);
+        s.prefs.media_analysis.auto_transcribe = true;
+        s.prefs.media_analysis.auto_transcribe_scope = "sequenceClips".into();
+        s.execute("source.open", json!({"item": item.0})).unwrap();
+        (s, item, c)
+    }
+
+    #[test]
+    fn automatic_transcription_is_background_and_folds_into_placement_undo() {
+        let (mut s, item, c) = automatic_setup();
+        let before = s.project.clone();
+        let undo = s.history.undo.len();
+        s.execute("source.insert", json!({})).unwrap();
+        until(|| c.entered.load(Ordering::SeqCst));
+        assert!(s.project.transcripts.is_empty());
+        assert_eq!(s.history.undo.len(), undo + 1);
+        assert!(s.execute("prefs.get", json!({})).is_ok(), "commands remain responsive");
+        c.release.store(true, Ordering::SeqCst);
+        finish(&mut s);
+        assert_eq!(s.project.transcripts[&item].language, "ko");
+        assert_eq!(s.history.undo.len(), undo + 1);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(*s.project, *before);
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(s.project.transcripts[&item].language, "ko");
+    }
+
+    #[test]
+    fn undoing_placement_before_automatic_transcription_finishes_never_adds_a_transcript() {
+        let (mut s, _, c) = automatic_setup();
+        let before = s.project.clone();
+        s.execute("source.insert", json!({})).unwrap();
+        until(|| c.entered.load(Ordering::SeqCst));
+        s.execute("edit.undo", json!({})).unwrap();
+        c.release.store(true, Ordering::SeqCst);
+        finish(&mut s);
+        assert_eq!(*s.project, *before);
+        assert!(s.project.transcripts.is_empty());
+    }
+
+    #[test]
+    fn automatic_result_keeps_newer_edits_and_their_undo_steps() {
+        let (mut s, item, c) = automatic_setup();
+        s.execute("source.insert", json!({})).unwrap();
+        until(|| c.entered.load(Ordering::SeqCst));
+        let placed = s.project.clone();
+        s.execute("markers.add", json!({"name":"later edit"})).unwrap();
+        let edited = s.project.clone();
+        let undo = s.history.undo.len();
+        c.release.store(true, Ordering::SeqCst);
+        finish(&mut s);
+        assert_eq!(s.project.transcripts[&item].language, "ko");
+        assert_eq!(s.history.undo.len(), undo + 1);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(*s.project, *edited);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(*s.project, *placed);
     }
 }

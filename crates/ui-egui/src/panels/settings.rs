@@ -3,7 +3,8 @@
 //! the category's fields on the right, Help / Reset… / Cancel / OK at the bottom. The page layout
 //! comes from the engine's field schema ([`filmcraft_engine::settings::categories`]); edits go to a
 //! draft (`UiState::settings`, serde so `ui.inspect` / `ui.set` reach it) and are applied with
-//! `prefs.set` on OK.
+//! `prefs.set` on OK. Fields without a runtime consumer stay visible but disabled; saved values
+//! remain compatible and the page explains why these controls are unavailable.
 //!
 //! Automation ids: `settings.category.<id>` (list rows), `settings.<key>` for every control (the
 //! preference key, e.g. `settings.timeline.stillImageDuration`), `settings.<key>.<value>` for the
@@ -433,7 +434,7 @@ fn combo(app: &mut FilmcraftApp, ui: &mut Ui, key: &str, label: &str, current: &
     let mut chosen = None;
     let mut items: Vec<(String, Rect, String)> = Vec::new();
     // the current choice is cut to the box's width (the open list shows it whole)
-    let r = egui::ComboBox::from_id_salt(("settings", key))
+    let r = craft_ui::ComboBox::from_id_salt(("settings", key))
         .selected_text(RichText::new(crate::i18n::t(&shown)).size(12.5))
         .width(width.min(ui.available_width()))
         .truncate()
@@ -450,7 +451,7 @@ fn combo(app: &mut FilmcraftApp, ui: &mut Ui, key: &str, label: &str, current: &
     // The accessible name is the field's label, while the automation label stays the selected
     // value so `ui.elements` reports what the dropdown shows.
     let response = crate::widgets::accessible_name(r.response, crate::i18n::t(label));
-    app.auto.add(&format!("settings.{key}"), response.rect, &shown);
+    app.auto.add_response(&format!("settings.{key}"), &response, &shown);
     for (id, rect, l) in items {
         app.auto.add(&id, rect, &l);
     }
@@ -481,12 +482,12 @@ fn number(app: &mut FilmcraftApp, ui: &mut Ui, key: &str, value: f64, range: (f6
     let speed = ((range.1 - range.0) / 2000.0).clamp(0.05, 1.0);
     let dv = crate::widgets::number_drag(&mut x).range(range.0..=range.1).speed(speed).fixed_decimals(decimals);
     let r = ui.add_sized(vec2(84.0, 24.0), dv);
-    app.auto.add(&format!("settings.{key}"), r.rect, label);
+    app.auto.add_response(&format!("settings.{key}"), &r, label);
     (r.changed() && x != value).then_some(x)
 }
 
 fn draw_field(app: &mut FilmcraftApp, ui: &mut Ui, d: &mut SettingsDraft, f: &Field) {
-    let enabled = f.enabled_by.is_none_or(|k| get(&d.values, k).as_bool().unwrap_or(true));
+    let enabled = f.wired && f.enabled_by.is_none_or(|k| get(&d.values, k).as_bool().unwrap_or(true));
     let cur = get(&d.values, f.key).clone();
     ui.add_enabled_ui(enabled, |ui| {
         ui.horizontal(|ui| {
@@ -499,7 +500,7 @@ fn draw_field(app: &mut FilmcraftApp, ui: &mut Ui, d: &mut SettingsDraft, f: &Fi
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     let mut b = cur.as_bool().unwrap_or(false);
                     let r = ui.checkbox(&mut b, RichText::new(crate::i18n::t(f.label)).size(12.5));
-                    app.auto.add(&format!("settings.{}", f.key), r.rect, f.label);
+                    app.auto.add_response(&format!("settings.{}", f.key), &r, f.label);
                     if r.changed() {
                         put(&mut d.values, f.key, json!(b));
                     }
@@ -574,13 +575,13 @@ fn draw_field(app: &mut FilmcraftApp, ui: &mut Ui, d: &mut SettingsDraft, f: &Fi
                         ui.available_width().clamp(60.0, 220.0)
                     };
                     let r = crate::widgets::accessible_name(ui.add(egui::TextEdit::singleline(&mut s).desired_width(width).hint_text(hint)), f.label);
-                    app.auto.add(&format!("settings.{}", f.key), r.rect, f.label);
+                    app.auto.add_response(&format!("settings.{}", f.key), &r, f.label);
                     if r.changed() {
                         put(&mut d.values, f.key, json!(s));
                     }
                     if matches!(f.kind, Kind::Path) {
                         let b = ui.button(browse);
-                        app.auto.add(&format!("settings.{}.browse", f.key), b.rect, "Browse…");
+                        app.auto.add_response(&format!("settings.{}.browse", f.key), &b, "Browse…");
                         if b.clicked() {
                             let key = f.key;
                             app.pick_ui(FileDialog::Folder { at: None }, move |app, paths| {
@@ -605,7 +606,7 @@ fn color_field(app: &mut FilmcraftApp, ui: &mut Ui, d: &mut SettingsDraft, key: 
     let hex = choice_text(get(&d.values, key));
     let mut rgb = settings::parse_hex(&hex).unwrap_or([128, 128, 128]);
     let r = egui::color_picker::color_edit_button_srgb(ui, &mut rgb);
-    app.auto.add(&format!("settings.{key}"), r.rect, label);
+    app.auto.add_response(&format!("settings.{key}"), &r, label);
     if r.changed() {
         put(&mut d.values, key, json!(settings::hex(rgb)));
     }
@@ -617,7 +618,7 @@ fn color_field(app: &mut FilmcraftApp, ui: &mut Ui, d: &mut SettingsDraft, key: 
         ui.add(egui::TextEdit::singleline(&mut text).desired_width(70.0).font(egui::TextStyle::Monospace)),
         format!("{label} hex"),
     );
-    app.auto.add(&format!("settings.{key}.hex"), t.rect, label);
+    app.auto.add_response(&format!("settings.{key}.hex"), &t, label);
     if t.has_focus() {
         ui.data_mut(|m| m.insert_temp(draft_id, text.clone()));
     } else {
@@ -810,6 +811,14 @@ fn custom(app: &mut FilmcraftApp, ui: &mut Ui, d: &mut SettingsDraft, name: &str
     }
 }
 
+fn has_unwired_fields(rows: &[Row]) -> bool {
+    rows.iter().any(|row| match row {
+        Row::Field(field) => !field.wired,
+        Row::Group(_, inner) => has_unwired_fields(inner),
+        _ => false,
+    })
+}
+
 fn rows(app: &mut FilmcraftApp, ui: &mut Ui, d: &mut SettingsDraft, list: &[Row]) {
     let t = app.tokens;
     for (i, r) in list.iter().enumerate() {
@@ -903,6 +912,11 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
                 ui.set_height(BODY_H);
                 let page = egui::ScrollArea::vertical().id_salt(("settings-page", cat.id)).auto_shrink([false, false]).max_height(BODY_H).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 6.0;
+                    if has_unwired_fields(cat.rows) {
+                        let message = tl!("Dimmed settings are not available in this build. Their saved values are retained.");
+                        let notice = ui.label(RichText::new(message).size(11.5).color(t.text_dim)).on_hover_text(message);
+                        app.auto.add("settings.unavailable", notice.rect, message);
+                    }
                     rows(app, ui, &mut d, cat.rows);
                     if !d.message.is_empty() {
                         ui.add_space(6.0);
@@ -962,6 +976,38 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) -> bool {
 mod tests {
     use super::*;
     use crate::theme::ThemeKind;
+
+    #[test]
+    fn every_preference_field_reports_schema_availability() {
+        for (_, field) in settings::fields() {
+            if APPEARANCE_KEYS.contains(&field.key) {
+                continue;
+            }
+            let mut app = FilmcraftApp::new(filmcraft_engine::Session::default());
+            let values = app.session.prefs.to_value();
+            let expected = field.wired && field.enabled_by.is_none_or(|key| get(&values, key).as_bool().unwrap_or(true));
+            app.ui.settings = Some(SettingsDraft { values: values.clone(), ..Default::default() });
+            let mut h = egui_kittest::Harness::builder().with_size(vec2(1000.0, 180.0)).build_ui_state(
+                move |ui, app: &mut FilmcraftApp| {
+                    app.auto.begin_frame();
+                    let mut draft = app.ui.settings.take().unwrap();
+                    draw_field(app, ui, &mut draft, &field);
+                    app.ui.settings = Some(draft);
+                },
+                app,
+            );
+            h.run_steps(3);
+            let id = format!("settings.{}", field.key);
+            let element = h.state().auto.elements.iter().find(|e| e.id == id).unwrap_or_else(|| panic!("missing {id}"));
+            assert_eq!(element.enabled, Some(expected), "{id}");
+            if let Kind::Duration { unit_key } = field.kind {
+                let unit_id = format!("settings.{unit_key}");
+                let unit = h.state().auto.elements.iter().find(|e| e.id == unit_id).unwrap();
+                assert_eq!(unit.enabled, Some(expected), "{unit_id}");
+            }
+            assert_eq!(h.state().ui.settings.as_ref().unwrap().values, values, "{id} must not change during rendering");
+        }
+    }
 
     #[test]
     fn favorite_theme_star_and_shortcut_select_explicit_family() {

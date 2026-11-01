@@ -158,6 +158,25 @@ impl Driver {
 }
 
 #[test]
+fn new_submix_send_is_one_undoable_edit() {
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Audio"}));
+    d.frames(3);
+    d.click("mixer.showEffects");
+    let before = d.harness.state().session.project.clone();
+    let undo0 = d.exec("history.list", json!({}))["undo"].as_array().unwrap().len();
+    d.click("mixer.A1.send.0");
+    d.click("mixer.A1.send.0.newSubmix");
+    assert_eq!(d.strip("A1")["sends"][0]["target"], "S1");
+    let after = d.harness.state().session.project.clone();
+    assert_eq!(d.exec("history.list", json!({}))["undo"].as_array().unwrap().len(), undo0 + 1);
+    d.exec("edit.undo", json!({}));
+    assert_eq!(d.harness.state().session.project, before);
+    d.exec("edit.redo", json!({}));
+    assert_eq!(d.harness.state().session.project, after);
+}
+
+#[test]
 fn audio_chrome_switches_between_themes() {
     let mut d = Driver::demo();
     d.ok("ui.set", json!({"workspace": "Audio"}));
@@ -502,4 +521,37 @@ fn paused_meters_repaint_without_input_and_settle_after_release() {
         assert!(labels(&quiet).iter().all(|label| label.contains("-90.0")), "{workspace}: {:?}", labels(&quiet));
         d.snapshot(&format!("meters-{workspace}-paused-silent"), None);
     }
+}
+
+#[test]
+fn long_track_keyframe_menu_scrolls_to_first_and_last_choices() {
+    let mut d = Driver::demo();
+    for _ in 0..5 {
+        d.exec("mixer.addInsert", json!({"strip": "A1", "effect": "graphic_eq_30"}));
+    }
+    let before = d.harness.state().session.project.clone();
+    d.ok("ui.set", json!({"focused": "Timeline"}));
+    d.ok("ui.menu.invoke", json!({"command": "window.maximizeFrame", "params": {}}));
+    d.click("timeline.track.A1.keyframes");
+    let scroll = d.element("timeline.track.A1.keyframes.scroll").expect("long keyframe menus need a scroll area");
+    let height = d.harness.ctx.content_rect().height();
+    assert!(scroll[1] >= 0.0 && scroll[1] + scroll[3] <= height, "menu must fit the viewport: {scroll:?}, height {height}");
+    let last = "timeline.track.A1.keyframes.fx.4.gain";
+    let old = d.element(last).expect("last insert parameter");
+    assert!(old[1] > scroll[1] + scroll[3], "fixture must overflow");
+    d.ok("ui.scroll", json!({"id": "timeline.track.A1.keyframes.scroll", "dy": -8000.0}));
+    d.frames(30);
+    let end = d.element(last).unwrap();
+    assert!(end[1] < old[1] && end[1] >= scroll[1] && end[1] + end[3] <= scroll[1] + scroll[3], "last choice reachable after wheel: {end:?}, {scroll:?}");
+    d.click(last);
+    let track = d.harness.state().session.active_sequence().unwrap().audio_tracks[0].id.0;
+    assert_eq!(d.harness.state().ui.timeline.track_lanes.get(&track).map(String::as_str), Some("fx.4.gain"));
+    d.click("timeline.track.A1.keyframes");
+    d.ok("ui.scroll", json!({"id": "timeline.track.A1.keyframes.scroll", "dy": 8000.0}));
+    d.frames(30);
+    let first = d.element("timeline.track.A1.keyframes.clip").unwrap();
+    assert!(first[1] >= scroll[1] && first[1] + first[3] <= scroll[1] + scroll[3]);
+    d.click("timeline.track.A1.keyframes.clip");
+    assert!(!d.harness.state().ui.timeline.track_lanes.contains_key(&track));
+    assert_eq!(d.harness.state().session.project, before, "choosing visible lanes must not edit the project");
 }

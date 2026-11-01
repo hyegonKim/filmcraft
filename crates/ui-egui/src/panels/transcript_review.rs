@@ -65,7 +65,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &egui::Ui) {
             }
             ui.horizontal(|ui| {
                 ui.label(tl!("Korean speech model"));
-                let r = egui::ComboBox::from_id_salt("review-model").selected_text(&app.ui.transcript_review.model).show_ui(ui, |ui| {
+                let r = craft_ui::ComboBox::from_id_salt("review-model").selected_text(&app.ui.transcript_review.model).show_ui(ui, |ui| {
                     for model in ["whisper-base", "whisper-small"] {
                         let r = ui.selectable_value(&mut app.ui.transcript_review.model, model.into(), model);
                         app.auto.add(&format!("text.review.model.{model}"), r.rect, model);

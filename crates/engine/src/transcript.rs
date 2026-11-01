@@ -4,18 +4,19 @@
 //! is derived from them ([`filmcraft_edit::transcript::sequence_words`]). Words of the sequence
 //! transcript are addressed by index (`from`, `to`, inclusive), as `transcript.inspect` lists them.
 //!
-//! Speech recognition goes through a [`Transcriber`]: [`Session::transcriber`] when a host or a
+//! Speech recognition goes through a [`filmcraft_speech::Transcriber`]: [`Session::transcriber`] when a host or a
 //! test installed one, else the Whisper model named by `model` from `<data dir>/models` (needs the
 //! engine feature `whisper`; without it `transcript.generate` fails with a clear error, and agents
 //! can still bring their own transcript with `transcript.set`).
 
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
 
 use filmcraft_edit as edit;
 use filmcraft_edit::transcript::{self as tx, CaptionRules, SeqWord};
-use filmcraft_project::{CaptionFormat, CaptionTrack, ItemId, TrackId, Transcript};
+use filmcraft_project::{CaptionFormat, CaptionTrack, ClipId, ItemId, Project, TrackId, Transcript};
 use filmcraft_speech::{Options, SpeechError};
 use filmcraft_time::{TICKS_PER_SECOND, Tick, TimeRange};
 
@@ -120,10 +121,14 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     if items.is_empty() {
         return Err(bad("transcript.generate", "nothing to transcribe (pass `items`, select clips, or open a sequence with audio)"));
     }
+    crate::transcript_jobs::start(s, p, items, options(s, p))
+}
+
+fn options(s: &Session, p: &Value) -> Options {
     // Settings ▸ Media Analysis & Transcription: language (or auto-detect) and speaker labelling
     let ma = &s.prefs.media_analysis;
     let default_language = if ma.language_auto_detect { None } else { Some(ma.default_language.clone()) };
-    let opts = Options {
+    Options {
         preserve_fillers: bool_p(p, "preserveFillers").unwrap_or(false),
         language: match str_p(p, "language") {
             Some(l) => Some(l).filter(|l| !l.is_empty() && *l != "auto").map(str::to_string),
@@ -131,8 +136,35 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         },
         diarize: bool_p(p, "diarize").unwrap_or(ma.speaker_labeling != "off"),
         max_speakers: u64_p(p, "maxSpeakers").map(|n| n.clamp(1, 32) as usize).unwrap_or(Options::default().max_speakers),
-    };
-    crate::transcript_jobs::start(s, p, items, opts)
+    }
+}
+
+/// Enabled audio placements, including media inside nested sequences, without recursive walks.
+fn audio_placements(project: &Project) -> impl Iterator<Item = (ItemId, ClipId, ItemId)> + '_ {
+    project.sequences().filter_map(|item| item.as_sequence().map(|q| (item.id, q))).flat_map(|(sequence, q)| {
+        q.audio_tracks.iter().flat_map(|track| &track.items).filter(|clip| clip.enabled).map(move |clip| (sequence, clip.id, clip.item))
+    })
+}
+
+/// Transcribe newly placed audio once per underlying media item. This runs after the outermost
+/// editing command so every placement route shares the same scope, including paste and expansion.
+pub(crate) fn auto_transcribe_sequence_clips(s: &mut Session, before: &Project, command: &str) -> Result<()> {
+    let old: HashSet<_> = audio_placements(before).collect();
+    let placements: Vec<_> = audio_placements(&s.project).filter(|placement| !old.contains(placement)).collect();
+    let items: BTreeSet<_> = placements
+        .iter()
+        .copied()
+        .filter_map(|(_, _, item)| s.project.resolve_media(item))
+        .filter(|(root, media, _)| media.info.has_audio() && !s.project.transcripts.contains_key(root))
+        .map(|(root, _, _)| root)
+        .collect();
+    if items.is_empty() {
+        return Ok(());
+    }
+    can_transcribe(s).map_err(EngineError::Other)?;
+    let params = json!({"items": items.iter().map(|i| i.0).collect::<Vec<_>>()});
+    let origin = crate::transcript_jobs::Automatic { command: command.to_owned(), placements };
+    crate::transcript_jobs::start_automatic(s, &params, items.into_iter().collect(), options(s, &params), origin).map(|_| ())
 }
 
 fn set(s: &mut Session, p: &Value) -> Result<Value> {

@@ -653,6 +653,9 @@ impl<'a, 'i, 'r> PrprojImporter<'a, 'i, 'r> {
                     comment,
                     kind: MarkerKind::Comment,
                     color: Label::Cerulean,
+                    author: Default::default(),
+                    custom_color: Default::default(),
+                    url: Default::default(),
                 });
             }
         }

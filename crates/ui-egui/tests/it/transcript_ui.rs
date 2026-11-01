@@ -348,3 +348,24 @@ fn unconfirmed_korean_filler_checkbox_cannot_select_or_apply_a_cut() {
     d.frames(3);
     assert_eq!(*d.harness.state().session.project, *before);
 }
+
+/// #2402: without speech-to-text (a build without `whisper`) the Transcribe button is disabled,
+/// with the reason as its tooltip, instead of looking ready and doing nothing visible.
+#[test]
+fn transcribe_is_disabled_without_speech_to_text() {
+    if filmcraft_engine::transcript::speech_available() {
+        return;
+    }
+    let mut d = Driver::demo();
+    d.ok("ui.set", json!({"workspace": "Captions and Graphics"}));
+    d.frames(2);
+    d.ok("ui.click", json!({"id": "text.tab.Transcript"}));
+    d.frames(3);
+    let els = d.ok("ui.elements", json!({"prefix": "text.transcript.generate"}));
+    let button = els.as_array().unwrap().iter().find(|e| e["id"] == "text.transcript.generate").expect("the Transcribe button").clone();
+    assert_eq!(button["enabled"], json!(false), "{button}");
+    let undo = d.harness.state().session.history.undo.len();
+    d.ok("ui.click", json!({"id": "text.transcript.generate"}));
+    d.frames(3);
+    assert_eq!(d.harness.state().session.history.undo.len(), undo, "nothing ran");
+}

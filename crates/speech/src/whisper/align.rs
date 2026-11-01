@@ -10,17 +10,14 @@ pub struct Segment {
     pub frames: std::ops::Range<usize>,
 }
 
+pub struct Timing<'a> {
+    pub frames: usize,
+    pub segments: &'a [Segment],
+}
+
 /// Start/end (in mel frames from the window start, 10 ms) of every token of `text`.
-pub fn align(
-    m: &mut Model,
-    xa: &Tensor,
-    prompt: &[u32],
-    text: &[u32],
-    eot: u32,
-    heads: &[(usize, usize)],
-    seg_frames: usize,
-    segments: &[Segment],
-) -> Result<Vec<(usize, usize)>> {
+pub fn align(m: &mut Model, xa: &Tensor, prompt: &[u32], text: &[u32], eot: u32, heads: &[(usize, usize)], timing: Timing<'_>) -> Result<Vec<(usize, usize)>> {
+    let Timing { frames: seg_frames, segments } = timing;
     let mut tokens = prompt.to_vec();
     tokens.extend_from_slice(text);
     tokens.push(eot);

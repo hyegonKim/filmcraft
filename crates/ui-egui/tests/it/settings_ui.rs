@@ -723,3 +723,58 @@ fn label_color_presets() {
     d.click("settings.cancel");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn unwired_preferences_are_read_only_and_explained() {
+    let mut d = Driver::demo();
+    let before = d.exec("prefs.get", json!({}));
+    d.menu("app.settings.general");
+    assert!(d.has("settings.unavailable"), "explain why the dimmed settings cannot be edited");
+    let draft = d.draft();
+    for id in ["settings.general.whenOpeningProject", "settings.general.showEventIndicator"] {
+        let elements = d.ok("ui.elements", json!({"prefix": id}));
+        let control = elements.as_array().unwrap().iter().find(|e| e["id"] == id).unwrap();
+        assert_eq!(control["enabled"], false, "{id} is remembered but has no effect");
+        let point = d.rect(id).center();
+        d.ok("ui.click", json!({"x": point.x, "y": point.y}));
+        d.frames(2);
+        assert_eq!(d.draft(), draft);
+    }
+    d.click("settings.general.atStartup");
+    d.click("settings.general.atStartup.emptyProject");
+    assert_eq!(d.draft()["values"]["general"]["atStartup"], "emptyProject");
+    d.click("settings.cancel");
+    assert_eq!(d.exec("prefs.get", json!({})), before);
+    d.menu("app.settings.autoSave");
+    d.ok("ui.set", json!({"settings": {"values": {"autoSave.enabled": false}}}));
+    d.frames(2);
+    let elements = d.ok("ui.elements", json!({"prefix": "settings.autoSave.intervalMinutes"}));
+    let control = elements.as_array().unwrap().iter().find(|e| e["id"] == "settings.autoSave.intervalMinutes").unwrap();
+    assert_eq!(control["enabled"], false, "dependency-disabled fields expose their actual state too");
+    d.click("settings.cancel");
+}
+
+#[test]
+fn implemented_preference_controls_remain_available() {
+    let mut d = Driver::demo();
+    for (page, keys) in [
+        ("general", &["general.binsDoubleClick", "general.binsCmdDoubleClick", "general.binsOptDoubleClick"][..]),
+        ("audio", &["audio.scrubAudio", "audio.maintainPitchShuttling"][..]),
+        ("audioHardware", &["audioHardware.defaultInput"][..]),
+        ("media", &["media.importImageSequences"][..]),
+    ] {
+        d.menu(&format!("app.settings.{page}"));
+        for key in keys {
+            let id = format!("settings.{key}");
+            let elements = d.ok("ui.elements", json!({"prefix": id}));
+            let control = elements.as_array().unwrap().iter().find(|e| e["id"] == id).unwrap();
+            assert_eq!(control["enabled"], true, "{key} must remain available");
+        }
+        if page == "general" {
+            d.click("settings.general.binsDoubleClick");
+            d.click("settings.general.binsDoubleClick.openNewTab");
+            assert_eq!(d.draft()["values"]["general"]["binsDoubleClick"], "openNewTab");
+        }
+        d.click("settings.cancel");
+    }
+}

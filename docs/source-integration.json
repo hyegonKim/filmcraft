@@ -1,0 +1,215 @@
+{
+  "schemaVersion": 1,
+  "updatedOn": "2026-11-01",
+  "version": "0.15.0",
+  "requirement": "Official upstream + Mac Codex changes + all PC Antigravity/Codex changes must be retained in future updates.",
+  "sources": {
+    "upstream": {
+      "repository": "https://github.com/storytold/filmcraft.git",
+      "ref": "main",
+      "commit": "5ed4952d43f6328d9c2bf7990f1c2e15dfa25011",
+      "previousVerifiedCommit": "7e17c704662c951b5c267eef688207f2f936e267",
+      "checkpointFile": "target/integration-20261101/latest-marker-update/upstream.patch"
+    },
+    "mac": {
+      "repository": "https://github.com/hyegonKim/filmcraft.git",
+      "ref": "codex/korean-transcript-review",
+      "commit": "fa2a2af2aabd1673ed1db0666efe74c4255f1fcf",
+      "commonAncestor": "4e2d0bc2d3646f9cf27ef7aa8b2095c6858c7efe",
+      "note": "Mac changes already forward-ported in PC snapshot; ancestry merged without source change."
+    },
+    "pc": {
+      "monorepo": "https://github.com/hyegonKim/ArtCraft.git",
+      "initialCommit": "484843ed9fcf7e2ff0be588f5ec9c6c1e64c6a89",
+      "completeSnapshotCommit": "23978fa18f3a501455c03e182fbb207a70d542b5",
+      "snapshotFileCount": 1435,
+      "uncommittedModifiedFilesBeforeIntegration": 42,
+      "referenceBase": "8fda2f232198c4c79ff9cfe5b6a347bb1375fa9e",
+      "referenceBaseMethod": "Highest blob content match among 93 upstream first-parent snapshots, not a claim about original import history."
+    }
+  },
+  "integration": {
+    "workingDirectory": "C:/Projects/AI_BibeCoding/ArtCraft/filmcraft",
+    "upstreamConflictFiles": 33,
+    "movedCodePatches": 29,
+    "rootGitBranchUnchanged": true,
+    "rootGitOriginUnchanged": true,
+    "sourceFilesExcludingIntegrationPolicy": 1595,
+    "totalSourceFiles": 1596,
+    "latestMarkerUpdateFiles": {
+      "written": 106,
+      "deleted": 1
+    },
+    "functionRetentionEvidence": "target/integration-20261101/latest-marker-update/function-retention.json",
+    "pcSnapshotComparison": {
+      "unchanged": 855,
+      "modified": 555,
+      "added": 185,
+      "deleted": 25
+    },
+    "otherArtCraftProjectsChanged": false,
+    "publishCompatibility": {
+      "gitattributes": ".gitattributes",
+      "rule": "*.sh text eol=lf",
+      "restoredExecutableScripts": [
+        "packaging/freebsd/package.sh",
+        "packaging/icons.sh",
+        "packaging/linux/flatpak-bundle.sh",
+        "packaging/linux/flatpak-oci.sh",
+        "packaging/linux/install.sh",
+        "packaging/linux/package.sh",
+        "packaging/linux/postinst.sh",
+        "packaging/macos/import-cert.sh",
+        "packaging/macos/package.sh",
+        "packaging/web/package.sh"
+      ],
+      "note": "Git metadata only; all Rust source and verified executable binaries unchanged."
+    }
+  },
+  "evidenceDirectory": "target/integration-20261101",
+  "limitations": [
+    "Mac scope is the pinned remote codex/korean-transcript-review branch; unpushed Mac files were not available.",
+    "No installed Whisper model or private real-audio fixtures were present; 5 real-model probes were not run and recognition accuracy is not established.",
+    "macOS signing, notarization, system voices and native execution were not tested on Windows.",
+    "Premiere import is experimental. Native verification used an original synthetic gzip/XML fixture, not a Premiere-authored project.",
+    "The expanded workspace run initially lacked AV1 libraries; all nine affected tests passed with the full external oracle. HEVC hostile-input verification passed on available seeds, but the Kvazaar seed could not run because libkvazaar is absent. The raw strict-oracle CI command is not a clean pass."
+  ],
+  "verification": {
+    "status": "COMPLETE_VERIFIED",
+    "checkpoint": "5ed4952d43f6328d9c2bf7990f1c2e15dfa25011",
+    "platform": "Windows x86_64-pc-windows-msvc",
+    "profile": "dev (optimized + debuginfo)",
+    "compile": "PASS --locked; GUI and CLI; all targets; Whisper enabled",
+    "clippy": "PASS on 10 selected packages, all targets, -D warnings",
+    "format": "PASS cargo fmt --all --check",
+    "selectedTestPackages": [
+      "filmcraft-engine",
+      "filmcraft-ui-egui",
+      "filmcraft-speech",
+      "filmcraft-edit",
+      "filmcraft-project",
+      "filmcraft-interchange",
+      "filmcraft-export",
+      "filmcraft-tts",
+      "filmcraft",
+      "filmcraft-cli",
+      "filmcraft-format"
+    ],
+    "passedTests": 2682,
+    "failedTests": 0,
+    "notRunPrivateProbes": [
+      "test whisper::local_boundary_probe::cropped_audio_boundary_diagnostic ... ignored, private real-audio diagnostic; no evaluation labels are supplied to the model",
+      "test whisper::local_filler_probe::cropped_audio_filler_diagnostic ... ignored, local model diagnostic; media and transcripts stay outside the repository",
+      "test whisper::local_filler_recheck::recheck_saved_boundaries_and_fillers ... ignored, private real-audio boundary and filler pipeline, retaining primary recognition text",
+      "test whisper::local_filler_recheck::recheck_saved_transcript_fillers ... ignored, recheck private real-audio evaluation without repeating primary decoding",
+      "test whisper::local_filler_recheck::replay_saved_word_end_guard ... ignored, replay actual verified model endpoints through the new deterministic acoustic guard"
+    ],
+    "nativeChecks": 16,
+    "nativeFailedChecks": 0,
+    "sourceFilesUnchangedDuringVerification": 1594,
+    "buildFeatures": [
+      "filmcraft/whisper",
+      "filmcraft-cli/whisper"
+    ],
+    "buildCommand": "cargo build --locked -p filmcraft -p filmcraft-cli --features filmcraft/whisper,filmcraft-cli/whisper",
+    "buildIdentity": {
+      "commit": "5ed4952d+fa2a2af2+23978fa1",
+      "date": "2026-11-01",
+      "label": "FilmCraft 0.15.0 · debug · Build combined-20261101",
+      "number": "combined-20261101",
+      "profile": "debug"
+    },
+    "currentEvidenceDirectory": "target/integration-20261101/latest-marker-update",
+    "binaries": [
+      {
+        "path": "target/debug/filmcraft.exe",
+        "bytes": 82981888,
+        "sha256": "2f0e6d1cebdb0d1bed1107d3f3ae705ca39a84a3dbe329941c13a34920e25e28",
+        "modified": "2026-11-01T02:43:02.673Z"
+      },
+      {
+        "path": "target/debug/filmcraft-cli.exe",
+        "bytes": 57315328,
+        "sha256": "565575908e415782604490b8ac659c0cfc7fb7910b496c26dc44e9e79bbd449d",
+        "modified": "2026-11-01T02:42:07.468Z"
+      }
+    ],
+    "export": {
+      "video": "H.264",
+      "frameSize": [
+        320,
+        180
+      ],
+      "frames": 90,
+      "audio": "AAC 48000 Hz stereo",
+      "durationSeconds": 3.008,
+      "independentWholeFileDecode": "PASS"
+    },
+    "expandedPublicationGates": {
+      "status": "COMPLETED_WITH_DOCUMENTED_ORACLE_LIMITATION",
+      "rawWorkspaceTests": {
+        "passed": 4659,
+        "failed": 10,
+        "ignored": 53,
+        "filtered": 0
+      },
+      "strictFullOracleRerunsPassed": 9,
+      "hevcHostile": {
+        "status": "PASS_ON_AVAILABLE_SEEDS",
+        "seed": 20758,
+        "skippedSeed": "hevc_fz_tiles_kvazaar",
+        "reason": "FFmpeg full build lacks libkvazaar encoder; strict all-oracle verification is not achieved."
+      },
+      "availableWorkspaceTestCasesPassed": 4669,
+      "docTests": {
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0,
+        "filtered": 0
+      },
+      "wasm": {
+        "status": "PASS",
+        "crates": 49
+      },
+      "layers": "PASS",
+      "assets": {
+        "status": "PASS",
+        "attributedAssets": 69
+      },
+      "clippy": {
+        "status": "PASS",
+        "scope": "workspace, all targets, -D warnings"
+      },
+      "format": "PASS",
+      "optionalTranslationReport": "Stopped optional report recompilation after all normal workspace test binaries completed.",
+      "rawCiCommandExit": "Interrupted after test completion while optional report recompiled; do not report the raw cargo xtask ci command as passing.",
+      "evidenceDirectory": "target/integration-20261101/publish-20261101"
+    }
+  },
+  "recovery": {
+    "pcBeforeBackup": ".local-backups/pc-before-integration-20261101.zip",
+    "pcBeforeBackupSha256": "43bde17edbfe0e4460eec5129654246a2091c87a01ed27152a95c445d5b58637",
+    "oldBinary": ".local-backups/filmcraft-0.13-before-integration.exe",
+    "combinedPatch": ".local-backups/combined-vs-upstream-5ed4952d-20261101.patch",
+    "patchVerification": "target/integration-20261101/latest-marker-update/recovery-patch-verification.json",
+    "combinedBinary": ".local-backups/filmcraft-0.15-combined-20261101.exe"
+  },
+  "integrationRepairs": [
+    "Ported PC custom changes across 29 upstream module moves while resolving 33 upstream conflict files.",
+    "Preserved background transcription, cancellation, project identity validation and undo grouping; added regression coverage.",
+    "Preserved atomic export staging and destination cleanup behavior.",
+    "Unified .prproj discovery/import, retained experimental import limitations, and initialized new marker metadata fields after the schema-17 update.",
+    "Kept 30ms quiet-speech edge preservation while retaining upstream VAD pause splitting and bounds.",
+    "Restored transport height calculation across extracted modules and bin-card clipping while retaining upstream ellipsis/tooltips.",
+    "Adapted Korean review model dropdown to current craft_ui API and fixed Whisper-enabled strict lint failures."
+  ],
+  "publication": {
+    "repository": "https://github.com/hyegonKim/ArtCraft",
+    "branch": "main",
+    "visibility": "private",
+    "sourceFiles": 41674,
+    "filmcraftFiles": 1596,
+    "layout": "All 19 projects are regular directories; filmcraft/ is not a submodule.",
+    "note": "Created the absent repository at the configured remote URL under the authenticated hyegonKim account."
+  }
+}

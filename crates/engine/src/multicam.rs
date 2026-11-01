@@ -19,7 +19,7 @@
 //! | `multicam.selectionTopDown` | Multi-Camera Selection Top Down | stacked multi-camera clips: switch the topmost instead of the lowest |
 //! | `multicam.showPreviewMonitor` | Show Multi-Camera Preview Monitor | the program next to the grid (off: the grid fills the monitor) |
 //! | `multicam.autoAdjustQuality` | Auto-Adjust Multi-Camera Playback Quality | lower-resolution grid decode while playing |
-//! | `multicam.transmitView` | Transmit Multi-Camera View | send the grid to the transmit device (no transmit output yet: stored only) |
+//! | `multicam.transmitView` | Transmit Multi-Camera View | unavailable until an external video output backend is implemented |
 //! | `multicam.grid` | | the grid page at the playhead: layout, pages, cells (camera, angle, name, active) |
 //!
 //! Sync methods are described in [`crate::sync`].
@@ -42,10 +42,15 @@ use crate::commands::{CommandSpec, always, bad, bool_p, clips_p, has_selection, 
 use crate::sync::{self, Method, SyncClip};
 use crate::{EngineError, MediaPool, Result, Session};
 
+pub const TRANSMIT_UNAVAILABLE: &str = "External video output is not available in this build.";
+
+fn transmit_available(_: &Session) -> std::result::Result<(), String> {
+    Err(TRANSMIT_UNAVAILABLE.into())
+}
+
 type Run = fn(&mut Session, &Value) -> Result<Value>;
 type Enabled = fn(&Session) -> std::result::Result<(), String>;
 
-#[allow(clippy::too_many_arguments)]
 fn spec(id: &'static str, label: &'static str, menu: &'static [&'static str], params: &'static str, enabled: Enabled, run: Run, journal: bool) -> CommandSpec {
     CommandSpec { id, label, menu, shortcut: None, params, enabled, run, journal }
 }
@@ -103,7 +108,7 @@ pub struct MulticamView {
     pub show_preview: bool,
     /// Auto-Adjust Multi-Camera Playback Quality: lower-resolution grid decode while playing.
     pub auto_quality: bool,
-    /// Transmit Multi-Camera View: send the grid (not the program) to the transmit device.
+    /// Legacy saved transmit preference. No output backend is available; the command rejects use.
     pub transmit: bool,
 }
 
@@ -211,7 +216,15 @@ fn base_commands() -> Vec<CommandSpec> {
             |s, p| view_flag(s, p, Flag::AutoQuality),
             true,
         ),
-        spec("multicam.transmitView", "Transmit Multi-Camera View", &[], r#"{"enabled":bool?}"#, always, |s, p| view_flag(s, p, Flag::Transmit), true),
+        spec(
+            "multicam.transmitView",
+            "Transmit Multi-Camera View",
+            &[],
+            r#"{"enabled":bool?}"#,
+            transmit_available,
+            |_, _| Err(EngineError::Other(TRANSMIT_UNAVAILABLE.into())),
+            true,
+        ),
         CommandSpec {
             id: "multicam.grid",
             label: "Multi-Camera Grid",
@@ -498,7 +511,7 @@ fn sync_items(s: &Session, items: &[ItemId], cmd: &str) -> Result<Vec<SyncClip>>
 
 fn settings_for(s: &Session, item: ItemId) -> SequenceSettings {
     let media = match s.project.item(item).map(|i| &i.kind) {
-        Some(ItemKind::Media(m)) => Some(m),
+        Some(ItemKind::Media(m)) => Some(m.as_ref()),
         Some(ItemKind::Subclip { parent, .. }) => s.project.item(*parent).and_then(|i| i.as_media()),
         _ => None,
     };
@@ -1138,7 +1151,6 @@ enum Flag {
     TopDown,
     Preview,
     AutoQuality,
-    Transmit,
 }
 
 fn view_flag(s: &mut Session, p: &Value, f: Flag) -> Result<Value> {
@@ -1147,16 +1159,9 @@ fn view_flag(s: &mut Session, p: &Value, f: Flag) -> Result<Value> {
         Flag::TopDown => &mut v.top_down,
         Flag::Preview => &mut v.show_preview,
         Flag::AutoQuality => &mut v.auto_quality,
-        Flag::Transmit => &mut v.transmit,
     };
     *slot = bool_p(p, "enabled").unwrap_or(!*slot);
-    let on = *slot;
-    let mut out = json!({"enabled": on});
-    if matches!(f, Flag::Transmit) {
-        // no transmit (video output) devices yet: the setting is kept for when there are
-        out["device"] = Value::Null;
-    }
-    Ok(out)
+    Ok(json!({"enabled": *slot}))
 }
 
 /// The grid page at the playhead (or `time`): layout, pages and cells. With `cellPixels` (on-screen

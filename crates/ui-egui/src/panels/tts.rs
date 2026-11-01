@@ -92,7 +92,8 @@ fn default_installed_voice(language: &str) -> String {
 
 /// The natural voice package is downloaded.
 fn natural_installed() -> bool {
-    filmcraft_engine::transcript::models_dir().as_deref().is_some_and(filmcraft_tts::catalog::installed)
+    filmcraft_engine::narration::natural_voices_available()
+        && filmcraft_engine::transcript::models_dir().as_deref().is_some_and(filmcraft_tts::catalog::installed)
 }
 
 /// State of job `id`: `None` while running, else its result.
@@ -221,7 +222,8 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     painter.rect_filled(rect, 0.0, t.panel_bg);
     let models = filmcraft_engine::transcript::models_dir();
     let voices = filmcraft_tts::voices_in(models.as_deref());
-    let installed = models.as_deref().is_some_and(filmcraft_tts::catalog::installed);
+    let available = filmcraft_engine::narration::natural_voices_available();
+    let installed = available && models.as_deref().is_some_and(filmcraft_tts::catalog::installed);
     let busy = app.ui.tts.pending.is_some();
     let download = app
         .ui
@@ -256,7 +258,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         ui.add_space(6.0);
         label(ui, &t, "Language");
         let lang_name = filmcraft_tts::LANGUAGES.iter().find(|(id, _)| *id == d.language).map_or(d.language.as_str(), |(_, n)| n);
-        let cb = egui::ComboBox::from_id_salt("tts-language").selected_text(lang_name).width(w).show_ui(ui, |ui| {
+        let cb = craft_ui::ComboBox::from_id_salt("tts-language").selected_text(lang_name).width(w).show_ui(ui, |ui| {
             for (id, name) in filmcraft_tts::LANGUAGES {
                 let r = ui.selectable_label(d.language == *id, *name);
                 auto.add(&format!("tts.language.{id}"), visible(ui, r.rect), name);
@@ -271,14 +273,20 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         ui.add_space(10.0);
         label(ui, &t, "Voice");
         let voice_name = voices.iter().find(|v| v.id == d.voice).map_or(d.voice.as_str(), |v| v.name);
-        let cb = egui::ComboBox::from_id_salt("tts-voice").selected_text(voice_name).width(w).show_ui(ui, |ui| {
+        let cb = craft_ui::ComboBox::from_id_salt("tts-voice").selected_text(voice_name).width(w).show_ui(ui, |ui| {
             for (engine, heading) in [("system", "System voices (local)"), ("neural", "Natural voices"), ("basic", "Basic voices (built in)")] {
                 if !voices.iter().any(|v| v.language == d.language && v.engine == engine) {
                     continue;
                 }
                 ui.label(egui::RichText::new(heading).color(t.text_faint).size(11.0));
                 for v in voices.iter().filter(|v| v.language == d.language && v.engine == engine) {
-                    let label = if v.engine == "neural" && !v.installed { format!("{} (download)", v.name) } else { v.name.to_string() };
+                    let label = if v.engine == "neural" && !available {
+                        format!("{} (unavailable)", v.name)
+                    } else if v.engine == "neural" && !v.installed {
+                        format!("{} (download)", v.name)
+                    } else {
+                        v.name.to_string()
+                    };
                     let r = ui.selectable_label(d.voice == v.id, label).on_hover_text(v.description);
                     auto.add(&format!("tts.voice.{}", v.id), visible(ui, r.rect), v.name);
                     if r.clicked() {
@@ -292,7 +300,12 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             ui.label(tl!("Korean speech uses the installed macOS Yuna voice locally. No upload."));
         }
         let natural = filmcraft_tts::catalog::find(&d.voice).is_some();
-        if natural && !installed {
+        if natural && !available {
+            d.confirm_download = false;
+            let message = tl!("Natural voices are not available in this build. Choose a built-in voice.");
+            let r = ui.label(egui::RichText::new(message).color(t.text_dim).size(11.5));
+            auto.add("tts.unavailable", visible(ui, r.rect), message);
+        } else if natural && !installed {
             ui.add_space(6.0);
             egui::Frame::new().fill(t.field_bg).stroke(egui::Stroke::new(1.0, t.field_border)).corner_radius(4.0).inner_margin(8.0).show(ui, |ui| {
                 ui.set_width(w - 18.0);
@@ -341,10 +354,16 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 }
             });
         }
-        let voice_ready = !natural || installed;
+        let voice_ready = !natural || (available && installed);
         ui.add_space(4.0);
         let (r, resp) = ui.allocate_exact_size(vec2(130.0, 22.0), Sense::click());
-        let col = if resp.hovered() { t.accent_hover } else { t.accent };
+        let col = if !voice_ready || busy {
+            t.text_faint
+        } else if resp.hovered() {
+            t.accent_hover
+        } else {
+            t.accent
+        };
         icons::paint(ui.painter(), Rect::from_center_size(pos2(r.min.x + 8.0, r.center().y), vec2(14.0, 14.0)), Icon::Play, col);
         ui.painter().text(pos2(r.min.x + 22.0, r.center().y), Align2::LEFT_CENTER, "Hear this voice", Tokens::semibold(12.0), col);
         auto.add("tts.hearVoice", visible(ui, r), "Hear this voice");
@@ -358,7 +377,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if open {
             ui.add_space(4.0);
             label(ui, &t, "Vocal pitch");
-            let cb = egui::ComboBox::from_id_salt("tts-pitch").selected_text(d.pitch.label()).width(w).show_ui(ui, |ui| {
+            let cb = craft_ui::ComboBox::from_id_salt("tts-pitch").selected_text(d.pitch.label()).width(w).show_ui(ui, |ui| {
                 for p in VocalPitch::ALL {
                     if ui.selectable_label(d.pitch == p, p.label()).clicked() {
                         d.pitch = p;

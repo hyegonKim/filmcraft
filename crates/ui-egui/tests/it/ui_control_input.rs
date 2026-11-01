@@ -67,6 +67,26 @@ fn native_key(h: &mut Harness<'_, FilmcraftApp>, key: Key) {
 }
 
 #[test]
+fn control_scroll_finishes_over_the_requested_menu() {
+    for isolated in [false, true] {
+        let mut d = Driver::new(isolated);
+        d.ok("ui.click", json!({"id":"panel.menu.Project"}), true);
+        d.frames(4, true);
+        let scroll = d.h.state().auto.find("panel.menu.scroll").unwrap().rect;
+        let before = d.h.state().auto.find("project.menu.metadataDisplay").unwrap().rect[1];
+        assert!(before > scroll[1] + scroll[3], "the fixture needs a scrollable menu");
+        d.ok("ui.scroll", json!({"id":"panel.menu.scroll","dy":-240.0}), true);
+        // Wheel scrolling is smoothed over subsequent frames, as in the desktop app.
+        d.frames(60, true);
+        let after = d.h.state().auto.find("project.menu.metadataDisplay").unwrap().rect[1];
+        let moved = before - after;
+        assert!((200.0..=260.0).contains(&moved), "the full wheel delta must reach the menu, isolated={isolated}: moved {moved}");
+        assert!(d.h.ctx.input(|input| input.pointer.latest_pos().unwrap().x >= scroll[0]), "scrolling must not move the pointer offscreen");
+        assert!(!d.h.ctx.input(|input| input.pointer.any_down()));
+    }
+}
+
+#[test]
 fn native_j_cannot_start_reverse_playback_during_control_only_editing() {
     let mut d = Driver::new(true);
     d.ok("engine.execute", json!({"command":"playhead.set","params":{"seconds":1}}), true);

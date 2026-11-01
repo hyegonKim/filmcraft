@@ -10,6 +10,57 @@ fn demo() -> Session {
     s
 }
 
+#[test]
+fn new_items_respect_destination_bin_and_undo() {
+    for command in [
+        "file.newSequence",
+        "file.newAdjustmentLayer",
+        "file.newBarsAndTone",
+        "file.newBlackVideo",
+        "file.newColorMatte",
+        "file.newCountingLeader",
+        "file.newTransparentVideo",
+        "file.importDemoFootage",
+    ] {
+        let mut s = demo();
+        let bin = s.execute("file.newBin", json!({"name": "Destination"})).unwrap()["bin"].as_u64().unwrap();
+        let before = serde_json::to_value(&s.project).unwrap();
+        let old: Vec<_> = s.project.items.keys().copied().collect();
+        s.execute(command, json!({"bin": bin})).unwrap();
+        let added: Vec<_> = s.project.items.keys().filter(|id| !old.contains(id)).copied().collect();
+        assert!(!added.is_empty(), "{command}");
+        assert!(
+            added.iter().all(|id| s.project.root.find_bin(filmcraft_project::BinId(bin)).unwrap().children.contains(&filmcraft_project::BinEntry::Item(*id))),
+            "{command}: destination bin"
+        );
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(serde_json::to_value(&s.project).unwrap(), before, "{command}: creation is one undo step");
+    }
+}
+
+#[test]
+fn new_items_reject_invalid_destination_without_changes() {
+    for command in [
+        "file.newSequence",
+        "file.newAdjustmentLayer",
+        "file.newBarsAndTone",
+        "file.newBlackVideo",
+        "file.newColorMatte",
+        "file.newCountingLeader",
+        "file.newTransparentVideo",
+        "file.importDemoFootage",
+    ] {
+        for bin in [json!(u64::MAX), json!("not a bin"), json!(-1)] {
+            let mut s = demo();
+            let before = serde_json::to_value(&s.project).unwrap();
+            let undo = s.history.undo.len();
+            assert!(s.execute(command, json!({"bin": bin})).is_err(), "{command}: reject {bin}");
+            assert_eq!(serde_json::to_value(&s.project).unwrap(), before, "{command}: project unchanged");
+            assert_eq!(s.history.undo.len(), undo, "{command}: history unchanged");
+        }
+    }
+}
+
 fn temp_dir(tag: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("fc-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);

@@ -219,6 +219,9 @@ fn timecode_marker_and_in_point_sync_within_one_frame() {
     for (it, t) in [(items[0], rate.tick_of(event_frame_a)), (items[1], rate.snap(at_b))] {
         let m = p.item_mut(it).unwrap().as_media_mut().unwrap();
         m.markers.push(Marker {
+            url: String::new(),
+            author: String::new(),
+            custom_color: None,
             id: MarkerId(900 + it.0),
             start: t,
             duration: Tick::ZERO,
@@ -823,11 +826,11 @@ fn selection_top_down_and_view_toggles() {
     s.execute("multicam.selectionTopDown", json!({"enabled": false})).unwrap();
     let bottom = clip(&mut s);
     assert_eq!((top, bottom), (high, low));
-    // preview monitor on by default; transmit has no device yet
+    // Preview monitor on by default; transmit is unavailable without an output backend.
     assert!(s.state.multicam_view.show_preview);
     assert_eq!(s.execute("multicam.showPreviewMonitor", json!({})).unwrap()["enabled"], false);
-    let t = s.execute("multicam.transmitView", json!({})).unwrap();
-    assert_eq!((t["enabled"].as_bool(), t["device"].is_null()), (Some(true), true));
+    assert!(s.execute("multicam.transmitView", json!({})).is_err());
+    assert!(!s.state.multicam_view.transmit);
     assert_eq!(s.execute("multicam.audioFollowsVideo", json!({})).unwrap()["enabled"], true);
 }
 
@@ -920,4 +923,61 @@ fn multicam_menu_items_are_enabled_only_for_clips_they_work_on() {
     s.execute("clip.multicamFlatten", json!({"clips": [nest.0]})).unwrap();
     let q = s.active_sequence().unwrap();
     assert!(q.find_item(nest).is_none(), "flattened into the camera clips");
+}
+
+#[test]
+fn unavailable_transmit_rejects_without_changing_session() {
+    let mut s = Session::default();
+    let project = serde_json::to_value(&s.project).unwrap();
+    let state = serde_json::to_value(&s.state).unwrap();
+    let history = s.execute("history.list", json!({})).unwrap();
+    let journal = s.journal.len();
+    assert!(!s.is_enabled("multicam.transmitView"), "no external output backend exists");
+    for params in [json!({}), json!({"enabled": true}), json!({"enabled": false}), json!({"items": [123]})] {
+        let error = s.execute("multicam.transmitView", params).expect_err("must not pretend to transmit");
+        assert!(error.to_string().contains("External video output is not available"), "{error}");
+        assert_eq!(serde_json::to_value(&s.project).unwrap(), project);
+        assert_eq!(serde_json::to_value(&s.state).unwrap(), state);
+        assert_eq!(s.execute("history.list", json!({})).unwrap(), history);
+        assert_eq!(s.journal.len(), journal);
+    }
+}
+
+/// Synchronizing by audio against a long stereo reference clip works (#3554): the analysis read is
+/// chunked, so a stereo read of more than 23 minutes stays under the audio buffer limit instead of
+/// failing as "has no audio to synchronize by".
+#[test]
+fn audio_sync_against_a_long_stereo_clip() {
+    let Some(ffmpeg) = filmcraft_testkit::ffmpeg_or_skip("long stereo sync") else { return };
+    let dir = filmcraft_testkit::fixtures_dir("multicam");
+    // 25 minutes of stereo pink noise (AAC, small), and a 20 s excerpt of it starting at 100 s
+    let gen_clip = |name: &str, extra: &[&str]| {
+        filmcraft_testkit::fixtures::generate(&dir.join(name), |tmp| {
+            let t = tmp.to_string_lossy();
+            let mut args = vec![
+                "-f",
+                "lavfi",
+                "-i",
+                "color=s=64x36:r=1:d=1500",
+                "-f",
+                "lavfi",
+                "-i",
+                "anoisesrc=d=1500:c=pink:r=48000:a=0.35:s=11,aformat=channel_layouts=stereo",
+            ];
+            args.extend_from_slice(extra);
+            args.extend_from_slice(&["-c:v", "libx264", "-c:a", "aac", "-b:a", "32k", "-shortest", "-f", "mp4", &t]);
+            ff(&ffmpeg, &args)
+        })
+    };
+    let long = gen_clip("long_stereo.mp4", &["-t", "1500"]);
+    let short = gen_clip("long_stereo_excerpt.mp4", &["-ss", "100", "-t", "20"]);
+    // ffmpeg is there (the skip above): a fixture that cannot be generated is a failure, not a pass
+    let (Some(long), Some(short)) = (long, short) else { panic!("ffmpeg could not generate the long stereo fixtures") };
+    let mut s = Session::default();
+    let items = import(&mut s, &[&long, &short]);
+    let clips: Vec<_> = items.iter().map(|i| crate::sync::project_clip(&s.project, *i).unwrap()).collect();
+    let a = crate::sync::anchors(&s, &clips, 0, &crate::sync::Method::Audio, Tick::ZERO).unwrap();
+    // the excerpt's media 0 lines up with the long clip's media 100 s: the long clip starts 100 s earlier
+    let dt = (a[1].anchor - a[0].anchor).0 as f64 / TICKS_PER_SECOND as f64;
+    assert!((dt + 100.0).abs() < 0.05, "{dt}");
 }

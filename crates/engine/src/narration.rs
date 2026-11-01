@@ -36,6 +36,11 @@ use filmcraft_tts as tts;
 use crate::commands::{CommandSpec, always, bad, has_seq, str_p, time_p, u64_p};
 use crate::{EngineError, Result, Session};
 
+/// Whether this build can download and synthesize natural voices.
+pub const fn natural_voices_available() -> bool {
+    cfg!(feature = "neural-voices")
+}
+
 /// Item name prefix of generated narrations.
 const BASE_NAME: &str = "Narration";
 
@@ -137,7 +142,7 @@ fn package_json() -> Value {
         "missingBytes": dir.as_deref().map_or(tts::catalog::size(), tts::catalog::missing_bytes),
         "license": tts::catalog::LICENSE,
         "source": tts::catalog::SOURCE,
-        "available": cfg!(feature = "neural-voices"),
+        "available": natural_voices_available(),
     })
 }
 
@@ -454,7 +459,7 @@ fn download_voices(s: &mut Session, p: &Value) -> Result<Value> {
     if tts::catalog::installed(&dir) {
         return Ok(json!({"job": null, "installed": true}));
     }
-    if !cfg!(feature = "neural-voices") {
+    if !natural_voices_available() {
         return Err(bad(cmd, "natural voices are not available in this build (built without the `neural-voices` feature)"));
     }
     let wait = p.get("wait").and_then(Value::as_bool).unwrap_or(false);

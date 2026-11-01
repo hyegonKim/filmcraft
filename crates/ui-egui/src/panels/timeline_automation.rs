@@ -111,20 +111,24 @@ pub fn header_button(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, 
     let opts = lane_options(tr);
     egui::Popup::menu(&resp).show(|ui| {
         ui.set_min_width(170.0);
-        let c = ui.selectable_label(showing.is_none(), tl!("Clip Keyframes"));
-        app.auto.add(&format!("timeline.track.{label}.keyframes.clip"), c.rect, "Clip Keyframes");
-        if c.clicked() {
-            app.ui.timeline.track_lanes.remove(&r.track.0);
-        }
-        ui.separator();
-        ui.label(egui::RichText::new(tl!("Track Keyframes")).small());
-        for (k, l) in &opts {
-            let e = ui.selectable_label(showing.as_deref() == Some(k.as_str()), l);
-            app.auto.add(&format!("timeline.track.{label}.keyframes.{k}"), e.rect, l);
-            if e.clicked() {
-                app.ui.timeline.track_lanes.insert(r.track.0, k.clone());
+        let max_height = (ui.ctx().content_rect().height() - 16.0).max(1.0);
+        let scroll = egui::ScrollArea::vertical().id_salt(("tl-lane-menu-scroll", r.track.0)).max_height(max_height).show(ui, |ui| {
+            let c = ui.selectable_label(showing.is_none(), tl!("Clip Keyframes"));
+            app.auto.add(&format!("timeline.track.{label}.keyframes.clip"), c.rect, "Clip Keyframes");
+            if c.clicked() {
+                app.ui.timeline.track_lanes.remove(&r.track.0);
             }
-        }
+            ui.separator();
+            ui.label(egui::RichText::new(tl!("Track Keyframes")).small());
+            for (k, l) in &opts {
+                let e = ui.selectable_label(showing.as_deref() == Some(k.as_str()), l);
+                app.auto.add(&format!("timeline.track.{label}.keyframes.{k}"), e.rect, l);
+                if e.clicked() {
+                    app.ui.timeline.track_lanes.insert(r.track.0, k.clone());
+                }
+            }
+        });
+        app.auto.add(&format!("timeline.track.{label}.keyframes.scroll"), scroll.inner_rect, "Track keyframes");
     });
 }
 
@@ -211,7 +215,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, layout: &
             let hot = resp.hovered() || dragging.is_some();
             icons::paint(&p, Rect::from_center_size(c, vec2(9.0, 9.0)), Icon::Keyframe, if hot { Color32::WHITE } else { LANE_COL });
             app.auto.add(&format!("timeline.track.{label}.lane.kf.{i}"), hr, &format!("{name} keyframe {v:.1}"));
-            if resp.drag_started()
+            if resp.drag_started_by(egui::PointerButton::Primary)
                 && let Some(pp) = pointer
             {
                 ui.data_mut(|d| d.insert_temp(drag_id(), KfDrag { track: r.track.0, index: i, orig: k.time, grab: pp - c }));

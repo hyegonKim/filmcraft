@@ -12,6 +12,7 @@
 use std::sync::mpsc::{Sender, channel};
 
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use filmcraft_engine::Session;
 use filmcraft_engine::project_panel::{FREEFORM_POS, FREEFORM_STACK, ViewMode};
 use filmcraft_project::{BinEntry, ItemId};
@@ -225,7 +226,6 @@ fn list_view_columns_sort_resize_and_rename() {
     d.ok("ui.menu.invoke", json!({"id": "projectPanel.rename"}));
     d.frames(3);
     assert!(d.has("project.rename"));
-    d.key("Cmd+A");
     d.ok("ui.type", json!({"text": "Hero shot"}));
     d.frames(2);
     d.key("Enter");
@@ -234,6 +234,30 @@ fn list_view_columns_sort_resize_and_rename() {
     assert!(d.app().ui.project_panel.rename.is_none());
     d.exec("edit.undo", json!({}));
     assert_ne!(d.app().session.project.item(ItemId(items[0])).unwrap().name, "Hero shot");
+}
+
+#[test]
+fn a_right_button_drag_does_not_resize_a_list_column() {
+    let mut d = project_driver();
+    d.exec("project.view.set", json!({"view": "list"}));
+    d.frames(3);
+    let width = |d: &mut Driver| d.app().session.prefs.project_panel.view.columns.iter().find(|c| c.name == "Frame Rate").unwrap().width;
+    let w0 = width(&mut d);
+    let r = d.rect("project.list.resize.Frame Rate");
+    let from = egui::pos2(r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    let button = egui::PointerButton::Secondary;
+    let to = from + egui::vec2(60.0, 0.0);
+    let send = |d: &mut Driver, event| {
+        d.harness.input_mut().events.push(event);
+        d.frames(1);
+    };
+    send(&mut d, egui::Event::PointerMoved(from));
+    send(&mut d, egui::Event::PointerButton { pos: from, button, pressed: true, modifiers: egui::Modifiers::NONE });
+    send(&mut d, egui::Event::PointerMoved(from + egui::vec2(20.0, 0.0)));
+    send(&mut d, egui::Event::PointerMoved(to));
+    send(&mut d, egui::Event::PointerButton { pos: to, button, pressed: false, modifiers: egui::Modifiers::NONE });
+    d.frames(3);
+    assert_eq!(width(&mut d), w0);
 }
 
 // Regression test for #1295: in a narrow List-view column the sort arrow was painted over the end of
@@ -335,9 +359,287 @@ fn icon_view_hover_scrub_sets_in_and_out() {
     d.frames(4);
     d.key("I");
     assert!(d.app().session.active_sequence().unwrap().mark_in.is_some());
-    // up one level
+    // up one level: a full-size button, not a 16 px glyph
+    let [_, _, w, h] = d.rect("project.up");
+    assert!(w >= 24.0 && h >= 22.0, "Up one level is {w}×{h}");
     d.click("project.up");
     assert_eq!(d.app().ui.project_panel.bin, None);
+}
+
+/// Drag with the middle button from `from` to `to`, a frame per step.
+fn middle_drag(d: &mut Driver, from: egui::Pos2, to: egui::Pos2) {
+    let button = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Middle, pressed, modifiers: egui::Modifiers::NONE };
+    let send = |d: &mut Driver, e| {
+        d.harness.input_mut().events.push(e);
+        d.frames(1);
+    };
+    send(d, egui::Event::PointerMoved(from));
+    send(d, button(from, true));
+    for k in 1..=8 {
+        send(d, egui::Event::PointerMoved(from.lerp(to, k as f32 / 8.0)));
+    }
+    send(d, button(to, false));
+    d.frames(2);
+}
+
+#[test]
+fn freeform_middle_drag_pans_and_never_moves_a_card() {
+    // #579: a middle-button drag pans the canvas, on a card as on the background
+    let mut d = project_driver();
+    let (bin, items) = d.footage();
+    d.exec("project.view.set", json!({"view": "freeform"}));
+    d.ok("ui.menu.invoke", json!({"id": "projectPanel.openBin", "params": {"bin": bin, "how": "inPlace"}}));
+    // one card in view, one far out so the canvas is larger than the panel
+    d.exec("project.freeform.move", json!({"items": [items[0]], "x": 40, "y": 40}));
+    d.exec("project.freeform.move", json!({"items": [items[1]], "x": 4000, "y": 3000}));
+    let card = format!("project.item.{}", items[0]);
+    d.wait_for(&card);
+    d.frames(2);
+    let pos = |d: &mut Driver| d.app().session.project.item(ItemId(items[0])).unwrap().metadata.get(FREEFORM_POS).cloned();
+    let (before, selection) = (pos(&mut d), d.app().session.state.project_selection.clone());
+    let canvas = d.rect("project.freeform");
+    let r = d.rect(&card);
+    let from = egui::pos2(r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    middle_drag(&mut d, from, from - egui::vec2(120.0, 80.0));
+    let moved = d.rect("project.freeform");
+    assert!((canvas[0] - moved[0] - 120.0).abs() < 4.0 && (canvas[1] - moved[1] - 80.0).abs() < 4.0, "panned {canvas:?} -> {moved:?}");
+    assert_eq!(pos(&mut d), before, "the card stayed put");
+    assert_eq!(d.app().session.state.project_selection, selection);
+}
+
+#[test]
+fn icon_view_cuts_long_names_and_shows_them_on_hover() {
+    // a bin name too long for its card ends in "…" before the item count and is shown in full on hover
+    let mut d = project_driver();
+    d.exec("project.view.set", json!({"view": "icon"}));
+    let long = "Home Video Editing Summer 2026 — Family Trip to the Coast";
+    let bin = d.exec("file.newBin", json!({"name": long}))["bin"].as_u64().expect("bin id");
+    let card = format!("project.bin.{bin}");
+    d.wait_for(&card);
+    // the card names itself in full for assistive technology; the tooltip is a second node
+    let shown = |d: &Driver| d.harness.query_all_by_label(long).count();
+    let before = shown(&d);
+    d.ok("ui.move", json!({"id": card, "fx": 0.5, "fy": 0.5}));
+    for _ in 0..60 {
+        if shown(&d) > before {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        d.frames(1);
+    }
+    assert!(shown(&d) > before, "hovering a cut-off name shows it in full");
+    d.snapshot("project-icon-long-name", Some("panel.Project"));
+}
+
+#[test]
+fn floating_background_import_keeps_its_destination_and_cancel_is_unchanged() {
+    let dir = media_dir("floating-background-import");
+    let path = dir.join("a-interview.wav").to_string_lossy().into_owned();
+    let mut d = project_driver();
+    let (bin, _) = d.footage();
+    d.app().hooks.pick_files = Some(Box::new(move |_| vec![path.clone()]));
+    d.exec("project.view.set", json!({"view": "freeform"}));
+    d.ok("ui.menu.invoke", json!({"id": "projectPanel.openBin", "params": {"bin": bin, "how": "newWindow"}}));
+    d.frames(3);
+    let before: Vec<_> = d.app().session.project.items.keys().copied().collect();
+    let open_background = |d: &mut Driver| {
+        let c = d.rect("projectBin.0.freeform");
+        d.ok("ui.click", json!({"x": c[0] + c[2] - 40.0, "y": c[1] + 20.0, "button": "right"}));
+        d.frames(3);
+    };
+    open_background(&mut d);
+    d.click("projectBin.0.backgroundMenu.file.import");
+    let project = &d.app().session.project;
+    let added: Vec<_> = project.items.keys().filter(|id| !before.contains(id)).copied().collect();
+    assert_eq!(added.len(), 1);
+    assert!(project.root.find_bin(filmcraft_project::BinId(bin)).unwrap().children.contains(&BinEntry::Item(added[0])));
+    let before_cancel = project.to_json();
+    d.app().hooks.pick_files = Some(Box::new(|_| Vec::new()));
+    open_background(&mut d);
+    d.click("projectBin.0.backgroundMenu.file.import");
+    assert_eq!(d.app().session.project.to_json(), before_cancel);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn project_new_items_stay_in_the_originating_bin() {
+    for how in ["inPlace", "newWindow"] {
+        for command in [
+            "file.newSequence",
+            "file.newAdjustmentLayer",
+            "file.newBarsAndTone",
+            "file.newBlackVideo",
+            "file.newColorMatte",
+            "file.newCountingLeader",
+            "file.newTransparentVideo",
+            "file.importDemoFootage",
+        ] {
+            let mut d = project_driver();
+            let (bin, _) = d.footage();
+            d.exec("project.view.set", json!({"view": "freeform"}));
+            d.ok("ui.menu.invoke", json!({"id": "projectPanel.openBin", "params": {"bin": bin, "how": how}}));
+            d.frames(3);
+            let pre = if how == "inPlace" { "project" } else { "projectBin.0" };
+            let canvas = d.rect(&format!("{pre}.freeform"));
+            let before: Vec<_> = d.app().session.project.items.keys().copied().collect();
+            d.ok("ui.click", json!({"x": canvas[0] + canvas[2] - 40.0, "y": canvas[1] + 20.0, "button": "right"}));
+            d.frames(3);
+            d.click(&format!("{pre}.backgroundMenu.newItem"));
+            d.click(&format!("{pre}.newItem.{command}"));
+            // New Sequence sizes itself over its first frames, like the existing sequence UI tests.
+            d.frames(10);
+            match command {
+                "file.newSequence" => {
+                    d.click("sequenceSettings.ok");
+                }
+                "file.newColorMatte" => {
+                    d.click("colorMatte.ok");
+                }
+                _ => {}
+            }
+            let diagnostic = {
+                let app = d.app();
+                format!("status={}, dialog={:?}, draft={:?}", app.ui.status, app.dialog, app.ui.sequence_settings)
+            };
+            let project = &d.app().session.project;
+            let added: Vec<_> = project.items.keys().filter(|id| !before.contains(id)).copied().collect();
+            assert!(!added.is_empty(), "{how}/{command}: must create items; {diagnostic}");
+            assert!(
+                added.iter().all(|id| project.root.find_bin(filmcraft_project::BinId(bin)).unwrap().children.contains(&BinEntry::Item(*id))),
+                "{how}/{command}: new items must stay in the bin whose menu was used"
+            );
+        }
+    }
+}
+
+#[test]
+fn save_arrangement_without_width_uses_the_viewport_not_canvas_extent() {
+    let mut d = project_driver();
+    let (bin, items) = d.footage();
+    d.exec("project.view.set", json!({"view": "freeform"}));
+    d.ok("ui.menu.invoke", json!({"id": "projectPanel.openBin", "params": {"bin": bin, "how": "inPlace"}}));
+    d.frames(3);
+    let viewport = d.rect("project.freeform.viewport");
+    d.exec("project.freeform.move", json!({"items": [items[0]], "x": 1900.0, "y": 12.0, "snap": false}));
+    d.frames(3);
+    assert!(d.rect("project.freeform")[2] > viewport[2]);
+    d.ok("ui.menu.invoke", json!({"id": "projectPanel.saveArrangement"}));
+    let draft = d.ok("ui.inspect", json!({}));
+    assert_eq!(draft["ui"]["project_panel"]["dialog"]["saveArrangement"]["width"], json!(viewport[2]));
+}
+
+#[test]
+fn freeform_card_context_resize_and_stack_preserve_wide_layout() {
+    let mut d = project_driver();
+    let (bin, items) = d.footage();
+    d.exec("project.view.set", json!({"view": "freeform"}));
+    d.ok("ui.menu.invoke", json!({"id": "projectPanel.openBin", "params": {"bin": bin, "how": "inPlace"}}));
+    d.frames(3);
+    let canvas = d.rect("project.freeform");
+    let last = *items.last().unwrap();
+    let r = d.rect(&format!("project.item.{last}"));
+    let before = (r[0] - canvas[0], r[1] - canvas[1]);
+    for action in ["larger", "smaller", "default"] {
+        d.exec("project.select", json!({"items": [last]}));
+        d.ok("ui.click", json!({"id": format!("project.item.{last}"), "button": "right"}));
+        d.click("project.cardMenu.clipSize");
+        d.click(&format!("project.cardMenu.clipSize.{action}"));
+        let pos = d.app().session.project.item(ItemId(last)).unwrap().metadata[FREEFORM_POS].clone();
+        let (x, y, _) = filmcraft_engine::project_panel::parse_pos(&pos).unwrap();
+        assert!((x - before.0).abs() < 0.1 && (y - before.1).abs() < 0.1, "{action}: resized card moved from {before:?} to {x},{y}");
+        d.exec("edit.undo", json!({}));
+        d.frames(2);
+    }
+    d.exec("project.select", json!({"items": [items[0], items[1]]}));
+    d.ok("ui.click", json!({"id": format!("project.item.{}", items[0]), "button": "right"}));
+    d.click("project.cardMenu.stack");
+    let pos = d.app().session.project.item(ItemId(last)).unwrap().metadata[FREEFORM_POS].clone();
+    let (x, y, _) = filmcraft_engine::project_panel::parse_pos(&pos).unwrap();
+    assert!((x - before.0).abs() < 0.1 && (y - before.1).abs() < 0.1, "stack must not move unrelated cards");
+}
+
+#[test]
+fn floating_rename_routes_to_its_originating_panel() {
+    let mut d = project_driver();
+    let (bin, items) = d.footage();
+    d.exec("project.view.set", json!({"view": "icon"}));
+    d.ok("ui.menu.invoke", json!({"id": "projectPanel.openBin", "params": {"bin": bin, "how": "newWindow"}}));
+    d.ok("ui.click", json!({"id": format!("projectBin.0.item.{}", items[0]), "button": "right"}));
+    d.click("projectBin.0.itemMenu.rename");
+    d.frames(3);
+    assert_eq!(d.app().ui.project_panel.rename.as_ref().unwrap().panel, "projectBin.0");
+    assert!(d.has("projectBin.0.rename"), "floating item rename must be visible");
+    d.key("Escape");
+    let child = d.exec("file.newBin", json!({"name": "Child", "parent": bin}))["bin"].as_u64().unwrap();
+    d.ok("ui.click", json!({"id": format!("projectBin.0.bin.{child}"), "button": "right"}));
+    d.click("projectBin.0.binMenu.rename");
+    d.frames(3);
+    assert_eq!(d.app().ui.project_panel.rename.as_ref().unwrap().panel, "projectBin.0");
+    assert!(d.has("projectBin.0.rename"), "floating bin rename must be visible");
+}
+
+#[test]
+fn floating_freeform_save_arrangement_targets_its_own_bin() {
+    let mut d = project_driver();
+    let (bin, items) = d.footage();
+    d.exec("project.view.set", json!({"view": "freeform"}));
+    d.ok("ui.menu.invoke", json!({"id": "projectPanel.openBin", "params": {"bin": bin, "how": "newWindow"}}));
+    d.frames(3);
+    let canvas = d.rect("projectBin.0.freeform");
+    d.ok("ui.click", json!({"x": canvas[0] + canvas[2] - 40.0, "y": canvas[1] + 20.0, "button": "right"}));
+    d.frames(3);
+    d.click("projectBin.0.canvasMenu.saveArrangement");
+    let draft = d.ok("ui.inspect", json!({}));
+    assert_eq!(draft["ui"]["project_panel"]["dialog"]["saveArrangement"]["bin"], json!(bin), "floating menu must target its own bin");
+    d.click("projectDialog.name");
+    d.ok("ui.type", json!({"text": "Floating arrangement"}));
+    d.click("projectDialog.ok");
+    let saved: Vec<_> =
+        d.app().session.project.items.values().filter(|it| it.metadata.contains_key("Freeform Arrangement: Floating arrangement")).map(|it| it.id.0).collect();
+    assert_eq!(saved.len(), items.len());
+    assert!(saved.iter().all(|id| items.contains(id)), "other bins must remain untouched");
+}
+
+#[test]
+fn freeform_context_alignment_uses_the_displayed_width() {
+    let mut d = project_driver();
+    let (bin, items) = d.footage();
+    d.exec("project.view.set", json!({"view": "freeform"}));
+    d.ok("ui.menu.invoke", json!({"id": "projectPanel.openBin", "params": {"bin": bin, "how": "inPlace"}}));
+    d.frames(3);
+    let canvas = d.rect("project.freeform");
+    assert!(canvas[2] > 1200.0, "wide-panel regression");
+    let before: Vec<_> = items.iter().map(|id| (*id, d.rect(&format!("project.item.{id}")))).collect();
+    d.ok("ui.click", json!({"x": canvas[0] + canvas[2] - 40.0, "y": canvas[1] + 400.0, "button": "right"}));
+    d.click("project.canvasMenu.alignToGrid");
+    let grid = d.app().session.prefs.project_panel.freeform.grid;
+    for (id, r) in before {
+        let pos = d.app().session.project.item(ItemId(id)).unwrap().metadata[FREEFORM_POS].clone();
+        let (x, y, _) = filmcraft_engine::project_panel::parse_pos(&pos).unwrap();
+        let expected = (((r[0] - canvas[0]) / grid).round() * grid, ((r[1] - canvas[1]) / grid).round() * grid);
+        assert!((x - expected.0).abs() < 0.1 && (y - expected.1).abs() < 0.1, "{id}: {x},{y} expected {expected:?}");
+    }
+}
+
+#[test]
+fn freeform_saved_arrangement_uses_the_displayed_width() {
+    let mut d = project_driver();
+    let (bin, items) = d.footage();
+    d.exec("project.view.set", json!({"view": "freeform"}));
+    d.ok("ui.menu.invoke", json!({"id": "projectPanel.openBin", "params": {"bin": bin, "how": "inPlace"}}));
+    d.frames(3);
+    let canvas = d.rect("project.freeform");
+    let before: Vec<_> = items.iter().map(|id| (*id, d.rect(&format!("project.item.{id}")))).collect();
+    d.ok("ui.click", json!({"x": canvas[0] + canvas[2] - 40.0, "y": canvas[1] + 400.0, "button": "right"}));
+    d.click("project.canvasMenu.saveArrangement");
+    d.click("projectDialog.name");
+    d.ok("ui.type", json!({"text": "Wide arrangement"}));
+    d.click("projectDialog.ok");
+    for (id, r) in before {
+        let pos = d.app().session.project.item(ItemId(id)).unwrap().metadata["Freeform Arrangement: Wide arrangement"].clone();
+        let (x, y, _) = filmcraft_engine::project_panel::parse_pos(&pos).unwrap();
+        assert!((x - (r[0] - canvas[0])).abs() < 0.1 && (y - (r[1] - canvas[1])).abs() < 0.1, "{id}: saved {x},{y} differs from visible card {r:?}");
+    }
 }
 
 #[test]
@@ -509,11 +811,32 @@ fn bins_open_in_place_in_a_tab_or_in_a_window() {
     // inline rename of a bin
     d.ok("ui.menu.invoke", json!({"id": "projectPanel.rename", "params": {"bin": bin}}));
     d.frames(3);
-    d.key("Cmd+A");
     d.ok("ui.type", json!({"text": "Camera A"}));
     d.key("Enter");
     let name = d.app().session.project.root.find_bin(filmcraft_project::BinId(bin)).unwrap().name.clone();
     assert_eq!(name, "Camera A");
+}
+
+#[test]
+fn bin_counts_exclude_selections_from_other_bins() {
+    let mut d = project_driver();
+    let (bin, items) = d.footage();
+    let outside = *d.app().session.project.items.keys().find(|i| !items.contains(&i.0)).unwrap();
+    d.exec("project.select", json!({"items": [items[0], outside.0]}));
+    let empty = d.exec("file.newBin", json!({"name": "Empty count regression"}))["bin"].as_u64().unwrap();
+    for how in ["inPlace", "newTab", "newWindow"] {
+        d.ok("ui.menu.invoke", json!({"id": "projectPanel.openBin", "params": {"bin": empty, "how": how}}));
+        d.frames(3);
+        let pre = if how == "inPlace" { "project" } else { "projectBin.0" };
+        assert_eq!(d.label(&format!("{pre}.count")), "0 items", "{how}");
+        assert_eq!(d.app().session.state.project_selection.len(), 2, "counting preserves selection");
+        if how != "inPlace" {
+            d.ok("ui.menu.invoke", json!({"id": "projectPanel.closeBinTab", "params": {"tab": 0}}));
+        }
+    }
+    d.ok("ui.menu.invoke", json!({"id": "projectPanel.openBin", "params": {"bin": bin, "how": "inPlace"}}));
+    d.frames(3);
+    assert_eq!(d.label("project.count"), format!("1 of {} items selected", items.len()));
 }
 
 #[test]
@@ -552,6 +875,67 @@ fn select_all_takes_only_the_shown_bin() {
     assert_eq!(d.app().ui.project_panel.active_tab, Some(0));
     d.key("Cmd+A");
     assert_eq!(sorted(&d.app().session.state.project_selection), footage);
+}
+
+/// With a sequence open, the native macOS menu has Select All enabled and takes Cmd+A (and
+/// Cmd+Shift+A) before the window sees the key: with the Project panel focused they still act on
+/// its items, not on the Timeline's clips (#1752).
+#[test]
+fn native_menu_select_all_acts_on_the_focused_project_panel() {
+    let mut d = Driver::demo();
+    assert!(d.app().session.active_sequence().is_some());
+    d.ok("ui.panel.show", json!({"panel": "Project"}));
+    d.exec("project.view.set", json!({"view": "list"}));
+    let (bin, shown) = d.footage();
+    d.app().ui.expanded_bins = vec![bin];
+    d.frames(2);
+    let clip = d.app().session.active_sequence().and_then(|q| q.all_tracks().find_map(|t| t.items.first().map(|i| i.id))).unwrap();
+    d.exec("timeline.select", json!({"clips": [clip.0]}));
+    let timeline = d.app().session.state.selection.clone();
+    assert!(shown.len() > 1, "{shown:?}");
+    let item = shown[0];
+    d.wait_for(&format!("project.item.{item}"));
+    d.click(&format!("project.item.{item}"));
+    assert_eq!(d.app().ui.focused, filmcraft_ui_egui::dock::PanelKind::Project);
+    assert_eq!(selection(&mut d), vec![item]);
+    let (tx, rx) = channel();
+    d.app().command_inbox = Some(rx);
+    tx.send("edit.selectAll".to_string()).unwrap();
+    d.frames(2);
+    assert_eq!(selection(&mut d), sorted(shown), "Select All selects the panel's items");
+    assert_eq!(d.app().session.state.selection, timeline, "and leaves the timeline selection alone");
+    tx.send("edit.deselectAll".to_string()).unwrap();
+    d.frames(2);
+    assert!(selection(&mut d).is_empty(), "Deselect All clears the panel's selection");
+    assert_eq!(d.app().session.state.selection, timeline, "and leaves the timeline selection alone");
+}
+
+/// Select All while typing in the Project panel's search selects the typed text, not the clips: on
+/// macOS the native menu takes Cmd+A before the field sees the key and sent Edit ▸ Select All,
+/// which selected every clip on the timeline. Typing after it replaces the search.
+#[test]
+fn select_all_in_the_search_box_selects_its_text() {
+    let mut d = project_driver();
+    d.click("project.search");
+    d.ok("ui.type", json!({"text": "comedy manager"}));
+    d.frames(2);
+    let (timeline, items) = (d.app().session.state.selection.clone(), d.app().session.state.project_selection.clone());
+    let (tx, rx) = channel();
+    d.app().command_inbox = Some(rx);
+    tx.send("edit.selectAll".to_string()).unwrap();
+    d.frames(2);
+    assert_eq!(d.app().session.state.selection, timeline, "the timeline selection is left alone");
+    assert_eq!(d.app().session.state.project_selection, items, "and so are the Project panel's items");
+    d.ok("ui.type", json!({"text": "club"}));
+    d.frames(2);
+    assert_eq!(d.app().ui.project_search, "club", "the typed text replaced the selected search");
+    // the same from the control channel, which runs after the field has been laid out
+    d.ok("ui.menu.invoke", json!({"id": "edit.selectAll"}));
+    d.frames(2);
+    assert_eq!(d.app().session.state.selection, timeline);
+    d.ok("ui.type", json!({"text": "stool"}));
+    d.frames(2);
+    assert_eq!(d.app().ui.project_search, "stool");
 }
 
 #[test]
@@ -628,7 +1012,6 @@ fn new_bin_asks_for_its_name() {
     d.frames(2);
     let bin = d.app().ui.project_panel.rename.as_ref().and_then(|r| r.bin).expect("the new bin's name is being edited");
     assert!(d.has("project.rename"), "the name field is shown");
-    d.key("Cmd+A");
     d.ok("ui.type", json!({"text": "Interviews"}));
     d.key("Enter");
     let name = d.app().session.project.root.find_bin(filmcraft_project::BinId(bin)).unwrap().name.clone();
@@ -637,6 +1020,76 @@ fn new_bin_asks_for_its_name() {
     let r = d.ok("ui.menu.invoke", json!({"id": "file.newBin", "params": {"name": "B-roll"}}));
     assert!(r["bin"].as_u64().is_some(), "{r}");
     assert!(d.app().ui.project_panel.rename.is_none());
+}
+
+#[test]
+fn bin_card_name_is_clipped_clear_of_the_item_count() {
+    fn texts(shapes: &[egui::Shape], clip: egui::Rect, out: &mut Vec<(String, egui::Pos2, egui::Rect)>) {
+        for shape in shapes {
+            match shape {
+                egui::Shape::Vec(v) => texts(v, clip, out),
+                egui::Shape::Text(t) => out.push((t.galley.text().to_string(), t.pos, clip)),
+                _ => {}
+            }
+        }
+    }
+    for mode in ["icon", "freeform"] {
+        let mut d = project_driver();
+        let name = "A very long bin name that must not cover its item count";
+        let bin = d.exec("file.newBin", json!({"name": name}))["bin"].as_u64().unwrap();
+        d.exec("project.view.set", json!({"view": mode}));
+        d.frames(3);
+        let [x, y, w, h] = d.rect(&format!("project.bin.{bin}"));
+        let label = egui::Rect::from_min_max(egui::pos2(x, y + h), egui::pos2(x + w, y + h + 22.0));
+        let mut drawn = Vec::new();
+        for shape in &d.harness.output().shapes {
+            texts(std::slice::from_ref(&shape.shape), shape.clip_rect, &mut drawn);
+        }
+        let (_, _, name_clip) = drawn.iter().find(|(text, pos, _)| text == name && label.contains(*pos)).expect("bin name is drawn");
+        let (_, count_pos, _) = drawn.iter().find(|(text, pos, _)| text == "0 items" && label.contains(*pos)).expect("item count is drawn");
+        assert!(name_clip.max.x <= count_pos.x, "{mode}: bin name extends past the count at {}", count_pos.x);
+    }
+}
+
+#[test]
+fn nested_new_bin_reveals_rename_in_its_originating_panel() {
+    for mode in ["list", "icon", "freeform"] {
+        for how in ["inPlace", "newTab", "newWindow"] {
+            let mut d = project_driver();
+            d.exec("project.view.set", json!({"view": mode}));
+            let (parent, _) = d.footage();
+            let root = d.app().session.project.root.id.0;
+            d.ok("ui.menu.invoke", json!({"id": "projectPanel.openBin", "params": {"bin": root, "how": how}}));
+            let pre = if how == "inPlace" { "project" } else { "projectBin.0" };
+            d.ok("ui.menu.invoke", json!({"id": "file.newBin", "params": {"parent": parent, "panel": pre}}));
+            d.frames(3);
+            let bin = d.app().ui.project_panel.rename.as_ref().and_then(|r| r.bin).unwrap();
+            assert!(d.has(&format!("{pre}.bin.{bin}")), "{mode}/{how}: child must be visible");
+            assert!(d.has(&format!("{pre}.rename")), "{mode}/{how}: name must be editable immediately");
+            d.key("Cmd+A");
+            d.ok("ui.type", json!({"text": "Nested interviews"}));
+            d.key("Enter");
+            assert_eq!(d.app().session.project.root.find_bin(filmcraft_project::BinId(bin)).unwrap().name, "Nested interviews", "{mode}/{how}");
+            if how == "newWindow" {
+                assert_eq!(d.app().ui.project_panel.bin, None, "floating action must not navigate the main panel");
+            }
+        }
+    }
+}
+
+#[test]
+fn new_bin_in_freeform_is_visible_and_can_be_named() {
+    let mut d = project_driver();
+    d.exec("project.view.set", json!({"view": "freeform"}));
+    d.click("project.button.file.newBin");
+    let bin = d.app().ui.project_panel.rename.as_ref().and_then(|r| r.bin).unwrap();
+    assert!(d.has(&format!("project.bin.{bin}")), "Freeform must show the new bin");
+    assert!(d.has("project.rename"), "the new bin's name must be editable immediately");
+    d.key("Cmd+A");
+    d.ok("ui.type", json!({"text": "Freeform interviews"}));
+    d.key("Enter");
+    assert_eq!(d.app().session.project.root.find_bin(filmcraft_project::BinId(bin)).unwrap().name, "Freeform interviews");
+    assert_eq!(d.app().session.prefs.project_panel.view.mode, ViewMode::Freeform);
 }
 
 #[test]
@@ -660,6 +1113,43 @@ fn new_bin_then_clear_removes_the_bin() {
     assert!(d.app().session.project.root.find_bin(filmcraft_project::BinId(bin)).is_none(), "Clear removes the new bin");
     assert_eq!(d.app().session.project.root.children.len(), bins0);
     assert_eq!(d.app().session.project.items.len(), items0, "clips already in the project stay");
+}
+
+/// #2106: with nothing selected, Clear and Automate to Sequence are disabled, as in the ≡ menu: a
+/// click does nothing (it used to only put "Select items to clear" / "select an item" in the
+/// status bar). With an item selected both act.
+#[test]
+fn clear_and_automate_buttons_need_a_selection() {
+    let mut d = project_driver();
+    d.exec("project.view.set", json!({"view": "list"}));
+    d.exec("project.select", json!({"items": []}));
+    d.app().ui.project_panel.selected_bin = None;
+    d.frames(2);
+    let project = d.app().session.project.clone();
+    d.app().ui.status.clear();
+    for id in ["project.button.project.delete", "project.button.clip.automateToSequence"] {
+        d.click(id);
+        assert!(d.app().ui.status.is_empty(), "{id}: no message: {}", d.app().ui.status);
+        assert!(std::sync::Arc::ptr_eq(&project, &d.app().session.project), "{id}: nothing changed");
+        assert!(!d.has("automate.ok"), "{id}: no dialog");
+    }
+    // an item selected: Automate to Sequence opens its dialog, Clear removes the item
+    let item = d.app().session.project.items.values().find(|i| i.as_media().is_some()).map(|i| i.id).unwrap();
+    d.exec("project.select", json!({"items": [item.0]}));
+    d.frames(2);
+    d.click("project.button.clip.automateToSequence");
+    assert!(d.has("automate.ok"), "the Automate To Sequence dialog");
+    d.click("automate.cancel");
+    // with no sequence open, Automate to Sequence has nowhere to go: disabled, as its command is
+    let seq = d.app().session.state.active_sequence.take();
+    d.frames(2);
+    d.click("project.button.clip.automateToSequence");
+    assert!(!d.has("automate.ok"), "no sequence: no dialog");
+    assert!(d.app().ui.status.is_empty(), "no sequence: no message: {}", d.app().ui.status);
+    d.app().session.state.active_sequence = seq;
+    d.frames(2);
+    d.click("project.button.project.delete");
+    assert!(d.app().session.project.item(item).is_none(), "Clear removes the selected item");
 }
 
 // ------------------------------------------------------------------------------------ Media Browser
@@ -784,6 +1274,79 @@ fn media_browser_navigation_import_and_columns() {
     d.exec("mediaBrowser.settings", json!({"fileTypes": "image", "view": "list"}));
     d.frames(3);
     assert!(!d.has("mediaBrowser.entry.b-roll.wav") && d.has("mediaBrowser.entry.Selects"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn media_browser_list_columns_resize_by_their_right_edge() {
+    let dir = media_dir("resize");
+    let prefs_path = dir.join("preferences.json");
+    let mut session = Session::default();
+    session.prefs_path = Some(prefs_path.clone());
+    let mut d = Driver::with(session);
+    d.ok("ui.panel.show", json!({"panel": "MediaBrowser"}));
+    d.ok("ui.set", json!({"focused": "MediaBrowser"}));
+    d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
+    d.exec("mediaBrowser.navigate", json!({"path": dir.to_string_lossy()}));
+    d.frames(3);
+    d.wait_for("mediaBrowser.entry.b-roll.wav");
+    let name0 = d.rect("mediaBrowser.header.Name");
+    let next0 = d.rect("mediaBrowser.header.Frame Rate");
+    // drag the Name header's right edge 60 points to the right (saved in preferences)
+    let (ex, ey) = (name0[0] + name0[2] - 1.0, name0[1] + name0[3] / 2.0);
+    d.ok("ui.drag", json!({"from": {"x": ex, "y": ey}, "to": {"x": ex + 60.0, "y": ey}}));
+    d.frames(3);
+    let name1 = d.rect("mediaBrowser.header.Name");
+    let next1 = d.rect("mediaBrowser.header.Frame Rate");
+    assert!(name1[2] > name0[2] + 30.0, "Name {} → {}", name0[2], name1[2]);
+    assert!(next1[0] > next0[0] + 30.0, "Frame Rate starts at {} → {}", next0[0], next1[0]);
+    let saved = d.app().session.prefs.media_browser.column_widths.get("Name").copied().unwrap_or_default();
+    assert!((saved - name1[2]).abs() < 1.0, "saved {saved}, drawn {}", name1[2]);
+    // and written to preferences.json, so it survives a restart
+    let on_disk = filmcraft_engine::autosave::Preferences::load(&prefs_path).media_browser.column_widths.get("Name").copied();
+    assert_eq!(on_disk, Some(saved), "preferences.json");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn media_browser_column_dragged_past_the_header_is_still_saved() {
+    let dir = media_dir("resize-out");
+    let prefs_path = dir.join("preferences.json");
+    let mut session = Session::default();
+    session.prefs_path = Some(prefs_path.clone());
+    let mut d = Driver::with(session);
+    d.ok("ui.panel.show", json!({"panel": "MediaBrowser"}));
+    d.ok("ui.set", json!({"focused": "MediaBrowser"}));
+    d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
+    d.exec("mediaBrowser.navigate", json!({"path": dir.to_string_lossy()}));
+    d.frames(3);
+    d.wait_for("mediaBrowser.entry.b-roll.wav");
+    // the last column's edge, dragged until it (and its handle) is past the header's right end
+    let size = d.rect("mediaBrowser.header.Size");
+    let (ex, ey) = (size[0] + size[2] - 1.0, size[1] + size[3] / 2.0);
+    d.ok("ui.drag", json!({"from": {"x": ex, "y": ey}, "to": {"x": ex + 800.0, "y": ey}}));
+    d.frames(3);
+    assert_eq!(d.app().ui.media_browser.column_drag, None, "the drag ended");
+    let on_disk = filmcraft_engine::autosave::Preferences::load(&prefs_path).media_browser.column_widths.get("Size").copied();
+    assert_eq!(on_disk, Some(800.0), "preferences.json");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn media_browser_list_clamps_a_hand_edited_column_width() {
+    let dir = media_dir("clamp");
+    let mut session = Session::default();
+    // a preferences file edited by hand never went through the command's clamp
+    session.prefs.media_browser.column_widths.insert("Name".into(), 1e30);
+    let mut d = Driver::with(session);
+    d.ok("ui.panel.show", json!({"panel": "MediaBrowser"}));
+    d.ok("ui.set", json!({"focused": "MediaBrowser"}));
+    d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
+    d.exec("mediaBrowser.navigate", json!({"path": dir.to_string_lossy()}));
+    d.frames(3);
+    d.wait_for("mediaBrowser.entry.b-roll.wav");
+    let name = d.rect("mediaBrowser.header.Name");
+    assert!((name[2] - 800.0).abs() < 1.0, "Name is {} wide", name[2]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1243,4 +1806,149 @@ fn dragging_clips_onto_new_item_makes_a_matching_sequence() {
     d.frames(4);
     assert_eq!(sequences(&mut d), n0 + 2);
     assert_eq!(clips(&mut d), 2, "the whole selection is placed");
+}
+
+#[test]
+fn media_browser_extension_menu_is_drivable_and_applies_the_filter() {
+    let mut d = Driver::with(Session::default());
+    d.ok("ui.panel.show", json!({"panel": "MediaBrowser"}));
+    d.ok("ui.set", json!({"focused": "MediaBrowser"}));
+    d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
+    d.click("mediaBrowser.fileTypes");
+    assert!(d.has("mediaBrowser.fileTypes.extension"), "extension submenu has an automation id");
+    d.click("mediaBrowser.fileTypes.extension");
+    for extension in filmcraft_engine::media_browser::extensions() {
+        assert!(d.has(&format!("mediaBrowser.fileExtension.{extension}")), "extension {extension} has an automation id");
+    }
+    assert!(d.has("mediaBrowser.fileExtensions.scroll"), "the long extension list has a scroll viewport");
+    d.ok("ui.scroll", json!({"id": "mediaBrowser.fileExtensions.scroll", "dy": -4000}));
+    d.frames(8);
+    let viewport = d.rect("mediaBrowser.fileExtensions.scroll");
+    let last = d.rect("mediaBrowser.fileExtension.scc");
+    assert!(
+        last[1] >= viewport[1] && last[1] + last[3] <= viewport[1] + viewport[3],
+        "the last extension is reachable inside the viewport: {last:?} in {viewport:?}"
+    );
+    d.click("mediaBrowser.fileExtension.scc");
+    assert_eq!(d.app().session.prefs.media_browser.file_types, "scc");
+    d.click("mediaBrowser.fileTypes");
+    d.click("mediaBrowser.fileTypes.extension");
+    d.ok("ui.scroll", json!({"id": "mediaBrowser.fileExtensions.scroll", "dy": 4000}));
+    d.frames(8);
+    d.click("mediaBrowser.fileExtension.mp4");
+    assert_eq!(d.app().session.prefs.media_browser.file_types, "mp4");
+}
+
+#[test]
+fn unused_project_import_preferences_are_disabled_in_browser_menu() {
+    let mut d = Driver::demo();
+    d.ok("ui.panel.show", json!({"panel": "MediaBrowser"}));
+    d.ok("ui.set", json!({"focused": "MediaBrowser"}));
+    d.click("panel.menu.MediaBrowser");
+    let before = d.app().session.prefs.to_value();
+    for id in ["mediaBrowser.menu.createFolderForImportedProjects", "mediaBrowser.menu.allowDuplicateMedia"] {
+        let elements = d.ok("ui.elements", json!({"prefix": id}));
+        let control = elements.as_array().unwrap().iter().find(|e| e["id"] == id).unwrap();
+        assert_eq!(control["enabled"], false);
+        let r = d.rect(id);
+        d.ok("ui.click", json!({"x": r[0] + r[2] / 2.0, "y": r[1] + r[3] / 2.0}));
+        d.frames(2);
+        assert_eq!(d.app().session.prefs.to_value(), before);
+    }
+    d.key("Escape");
+}
+
+// ---- a dragged size or width is written to preferences.json on release
+
+/// A session that saves its preferences in a fresh temporary directory, and that file's path.
+fn session_saving_prefs(tag: &str, demo: bool) -> (Session, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("fc-prefs-drag-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut session = Session::default();
+    if demo {
+        session.execute("file.openDemoProject", json!({})).unwrap();
+    }
+    session.prefs_path = Some(dir.join("preferences.json"));
+    (session, dir.join("preferences.json"))
+}
+
+fn saved_prefs(path: &std::path::Path) -> filmcraft_engine::autosave::Preferences {
+    filmcraft_engine::autosave::Preferences::load(path)
+}
+
+#[test]
+fn a_dragged_list_column_width_is_written_to_preferences() {
+    let (session, path) = session_saving_prefs("column", true);
+    let mut d = Driver::with(session);
+    d.ok("ui.panel.show", json!({"panel": "Project"}));
+    d.ok("ui.set", json!({"focused": "Project"}));
+    d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
+    footage_in(&mut d, "list");
+    let width = |p: &filmcraft_engine::autosave::Preferences| p.project_panel.view.columns.iter().find(|c| c.name == "Frame Rate").map(|c| c.width);
+    let w0 = width(&d.app().session.prefs).unwrap();
+    let r = d.rect("project.list.resize.Frame Rate");
+    let (cx, cy) = centre(r);
+    d.ok("ui.drag", json!({"from": {"x": cx, "y": cy}, "to": {"x": cx + 60.0, "y": cy}}));
+    d.frames(3);
+    let w1 = width(&d.app().session.prefs).unwrap();
+    assert!(w1 > w0 + 30.0, "{w0} → {w1}");
+    assert_eq!(width(&saved_prefs(&path)), Some(w1), "preferences.json");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn a_list_column_dragged_past_the_header_is_still_written_to_preferences() {
+    let (session, path) = session_saving_prefs("column-out", true);
+    let mut d = Driver::with(session);
+    d.ok("ui.panel.show", json!({"panel": "Project"}));
+    d.ok("ui.set", json!({"focused": "Project"}));
+    footage_in(&mut d, "list");
+    // in the docked panel, 800 points of drag take the edge (and its handle) past the header's end
+    let r = d.rect("project.list.resize.Frame Rate");
+    let (cx, cy) = centre(r);
+    d.ok("ui.drag", json!({"from": {"x": cx, "y": cy}, "to": {"x": cx + 800.0, "y": cy}}));
+    d.frames(3);
+    assert_eq!(d.app().ui.project_panel.column_drag, None, "the drag ended");
+    let width = saved_prefs(&path).project_panel.view.columns.iter().find(|c| c.name == "Frame Rate").map(|c| c.width);
+    assert_eq!(width, Some(800.0), "preferences.json");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn a_dragged_icon_size_is_written_to_preferences() {
+    let (session, path) = session_saving_prefs("icon-size", true);
+    let mut d = Driver::with(session);
+    d.ok("ui.panel.show", json!({"panel": "Project"}));
+    footage_in(&mut d, "icon");
+    let s0 = d.app().session.prefs.project_panel.view.icon_size;
+    let r = d.rect("project.iconSize");
+    let y = r[1] + r[3] / 2.0;
+    d.ok("ui.drag", json!({"from": {"x": r[0] + r[2] * 0.3, "y": y}, "to": {"x": r[0] + r[2] * 0.9, "y": y}}));
+    d.frames(3);
+    let s1 = d.app().session.prefs.project_panel.view.icon_size;
+    assert!(s1 > s0 + 20.0, "{s0} → {s1}");
+    assert_eq!(saved_prefs(&path).project_panel.view.icon_size, s1, "preferences.json");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn a_dragged_media_browser_thumbnail_size_is_written_to_preferences() {
+    let dir = media_dir("thumbnail-size");
+    let (session, path) = session_saving_prefs("thumbnail-size", false);
+    let mut d = Driver::with(session);
+    d.ok("ui.panel.show", json!({"panel": "MediaBrowser"}));
+    d.ok("ui.set", json!({"focused": "MediaBrowser"}));
+    d.ok("ui.menu.invoke", json!({"id": "window.maximizeFrame"}));
+    d.exec("mediaBrowser.navigate", json!({"path": dir.to_string_lossy()}));
+    d.exec("mediaBrowser.settings", json!({"view": "thumbnails", "thumbnailSize": 100.0}));
+    d.wait_for("mediaBrowser.thumbnailSize");
+    let r = d.rect("mediaBrowser.thumbnailSize");
+    let y = r[1] + r[3] / 2.0;
+    d.ok("ui.drag", json!({"from": {"x": r[0] + r[2] * 0.2, "y": y}, "to": {"x": r[0] + r[2] * 0.9, "y": y}}));
+    d.frames(3);
+    let s1 = d.app().session.prefs.media_browser.thumbnail_size;
+    assert!(s1 > 150.0, "100 → {s1}");
+    assert_eq!(saved_prefs(&path).media_browser.thumbnail_size, s1, "preferences.json");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    let _ = std::fs::remove_dir_all(&dir);
 }

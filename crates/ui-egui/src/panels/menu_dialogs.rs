@@ -170,7 +170,7 @@ pub fn system_report(app: &FilmcraftApp) -> Value {
 
 /// Menu / shortcut entry points. Returns None for ids this module doesn't handle.
 pub fn route(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
-    let empty = params.as_object().is_none_or(|m| m.is_empty());
+    let empty = params.as_object().is_none_or(|m| m.is_empty() || (id == "file.newColorMatte" && m.keys().all(|k| k == "bin")));
     // UI commands
     match id {
         "view.dynamicAudioWaveforms" => {
@@ -254,11 +254,16 @@ pub fn route(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, params: &Val
         app.ui.status = e.clone();
         return Some(Err(e));
     }
-    let (params, info) = match defaults(app, cmd, id) {
+    let (mut draft, info) = match defaults(app, cmd, id) {
         Ok(x) => x,
         Err(e) => return Some(Err(e)),
     };
-    app.ui.extras.dialog = Some(ClipDialogDraft { command: cmd.into(), params, info, error: String::new() });
+    if id == "file.newColorMatte"
+        && let Some(bin) = params.get("bin")
+    {
+        draft["bin"] = bin.clone();
+    }
+    app.ui.extras.dialog = Some(ClipDialogDraft { command: cmd.into(), params: draft, info, error: String::new() });
     Some(Ok(json!({"dialog": meta(cmd).map(|m| m.1)})))
 }
 
@@ -390,11 +395,16 @@ fn text(ui: &mut egui::Ui, elems: &mut Elems, pre: &str, p: &mut Value, key: &st
     });
 }
 
-fn number(ui: &mut egui::Ui, elems: &mut Elems, pre: &str, p: &mut Value, key: &str, label: &str, range: std::ops::RangeInclusive<f64>, suffix: &str) {
+struct NumberOptions {
+    range: std::ops::RangeInclusive<f64>,
+    suffix: &'static str,
+}
+
+fn number(ui: &mut egui::Ui, elems: &mut Elems, pre: &str, p: &mut Value, key: &str, label: &str, options: NumberOptions) {
     ui.horizontal(|ui| {
         ui.label(label);
         let mut v = p.get(key).and_then(Value::as_f64).unwrap_or(0.0);
-        let r = ui.add(crate::widgets::number_drag(&mut v).range(range).suffix(suffix));
+        let r = ui.add(crate::widgets::number_drag(&mut v).range(options.range).suffix(options.suffix));
         push(elems, format!("{pre}.{key}"), &r, label);
         if r.changed() {
             p[key] = json!(v);
@@ -422,7 +432,7 @@ fn combo(ui: &mut egui::Ui, elems: &mut Elems, id: &str, label: &str, value: &mu
         }
         let cur = value.as_str().unwrap_or_default().to_string();
         let shown = options.iter().find(|o| o.0 == cur).map(|o| o.1.clone()).unwrap_or(cur.clone());
-        let r = egui::ComboBox::from_id_salt(id).selected_text(crate::i18n::t(&shown)).show_ui(ui, |ui| {
+        let r = craft_ui::ComboBox::from_id_salt(id).selected_text(crate::i18n::t(&shown)).show_ui(ui, |ui| {
             for (k, l) in options {
                 if ui.selectable_label(cur == *k, crate::i18n::t(l)).clicked() {
                     *value = json!(k);
@@ -470,6 +480,25 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
         let p = &mut d.params;
         match d.command.as_str() {
             "edit.find" => {
+                // Drafts also come from ui.set / saved Find queries. The UI has two
+                // rows, but a valid query may have fewer; pad before indexing them.
+                if !p.is_object() {
+                    *p = json!({});
+                }
+                if !p["rows"].is_array() {
+                    p["rows"] = json!([]);
+                }
+                if let Some(rows) = p["rows"].as_array_mut() {
+                    let empty_row = || json!({"column": "Name", "operator": "contains", "text": ""});
+                    while rows.len() < 2 {
+                        rows.push(empty_row());
+                    }
+                    for row in rows.iter_mut().take(2) {
+                        if !row.is_object() {
+                            *row = empty_row();
+                        }
+                    }
+                }
                 radios(ui, &mut elems, pre, p, "scope", tl!("Find in:"), &[("project", tl!("Project")), ("timeline", tl!("Timeline"))]);
                 ui.separator();
                 if p["scope"] == "timeline" {
@@ -706,8 +735,8 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     &[("sequentially", tl!("Sequentially")), ("unnumberedMarkers", tl!("At Unnumbered Markers"))],
                 );
                 radios(ui, &mut elems, pre, p, "method", tl!("Method:"), &[("insert", tl!("Insert Edit")), ("overwrite", tl!("Overwrite Edit"))]);
-                number(ui, &mut elems, pre, p, "overlapFrames", tl!("Clip Overlap:"), 0.0..=600.0, " frames");
-                number(ui, &mut elems, pre, p, "stillFrames", tl!("Frames per Still:"), 1.0..=100_000.0, " frames");
+                number(ui, &mut elems, pre, p, "overlapFrames", tl!("Clip Overlap:"), NumberOptions { range: 0.0..=600.0, suffix: " frames" });
+                number(ui, &mut elems, pre, p, "stillFrames", tl!("Frames per Still:"), NumberOptions { range: 1.0..=100_000.0, suffix: " frames" });
                 ui.label(RichText::new(tl!("Transitions")).strong());
                 check(ui, &mut elems, pre, p, "audioTransition", tl!("Apply Default Audio Transition"));
                 check(ui, &mut elems, pre, p, "videoTransition", tl!("Apply Default Video Transition"));
@@ -727,7 +756,9 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
                     p["sensitivity"] = json!(v);
                 });
             }
-            "sequence.normalizeMixTrack" => number(ui, &mut elems, pre, p, "db", tl!("Normalize Mix Track to:"), -96.0..=24.0, " dB"),
+            "sequence.normalizeMixTrack" => {
+                number(ui, &mut elems, pre, p, "db", tl!("Normalize Mix Track to:"), NumberOptions { range: -96.0..=24.0, suffix: " dB" })
+            }
             "sequence.simplify" => {
                 text(ui, &mut elems, pre, p, "name", tl!("Sequence Name:"), 240.0);
                 ui.label(RichText::new(tl!("Remove")).strong());
@@ -769,9 +800,9 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
             "file.newColorMatte" => {
                 color(ui, &mut elems, pre, p, "color", tl!("Color:"));
                 text(ui, &mut elems, pre, p, "name", tl!("Name:"), 220.0);
-                number(ui, &mut elems, pre, p, "width", tl!("Width:"), 1.0..=16384.0, " px");
-                number(ui, &mut elems, pre, p, "height", tl!("Height:"), 1.0..=16384.0, " px");
-                number(ui, &mut elems, pre, p, "seconds", tl!("Duration:"), 0.04..=36000.0, " s");
+                number(ui, &mut elems, pre, p, "width", tl!("Width:"), NumberOptions { range: 1.0..=16384.0, suffix: " px" });
+                number(ui, &mut elems, pre, p, "height", tl!("Height:"), NumberOptions { range: 1.0..=16384.0, suffix: " px" });
+                number(ui, &mut elems, pre, p, "seconds", tl!("Duration:"), NumberOptions { range: 0.04..=36000.0, suffix: " s" });
             }
             "project.matteColor" => color(ui, &mut elems, pre, p, "color", tl!("Color:")),
             "markers.addFlashCue" => {
@@ -853,7 +884,10 @@ pub fn show(app: &mut FilmcraftApp, ctx: &egui::Context) {
             return;
         }
         Some("ok") => match run(app, &d) {
-            Ok(Some(info)) => d.info["result"] = json!(info),
+            Ok(Some(info)) => {
+                d.error.clear();
+                d.info["result"] = json!(info);
+            }
             Ok(None) => {
                 app.ui.extras.dialog = None;
                 return;
@@ -976,5 +1010,17 @@ pub fn search_bin_rows(
                 filmcraft_project::Bin { id: sb.id, name: sb.name.clone(), children: matches.into_iter().map(filmcraft_project::BinEntry::Item).collect() };
             draw_items(app, ui, &bin, row, actions);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_command_with_a_menu_dialog_can_be_bound() {
+        // project.matteColor recolours the selected matte and needs a colour: the engine refuses it
+        // without one, so its parameter is required and its dialog is reached from the matte itself
+        crate::panels::clip_dialogs::tests::assert_dialog_commands_bindable("menu_dialogs::meta", |id| meta(id).is_some(), &["project.matteColor"]);
     }
 }

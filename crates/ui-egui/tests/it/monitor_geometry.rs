@@ -61,6 +61,68 @@ fn overlaps(first: Rect, second: Rect) -> bool {
 }
 
 #[test]
+fn program_wrench_scroll_reaches_controls_in_short_windows() {
+    let mut h = harness(720.0, ThemeKind::Dark, Which::Program);
+    click(&mut h, "program.settings");
+    let before = element(&h, "program.settings.showTransport");
+    let first = element(&h, "program.settings.display.composite");
+    h.event(Event::PointerMoved(pos2(first.center().x, 200.0)));
+    h.event(Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        source: egui::MouseWheelSource::Wheel,
+        delta: vec2(0.0, -1200.0),
+        modifiers: Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+    });
+    h.run_steps(6);
+    let after = element(&h, "program.settings.showTransport");
+    assert!(after.top() < before.top(), "the real menu wheel must move clipped controls: before={before:?} after={after:?}");
+    let last = element(&h, "program.settings.editCameras");
+    let viewport = element(&h, "program.settings.scroll");
+    assert!(viewport.contains(last.center()), "the final item must be reachable: {last:?} in {viewport:?}");
+    assert!(viewport.top() >= 0.0 && viewport.bottom() <= 340.0, "the popup fits the window");
+    assert!(h.state().auto.elements.iter().find(|e| e.id == "program.settings.editCameras").unwrap().enabled == Some(false));
+}
+
+#[test]
+fn monitor_transport_visibility_hides_buttons_and_reclaims_space() {
+    for (which, prefix) in [(Which::Source, "source"), (Which::Program, "program")] {
+        for width in [720.0, 500.0, 300.0, 250.0] {
+            let mut h = harness(width, ThemeKind::Dark, which);
+            let before = h.state().session.project.clone();
+            let timecode_before = element(&h, &format!("{prefix}.timecode"));
+            assert!(h.state().auto.elements.iter().any(|e| e.id == format!("{prefix}.transport.editor")));
+            match which {
+                Which::Source => h.state_mut().ui.source.show_transport = false,
+                Which::Program => h.state_mut().ui.program.show_transport = false,
+            }
+            h.run_steps(4);
+            assert!(
+                !h.state().auto.elements.iter().any(|e| e.id.starts_with(&format!("{prefix}.transport."))),
+                "{prefix} width={width}: hidden transport must not leave interactive buttons"
+            );
+            let settings = element(&h, &format!("{prefix}.settings"));
+            assert!(settings.top() >= 0.0 && settings.bottom() <= 340.0, "the wrench stays reachable");
+            let timecode_hidden = element(&h, &format!("{prefix}.timecode"));
+            assert!((timecode_hidden.top() - timecode_before.top() - 36.0).abs() < 0.1, "reclaim the transport row");
+            let other_visible = match which {
+                Which::Source => h.state().ui.program.show_transport,
+                Which::Program => h.state().ui.source.show_transport,
+            };
+            assert!(other_visible, "only the chosen monitor changes");
+            match which {
+                Which::Source => h.state_mut().ui.source.show_transport = true,
+                Which::Program => h.state_mut().ui.program.show_transport = true,
+            }
+            h.run_steps(4);
+            assert!(h.state().auto.elements.iter().any(|e| e.id == format!("{prefix}.transport.editor")));
+            assert_eq!(element(&h, &format!("{prefix}.timecode")), timecode_before);
+            assert_eq!(h.state().session.project, before);
+        }
+    }
+}
+
+#[test]
 fn monitor_readouts_and_dropdowns_do_not_overlap() {
     let mut failures = Vec::new();
     for (which, prefix) in [(Which::Source, "source"), (Which::Program, "program")] {
@@ -181,7 +243,7 @@ fn transport_editor_keeps_its_own_space_and_customizes_compact_controls() {
             assert!(reset.top() < reset_before.top(), "real wheel moves clipped editor controls");
             assert!(scroll.contains(reset.center()), "Reset is visible after scrolling: {reset:?}, {scroll:?}");
             click(&mut h, "program.transport.editor.reset");
-            assert_eq!(h.state().ui.program.transport_hidden, vec!["playback.loop".to_string()]);
+            assert_eq!(h.state().ui.program.transport_hidden, filmcraft_ui_egui::state::MonitorView::default().transport_hidden);
         }
     }
 }
@@ -215,6 +277,34 @@ fn compact_source_overflow_keeps_source_navigation_routing() {
     assert_eq!(h.state().session.playhead(), program);
 }
 
+/// #1800: as in Premiere, Go to Previous / Next Edit Point are optional Program transport
+/// buttons: off the default bar, added from the Button Editor, beside the one-frame steps (which
+/// stay one-frame steps).
+#[test]
+fn program_transport_edit_point_buttons_come_from_the_button_editor() {
+    let mut h = harness(720.0, ThemeKind::Dark, Which::Program);
+    let has = |h: &Harness<'_, FilmcraftApp>, id: &str| h.state().auto.elements.iter().any(|e| e.id == id);
+    for command in ["playhead.prevEdit", "playhead.nextEdit"] {
+        assert!(!has(&h, &format!("program.transport.{command}")), "{command} is off the default bar");
+        click(&mut h, "program.transport.editor");
+        click(&mut h, &format!("program.transport.editor.{command}"));
+        h.event(Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+        h.run_steps(3);
+    }
+    let step_back = element(&h, "program.transport.playhead.stepBack");
+    let step_fwd = element(&h, "program.transport.playhead.stepForward");
+    assert!(element(&h, "program.transport.playhead.prevEdit").right() <= step_back.left(), "Previous Edit Point sits left of Step Back");
+    assert!(element(&h, "program.transport.playhead.nextEdit").left() >= step_fwd.right(), "Next Edit Point sits right of Step Forward");
+
+    let first = h.state().session.active_sequence().unwrap().video_tracks[0].items[0].clone();
+    h.state_mut().session.set_playhead(first.start + first.duration.mul_ratio(1, 2));
+    h.run_steps(2);
+    click(&mut h, "program.transport.playhead.nextEdit");
+    assert_eq!(h.state().session.playhead(), first.end(), "Next Edit Point lands on the cut after the first clip");
+    click(&mut h, "program.transport.playhead.prevEdit");
+    assert_eq!(h.state().session.playhead(), first.start, "Previous Edit Point goes back to the first clip's start");
+}
+
 fn source_drag_choices(width: f32) {
     for (control, video, audio) in [("video", true, false), ("audio", false, true), ("both", true, true)] {
         let mut h = harness(width, ThemeKind::Dark, Which::Source);
@@ -246,4 +336,47 @@ fn source_drag_choices_remain_reachable_at_500_pixels() {
 #[test]
 fn source_drag_choices_remain_reachable_at_250_pixels() {
     source_drag_choices(250.0);
+}
+
+#[test]
+fn unavailable_transmit_is_disabled_in_the_program_menu() {
+    let mut h = harness(720.0, ThemeKind::Dark, Which::Program);
+    click(&mut h, "program.settings");
+    let control = h.state().auto.elements.iter().find(|e| e.id == "program.settings.multicam.transmitView").expect("the visible checkbox has an automation id");
+    assert_eq!(control.enabled, Some(false));
+    assert!(!h.state().session.is_enabled("multicam.transmitView"));
+    assert!(!h.state().session.state.multicam_view.transmit);
+}
+
+fn drag(h: &mut Harness<'_, FilmcraftApp>, from: egui::Pos2, to: egui::Pos2, button: PointerButton) {
+    h.event(Event::PointerMoved(from));
+    h.step();
+    h.event(Event::PointerButton { pos: from, button, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    for f in [0.25, 0.5, 1.0] {
+        h.event(Event::PointerMoved(from + (to - from) * f));
+        h.step();
+    }
+    h.event(Event::PointerButton { pos: to, button, pressed: false, modifiers: Modifiers::NONE });
+    h.run_steps(3);
+}
+
+#[test]
+fn only_the_primary_button_scrubs_the_monitor() {
+    for which in [Which::Source, Which::Program] {
+        let prefix = if which == Which::Source { "source" } else { "program" };
+        let playhead =
+            |h: &Harness<'_, FilmcraftApp>| if which == Which::Source { h.state().session.state.source_playhead } else { h.state().session.playhead() };
+        let mut h = harness(600.0, ThemeKind::Dark, which);
+        let bar = element(&h, &format!("{prefix}.scrubBar"));
+        let handle = element(&h, &format!("{prefix}.playhead"));
+        let start = playhead(&h);
+        let far = pos2(bar.min.x + bar.width() * 0.6, bar.center().y);
+        drag(&mut h, bar.center(), far, PointerButton::Secondary);
+        assert_eq!(playhead(&h), start, "{prefix}: a right-drag on the bar");
+        drag(&mut h, handle.center(), pos2(far.x, handle.center().y), PointerButton::Secondary);
+        assert_eq!(playhead(&h), start, "{prefix}: a right-drag on the playhead");
+        drag(&mut h, handle.center(), pos2(far.x, handle.center().y), PointerButton::Primary);
+        assert_ne!(playhead(&h), start, "{prefix}: the primary button still scrubs");
+    }
 }
