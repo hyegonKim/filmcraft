@@ -399,6 +399,55 @@ impl Ctx<'_> {
     }
 }
 
+/// Import remains deliberately permissive (including extended hours). Report noncanonical
+/// labels only after resolving the rate/FCM; changing shared time arithmetic would change edits.
+fn noncanonical_timecode(tc: Tc, rate: FrameRate, event_df: bool) -> Option<&'static str> {
+    if tc.m >= 60 {
+        Some("minutes exceed 59")
+    } else if tc.s >= 60 {
+        Some("seconds exceed 59")
+    } else if tc.f >= rate.timecode_base() {
+        Some("frames reach or exceed the nominal frame rate")
+    } else if (tc.df || event_df) && !rate.supports_drop_frame() {
+        Some("drop-frame counting is unsupported at this rate")
+    } else if (tc.df || event_df) && tc.m % 10 != 0 && tc.s == 0 && tc.f < rate.timecode_base() / 15 {
+        Some("the label uses a skipped drop-frame number")
+    } else {
+        None
+    }
+}
+
+fn warn_timecode(tc: Tc, rate: FrameRate, df: bool, context: &str, report: &mut Report) {
+    let Some(reason) = noncanonical_timecode(tc, rate, df) else { return };
+    let effective_df = tc.df || df;
+    let frames = fields_to_frames(tc.h, tc.m, tc.s, tc.f, rate, effective_df);
+    let normalized = format_timecode_frames(frames, rate, effective_df);
+    report.warn(format!(
+        "EDL {context} timecode {:02}:{:02}:{:02}:{:02} is noncanonical ({reason}); normalized to {normalized} at {rate}; check the source/record positions",
+        tc.h, tc.m, tc.s, tc.f
+    ));
+}
+
+/// At most one event diagnostic, even for a transition with two lines and several bad fields.
+/// Markers get their own location/name so the user can find them without changing import math.
+fn warn_event_timecodes(ev: &Event, rate: FrameRate, report: &mut Report) {
+    const FIELDS: [&str; 4] = ["source in", "source out", "record in", "record out"];
+    if let Some((line, index, tc)) = ev
+        .lines
+        .iter()
+        .find_map(|line| line.tcs.iter().enumerate().find(|(_, tc)| noncanonical_timecode(**tc, rate, ev.df).is_some()).map(|(index, tc)| (line, index, *tc)))
+    {
+        let field = FIELDS.get(index).copied().unwrap_or("event");
+        warn_timecode(tc, rate, ev.df, &format!("event {} {field}", line.num), report);
+    }
+    for (index, (tc, _, name)) in ev.locs.iter().enumerate() {
+        let event = ev.lines.first().map(|l| l.num.as_str()).unwrap_or("?");
+        // A diagnostic does not need an unbounded copy of a file-supplied marker name.
+        let name: String = name.chars().take(80).collect();
+        warn_timecode(*tc, rate, ev.df, &format!("event {event} marker {} ({name})", index + 1), report);
+    }
+}
+
 pub(crate) fn import(text: &str, opts: &ImportOptions, report: &mut Report) -> Result<Imported> {
     let parsed = parse(text, report);
     if parsed.events.is_empty() {
@@ -435,6 +484,7 @@ pub(crate) fn import(text: &str, opts: &ImportOptions, report: &mut Report) -> R
     }
 
     for ev in &parsed.events {
+        warn_event_timecodes(ev, rate, report);
         import_event(&mut ctx, ev, report);
         for (tc, color, name) in &ev.locs {
             let t = ctx.rec(*tc, ev.df);
@@ -1135,6 +1185,67 @@ struct Spot<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn noncanonical_fields_warn_without_changing_imported_positions() {
+        let rate = FrameRate::FPS_25;
+        for (tc, out, frames, field) in
+            [("00:60:00:00", "01:00:01:00", 90_000, "minutes"), ("00:00:60:00", "00:01:01:00", 1_500, "seconds"), ("00:00:00:99", "00:00:04:24", 99, "frames")]
+        {
+            let text = format!("TITLE: t\nFCM: NON-DROP FRAME\n001 A V C {tc} {out} 01:00:00:00 01:00:01:00\n");
+            let (imp, report) = crate::import_with(text.as_bytes(), Format::Edl, &ImportOptions { edl_frame_rate: Some(rate), ..Default::default() }).unwrap();
+            let seq = imp.project.sequence(imp.sequences[0]).unwrap();
+            let clip = &seq.video_tracks[0].items[0];
+            assert_eq!((clip.start, clip.duration, clip.source_in), (Tick::ZERO, rate.tick_of(25), rate.tick_of(frames)), "{tc}");
+            let warnings: Vec<_> = report.warnings().filter(|w| w.message.contains("noncanonical")).collect();
+            assert_eq!(warnings.len(), 1, "{report}");
+            assert!(warnings[0].message.contains("event 001 source in") && warnings[0].message.contains(field), "{report}");
+            assert!(warnings[0].message.contains("normalized to"), "{report}");
+        }
+        let text = "TITLE: t\n001 A V C 00:00:00:24 00:00:01:24 01:00:00:00 01:00:01:00\n";
+        let (_, report) = crate::import_with(text.as_bytes(), Format::Edl, &ImportOptions { edl_frame_rate: Some(rate), ..Default::default() }).unwrap();
+        assert!(!report.mentions("noncanonical"), "last valid frame is not damage: {report}");
+    }
+
+    #[test]
+    fn timecode_warnings_use_resolved_explicit_or_inferred_frame_rate() {
+        let text = "TITLE: t\n001 A V C 00:00:00:29 00:00:01:29 01:00:00:00 01:00:01:00\n";
+        let (imp, report) = crate::import_with(text.as_bytes(), Format::Edl, &ImportOptions::default()).unwrap();
+        assert_eq!(imp.project.sequence(imp.sequences[0]).unwrap().settings.frame_rate, FrameRate::FPS_30);
+        assert!(!report.mentions("noncanonical"), "29 is valid at the inferred 30fps: {report}");
+        let (_, report) =
+            crate::import_with(text.as_bytes(), Format::Edl, &ImportOptions { edl_frame_rate: Some(FrameRate::FPS_25), ..Default::default() }).unwrap();
+        assert!(report.mentions("noncanonical") && report.mentions("event 001 source in"), "{report}");
+        let text = text.replace(":29", ":99");
+        let (imp, report) = crate::import_with(text.as_bytes(), Format::Edl, &ImportOptions::default()).unwrap();
+        assert_eq!(imp.project.sequence(imp.sequences[0]).unwrap().settings.frame_rate, FrameRate::FPS_60);
+        assert!(report.mentions("noncanonical"), "99 also exceeds the inferred 60fps: {report}");
+    }
+
+    #[test]
+    fn drop_frame_warnings_follow_each_event_fcm_and_marker_label() {
+        for (rate, invalid, valid) in [(FrameRate::FPS_29_97, 1, 2), (FrameRate::FPS_59_94, 3, 4)] {
+            let text = format!(
+                "TITLE: t\nFCM: DROP FRAME\n001 A V C 00:01:00:{invalid:02} 00:01:02:{valid:02} 01:00:00:00 01:00:02:00\n\
+FCM: NON-DROP FRAME\n002 B V C 00:01:00:{invalid:02} 00:01:02:{valid:02} 01:00:03:00 01:00:05:00\n\
+* LOC: 01:01:00;{invalid:02} RED Bad marker\n"
+            );
+            let (imp, report) = crate::import_with(text.as_bytes(), Format::Edl, &ImportOptions { edl_frame_rate: Some(rate), ..Default::default() }).unwrap();
+            let seq = imp.project.sequence(imp.sequences[0]).unwrap();
+            assert_eq!(seq.video_tracks[0].items[0].source_in, rate.tick_of(fields_to_frames(0, 1, 0, invalid, rate, true)));
+            assert_eq!(seq.video_tracks[0].items[1].source_in, rate.tick_of(fields_to_frames(0, 1, 0, invalid, rate, false)));
+            let warnings: Vec<_> = report.warnings().filter(|w| w.message.contains("noncanonical")).collect();
+            assert_eq!(warnings.len(), 2, "one event and its separately identified marker: {report}");
+            assert!(warnings.iter().any(|w| w.message.contains("event 001 source in") && w.message.contains("skipped")), "{report}");
+            assert!(warnings.iter().any(|w| w.message.contains("event 002 marker 1 (Bad marker)")), "{report}");
+            assert!(!warnings.iter().any(|w| w.message.contains("event 002 source")), "NDF event uses its own FCM: {report}");
+            let valid = text
+                .replace(&format!("00:01:00:{invalid:02}"), &format!("00:01:00:{valid:02}"))
+                .replace(&format!("01:01:00;{invalid:02}"), &format!("01:01:00;{valid:02}"));
+            let (_, report) = crate::import_with(valid.as_bytes(), Format::Edl, &ImportOptions { edl_frame_rate: Some(rate), ..Default::default() }).unwrap();
+            assert!(!report.mentions("noncanonical"), "first valid drop-frame labels: {report}");
+        }
+    }
 
     #[test]
     fn channels() {
