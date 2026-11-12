@@ -9,6 +9,13 @@ use std::sync::Mutex;
 static LAST: Mutex<Option<String>> = Mutex::new(None);
 /// Where crash logs go (desktop); `None` = stderr only (web, tests).
 static LOG_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+/// Every panic the hook saw (tests only, the most recent [`SEEN_CAP`]). Other tests panic on
+/// purpose in parallel (frames.rs's injected worker fault), so by the time a test reads `LAST`
+/// it may hold theirs instead.
+#[cfg(test)]
+static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+#[cfg(test)]
+const SEEN_CAP: usize = 256;
 
 /// Install the panic hook (idempotent). Panics are also passed to the previous hook, so they
 /// still reach stderr / the browser console.
@@ -28,6 +35,14 @@ pub fn install(log_dir: Option<std::path::PathBuf>) {
             let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
             let summary = format!("{msg} (at {at}, thread {thread})");
             *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some(summary.clone());
+            #[cfg(test)]
+            {
+                let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+                if seen.len() >= SEEN_CAP {
+                    seen.remove(0);
+                }
+                seen.push(summary.clone());
+            }
             write_log(&summary);
             prev(info);
         }));
@@ -77,17 +92,21 @@ fn write_log(_summary: &str) {}
 
 #[cfg(test)]
 mod tests {
+    /// Other tests panic in parallel once the hook is installed, so this looks for its own panic
+    /// among all those the hook saw rather than in the single `LAST` slot (which raced).
     #[test]
     fn hook_records_and_logs_worker_panics() {
         let dir = std::env::temp_dir().join(format!("fc-crash-{}", std::process::id()));
         super::install(Some(dir.clone()));
-        let _ = super::take_last();
         let r = std::thread::Builder::new().name("filmcraft-test-worker".into()).spawn(|| panic!("boom in a worker")).unwrap().join();
         assert!(r.is_err());
-        let last = super::take_last().expect("recorded");
-        assert!(last.contains("boom in a worker") && last.contains("filmcraft-test-worker"), "{last}");
+        let seen = super::SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let ours = seen.iter().find(|s| s.contains("boom in a worker")).expect("recorded");
+        assert!(ours.contains("filmcraft-test-worker") && ours.contains("crash.rs"), "{ours}");
         let log = std::fs::read_to_string(super::log_path().unwrap()).unwrap();
         assert!(log.contains("boom in a worker"));
+        // later panics in this test binary no longer log into the directory removed below
+        super::install(None);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
