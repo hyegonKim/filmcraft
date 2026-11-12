@@ -88,7 +88,9 @@ fn draw_picture(app: &mut FilmcraftApp, ui: &mut egui::Ui, which: Which, mv: &cr
         let preroll = which == Which::Program && app.playback.preroll.is_some();
         app.frames.schedule_playback(key, rate, scale, &project, speed, preroll);
         if preroll {
-            app.playback.preroll_ready = app.frames.preroll_ready(key, app.playback.speed, rate.frame_at(duration) - 1);
+            let last = rate.frame_at(duration) - 1;
+            app.playback.preroll_ready = app.frames.preroll_ready(key, app.playback.speed, last);
+            app.playback.preroll_key = Some((key, last));
         }
     } else {
         app.frames.request(key, rate.tick_of(frame), scale, &project, 0);

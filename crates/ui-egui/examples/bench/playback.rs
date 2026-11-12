@@ -210,6 +210,8 @@ pub struct PlayReport {
     pub uploaded_mb: f64,
     pub load: String,
     pub preroll_ms: f64,
+    /// Frames dropped during the clock's first second.
+    pub dropped_first_s: u64,
 }
 
 pub fn pct(v: &[f64], p: f64) -> f64 {
@@ -247,6 +249,12 @@ pub struct Bench {
     /// Play with draft decoding (Settings ▸ Playback ▸ Draft decoding), as the monitor does at
     /// 1/2 resolution or lower.
     pub draft: bool,
+    /// When the clock starts (`--preroll-study`): `None` as the app does
+    /// ([`FrameServer::preroll_ready`]), `Some(n)` once the first `n` frames are ready.
+    pub preroll_frames: Option<i64>,
+    /// Show the start frame before pressing Play, as a stopped monitor does: the usual case in
+    /// the app, where the frame under the playhead is on screen when Play is pressed.
+    pub parked: bool,
 }
 
 impl Bench {
@@ -269,18 +277,36 @@ impl Bench {
         // ready (or the timeout), then start the clock.
         let first = rate.frame_at(start);
         let last_frame = rate.frame_at(q.duration()) - 1;
+        if self.parked {
+            // as a stopped monitor: ask for the frame under the playhead until it is on screen
+            let key = FrameKey { target, frame: first, size, revision: s.revision, draft: false };
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_secs(10) {
+                self.server.request(key, rate.tick_of(first), scale, &project, 0);
+                if display.refresh(&self.server, key) {
+                    break;
+                }
+                std::thread::sleep(period);
+            }
+            self.server.take_records();
+        }
         let t_pre = Instant::now();
         loop {
             let key = FrameKey { target, frame: first, size, revision: s.revision, draft: self.draft };
             self.server.schedule_playback(key, rate, scale, &project, 1.0, true);
             let exact = display.refresh(&self.server, key);
             meter.refresh(first, exact);
-            if self.server.preroll_ready(key, 1.0, last_frame) || t_pre.elapsed().as_secs_f64() >= PREROLL_TIMEOUT_S {
+            let ready = match self.preroll_frames {
+                None => self.server.preroll_ready(key, 1.0, last_frame),
+                Some(n) => (0..n.max(1)).map(|i| first + i).filter(|f| *f <= last_frame).all(|f| self.server.is_ready(&FrameKey { frame: f, ..key })),
+            };
+            if ready || t_pre.elapsed().as_secs_f64() >= PREROLL_TIMEOUT_S {
                 break;
             }
             std::thread::sleep(period);
         }
         let preroll_ms = ms(t_pre.elapsed());
+        let mut dropped_first_s = None;
         let anchor = Instant::now();
         let mut due_at: HashMap<i64, Instant> = HashMap::new();
         let mut next = anchor;
@@ -290,6 +316,9 @@ impl Bench {
             let t = start + Tick::from_seconds_f64((now - anchor).as_secs_f64());
             if t >= end {
                 break;
+            }
+            if dropped_first_s.is_none() && now - anchor >= Duration::from_secs(1) {
+                dropped_first_s = Some(meter.dropped);
             }
             frame = rate.frame_at(t);
             due_at.entry(frame).or_insert(now);
@@ -331,6 +360,7 @@ impl Bench {
             uploaded_mb: (display.uploaded - up0) as f64 / 1e6,
             load: load_avg(),
             preroll_ms,
+            dropped_first_s: dropped_first_s.unwrap_or(meter.dropped),
             ..Default::default()
         };
         let last = rate.frame_at(end - Tick(1));
@@ -593,11 +623,14 @@ pub fn to_json(r: &PlayReport, scenario: &str, res: &str, path: &str) -> Value {
         "ui_cpu_ms": r.ui_cpu, "process_cpu_ms": r.process_cpu, "cpu_ms_per_frame": r.process_cpu / frames,
         "jobs": r.jobs, "wasted_jobs": r.wasted_jobs, "cancelled_jobs": r.cancelled_jobs, "preview_jobs": r.preview_jobs, "uploaded_mb": r.uploaded_mb,
         "gop": {"hits": r.gop.hits, "misses": r.gop.misses, "seeks": r.gop.seeks, "decoded": r.gop.decoded, "evicted": r.gop.evicted, "skipped": r.gop.skipped, "decode_ms": r.gop.decode_ns as f64 / 1e6},
-        "loadavg": r.load, "preroll_ms": r.preroll_ms,
+        "loadavg": r.load, "preroll_ms": r.preroll_ms, "dropped_first_s": r.dropped_first_s,
     })
 }
 
 // ------------------------------------------------------------------------------------ main
+
+/// Most runs per measurement `--repeat` asks for: each one is kept until the summary.
+const MAX_REPEAT: usize = 1_000;
 
 struct Args {
     scenarios: Vec<String>,
@@ -608,6 +641,7 @@ struct Args {
     workers: usize,
     json: Option<String>,
     repeat: usize,
+    preroll_study: bool,
 }
 
 fn parse_args() -> Args {
@@ -620,6 +654,7 @@ fn parse_args() -> Args {
         workers: FrameServer::default_workers(),
         json: None,
         repeat: 1,
+        preroll_study: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
@@ -642,11 +677,13 @@ fn parse_args() -> Args {
             "--seconds" => a.seconds = it.next().and_then(|v| v.parse().ok()).unwrap_or(8.0),
             "--refresh" => a.refresh = it.next().and_then(|v| v.parse().ok()).unwrap_or(60.0),
             "--workers" => a.workers = it.next().and_then(|v| v.parse().ok()).unwrap_or(a.workers),
-            "--repeat" => a.repeat = it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
+            // capped: every run is kept for the summary
+            "--repeat" => a.repeat = it.next().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).clamp(1, MAX_REPEAT),
             "--json" => a.json = it.next(),
+            "--preroll-study" => a.preroll_study = true,
             "--help" | "-h" => {
                 println!(
-                    "bench_playback [--scenario h264-1080,stack3,stack3-blend,stack3-fx,h264-2160,hevc-2160,vp9-2160,av1-2160,demo,after-preview,seek-storm] [--res full,half] [--cpu|--gpu] [--seconds 8] [--refresh 60] [--workers N] [--repeat N] [--json out.json]"
+                    "bench_playback [--scenario h264-1080,stack3,stack3-blend,stack3-fx,h264-2160,hevc-2160,vp9-2160,av1-2160,demo,after-preview,seek-storm] [--res full,half] [--cpu|--gpu] [--seconds 8] [--refresh 60] [--workers N] [--repeat N] [--json out.json] [--preroll-study]"
                 );
                 std::process::exit(0);
             }
@@ -666,6 +703,10 @@ fn parse_args() -> Args {
 pub fn scenario_session(name: &str) -> Option<(Session, ItemId)> {
     let mut s = Session::default();
     let seq = match name {
+        "still" => {
+            let a = import(&mut s, &fixture("still2160.jpg")?);
+            build_sequence(&mut s, 1920, 1080, &[(a, 50.0, None, 0.0, 100.0)], &[], 20.0)
+        }
         "h264-1080" | "seek-storm" => {
             let a = import(&mut s, &fixture("a1080.mp4")?);
             build_sequence(&mut s, 1920, 1080, &[(a, 100.0, None, 0.0, 100.0)], &[], 20.0)
@@ -763,9 +804,75 @@ pub fn scenario_session(name: &str) -> Option<(Session, ItemId)> {
     Some((s, seq))
 }
 
+/// `bench_playback --preroll-study` (#2281): how long Play waits before the clock starts and the
+/// frames dropped in the first second, for the app's preroll rule against "the first n frames
+/// ready". Each play starts cold (a fresh session and frame server), from a keyframe and from
+/// the middle of a GOP, with the frame under the playhead already on screen (`parked`, as in
+/// the app) and without (Play right after a jump).
+fn preroll_study(args: &Args) {
+    let rules: [(&str, Option<i64>); 6] = [("app", None), ("1", Some(1)), ("2", Some(2)), ("3", Some(3)), ("4", Some(4)), ("6", Some(6))];
+    let scenarios: Vec<String> = if args.scenarios.is_empty() { vec!["still".into(), "h264-1080".into()] } else { args.scenarios.clone() };
+    println!(
+        "preroll study: {} path, {} frame workers, refresh {} Hz, {} s per play, {} runs each; load avg {}",
+        if args.gpu { "GPU" } else { "CPU" },
+        args.workers,
+        args.refresh,
+        args.seconds,
+        args.repeat,
+        load_avg()
+    );
+    println!("{:<12} {:<5} {:<14} {:<5} {:>9} {:>9} {:>10} {:>9}", "scenario", "res", "start", "rule", "pre p50", "pre max", "drop1s avg", "drop avg");
+    let mut out = Vec::new();
+    for name in &scenarios {
+        for (res_name, scale) in &args.res {
+            for (start_name, start_s, parked) in [("key parked", 0.0, true), ("mid parked", 4.3, true), ("mid jump", 4.3, false)] {
+                for (rule, frames) in rules {
+                    let (mut pre, mut d1, mut dall) = (Vec::new(), Vec::new(), Vec::new());
+                    for _ in 0..args.repeat {
+                        let Some((s, seq)) = scenario_session(name) else {
+                            println!("{name}: skipped (fixtures unavailable: is ffmpeg installed?)");
+                            return;
+                        };
+                        let rate = s.project.sequence(seq).map(|q| q.settings.frame_rate).unwrap_or(FrameRate::FPS_23_976);
+                        let start = rate.snap(Tick::from_seconds_f64(start_s));
+                        let server = FrameServer::new(s.media.clone(), s.services.clone(), s.previews.clone(), args.workers);
+                        server.set_profiling(true);
+                        let bench = Bench { server, refresh_hz: args.refresh, seconds: args.seconds, draft: false, preroll_frames: frames, parked };
+                        let mut display = Display::new(args.gpu);
+                        let r = bench.play(&s, seq, &mut display, *scale, start, rule);
+                        pre.push(r.preroll_ms);
+                        d1.push(r.dropped_first_s as f64);
+                        dall.push(r.dropped as f64);
+                    }
+                    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+                    println!(
+                        "{:<12} {:<5} {:<14} {:<5} {:>9.1} {:>9.1} {:>10.2} {:>9.2}",
+                        name,
+                        res_name,
+                        start_name,
+                        rule,
+                        pct(&pre, 0.5),
+                        pct(&pre, 1.0),
+                        mean(&d1),
+                        mean(&dall)
+                    );
+                    out.push(json!({"scenario": name, "res": res_name, "start": start_name, "rule": rule, "preroll_ms": pre, "dropped_first_s": d1, "dropped": dall}));
+                }
+            }
+        }
+    }
+    if let Some(p) = &args.json {
+        let _ = std::fs::write(p, serde_json::to_string_pretty(&out).unwrap_or_default());
+    }
+}
+
 /// `bench_playback` / `cargo xtask bench-playback`.
 pub fn cli_main() {
     let args = parse_args();
+    if args.preroll_study {
+        preroll_study(&args);
+        return;
+    }
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     println!(
         "FilmCraft playback bench: {} path, {} frame workers, {} cores, refresh {} Hz, {} s per play; load avg {}",
@@ -795,7 +902,7 @@ pub fn cli_main() {
                 // A fresh frame server per run so caches start cold, as after opening a project.
                 let server = FrameServer::new(s.media.clone(), s.services.clone(), s.previews.clone(), args.workers);
                 server.set_profiling(true);
-                let bench = Bench { server, refresh_hz: args.refresh, seconds: args.seconds, draft: false };
+                let bench = Bench { server, refresh_hz: args.refresh, seconds: args.seconds, draft: false, preroll_frames: None, parked: false };
                 let mut display = Display::new(args.gpu);
                 if args.gpu && display.gpu.is_none() {
                     eprintln!("no GPU adapter; using the CPU path");

@@ -1105,3 +1105,86 @@ Test: `crates/ui-egui/tests/it/scrub_stop_ui.rs` — a press that only moves the
 stream, and a press while playing still stops the transport. `apps/filmcraft` (`audio::tests`) —
 the device default rate needs no configuration search.
 
+
+## Results (#2281: Play started late, and the first scrub stuttered)
+
+Reported on Windows 11 (RTX laptop): Play starts after a noticeable delay, and the playhead lags
+at the start of a mouse drag on the timeline, then follows smoothly. Measured on an Apple M1
+(release build, other load on the machine), with the desktop app's own timings
+(`perf.stats` → `playback.start`, see [control-protocol.md](control-protocol.md)) and
+`bench_playback --preroll-study` ([testing.md](testing.md)).
+
+The delay from Play to the first move of the playhead had three parts, all on the UI thread's
+path: the preroll (`PREROLL_FRAMES` = 6 frames ready, checked only when the Program monitor drew,
+so the clock started one UI pass after they were), then `end_preroll` opening the audio device
+synchronously (`CpalOut::start`: 11-63 ms here; 559 ms cold on WASAPI, above), then waiting for the
+first device callback before the audio clock moved. The drag stutter is the same open: the first
+scrub grain opened the device on the UI thread (#2633 left that open in place).
+
+Changed:
+
+- the cpal stream lives on its own thread (`apps/filmcraft/src/audio.rs`, `device_thread`):
+  `start` and `stop` only swap what the open stream plays, a closed device is opened in the
+  background (`AudioOut::readiness`, `prepare`), and an idle stream closes after 5 s;
+- Play asks for the device as its preroll begins; if it is still opening when the clock starts,
+  playback runs on the wall clock and the sound starts where the playhead got to once it is open.
+  A scrub plays silently until then (Source playback works the same way);
+- the logic pass ends the preroll as soon as its frames are ready;
+- `PREROLL_FRAMES` 6 → 3 (6 frames are still asked for during the preroll).
+
+Preroll rule, `--preroll-study` (3 cold plays per row, 2.5 s each, GPU path, Full; waits p50 in ms
+and frames dropped in the first second, mean). "Parked": the frame under the playhead is on screen
+when Play is pressed, as in the app; "jump": Play right after a jump into the middle of a GOP.
+Run A was at load average ~200 (decoding slowed down by other work), run B at ~12:
+
+| case | 1 frame | 2 | 3 | 6 (before) |
+|---|---|---|---|---|
+| H.264 1080p, parked on a keyframe, A | 0 ms, **8.3 drops** | 21, 0 | 18, 0 | 42, 2.0 |
+| H.264 1080p, parked mid-GOP, A | 0, 1.0 | 20, 0.7 | 19, 0 | 44, 2.0 |
+| H.264 1080p, jump, A | 171, 2.0 | 159, 0 | 162, 0 | 195, 0 |
+| stack3-fx (3 layers + effects), parked mid-GOP, A | 0, 0 | 22, 0 | 21, 0.7 | 42, 0 |
+| H.264 1080p, parked on a keyframe, B | 0, 0 | 24, 0 | 21, 0 | 26, 0 |
+| H.264 1080p, jump, B | 166, 0.3 | 163, 0 | 186, 1.0 | 185, 0 |
+| still image (2160p JPEG), parked, A / B | 0, 0 / 0, 0 | 19, 0 / 25, 0 | 21, 0.3 / 18, 0 | 21, 1.7 / 22, 0 |
+
+Starting on the first frame alone drops frames as soon as decoding is slow. With 3 frames the
+drops stay at the noise level of 6 (≈0.2 against ≈0.35 per play over both runs), and the wait is
+about the same when decoding is fast (run B) and much shorter when it is slow (run A). A jump into stack3-fx hits the
+0.5 s timeout with every rule.
+
+The whole start in the app, 10 plays per row, builds alternated to cancel load drift. "Warm":
+Play 0.4 s after the last stop; "cold": after 7 s idle (the stream has closed). Medians, p90 in
+brackets, ms:
+
+| case | first move, before | after | UI thread in `AudioOut::start`, before | after |
+|---|---|---|---|---|
+| one still image, warm | 50 (63) | **32 (38)** | 15 (max 23) | 0 |
+| one still image, cold | 49 (54) | **37 (38)** | 16 (max 24) | 0 |
+| H.264 1080p clip, warm | 47 (72) | **30 (40)** | 15 (max 19) | 0 |
+| H.264 1080p clip, cold | 47 (61) | **31 (39)** | 16 (max 25) | 0 |
+
+Frames dropped in the first second: none in either build here (1 in 80 plays after, 0 in 80
+before, over four rounds). On macOS the device opens in tens of ms, so most of the gain is the
+audio clock no longer waiting for the open; on WASAPI a cold open (559 ms, above) used to freeze the
+UI thread at the start of a drag or a Play, and now happens off it.
+
+A drag along the Timeline ruler in the app (`ui.drag`, 40 steps, H.264 clip with a 440 Hz tone; 6
+drags per build in two alternating rounds). "Cold": after 7 s idle; "warm": 0.8 s after the last
+drag. The Audio Meters are fed by the mixer running in the device callback, so their peak shows
+the grains were played:
+
+| drag | UI thread in the scrub stream's start, before | after | meter peak, both builds |
+|---|---|---|---|
+| cold | 29-52 ms | **0.0 ms** | -17.8 dB |
+| warm | 10-13 ms | **0.0 ms** | -17.8 dB |
+
+The playhead followed every drag in both builds; after the change the first grains of a cold drag
+are silent until the device is open, then the scrub is heard. Not measured on Windows.
+
+Test: `apps/filmcraft` (`audio::tests`) — `start` returns at once while a slow device opens and its
+clock holds at 0; an open stream is reused and closes once idle; a failed open reports no clock and
+the next start retries; an open overtaken by a close stays closed; a lost device is reopened on the
+same mixer and clock. `crates/ui-egui` (`app::playback::audio_recovery_tests`) — Play never waits
+for an output that is still opening (wall clock, then the sound from where the playhead got to); an
+output that fails to open leaves playback running and retries; the logic pass ends the preroll once
+its frames are ready. `frames::tests` — the preroll waits for the first three frames.

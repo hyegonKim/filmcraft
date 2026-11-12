@@ -19,6 +19,8 @@ pub fn stats(app: &FilmcraftApp) -> Value {
         "dropRate": if shown + dropped == 0 { 0.0 } else { dropped as f64 / (shown + dropped) as f64 },
         "resolution": app.ui.program.res.label(),
         "draftDecode": app.session.prefs.playback.draft_decode,
+        "start": app.playback.start.to_json(),
+        "scrubAudioStartMs": app.scrub.start_ms(),
     });
     #[cfg(not(target_arch = "wasm32"))]
     {

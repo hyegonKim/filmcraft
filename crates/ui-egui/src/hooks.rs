@@ -1,10 +1,34 @@
 use super::*;
 
+/// Whether an [`AudioOut`] has a stream open (see [`AudioOut::readiness`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioReadiness {
+    /// A stream is open: `start` plays at once.
+    Ready,
+    /// The device is opening in the background; `start` returns at once and the sound follows.
+    Opening,
+    /// No stream is open (none was asked for, it closed after a while unused, or opening it
+    /// failed): `start` or `prepare` opens one.
+    Closed,
+}
+
 /// Audio output provided by the platform layer (cpal on desktop, WebAudio on web).
 pub trait AudioOut {
     /// Start output; `fill(buffer, channels)` is called on the audio thread with interleaved f32.
+    /// An output that opens its device in the background ([`AudioOut::readiness`]) returns at
+    /// once and calls `fill` once the device runs.
     fn start(&mut self, fill: Box<dyn FnMut(&mut [f32], usize) + Send>) -> Result<u32, String>;
     fn stop(&mut self);
+    /// Whether a stream is open. Desktop opens and closes the device on its own thread, never on
+    /// the UI thread (opening takes up to a second on WASAPI from a cold audio engine, #2281), so
+    /// callers that need the sound in step with a clock wait for `Ready` before `start`. Outputs
+    /// that open at once are always `Ready`.
+    fn readiness(&self) -> AudioReadiness {
+        AudioReadiness::Ready
+    }
+    /// Begin opening the device without waiting for it, so that a later `start` plays at once
+    /// (Play calls this as its preroll begins). Does nothing while a stream is open or opening.
+    fn prepare(&mut self) {}
     /// Device sample rate.
     fn sample_rate(&self) -> u32;
     /// Device output channels (what `fill` will be called with).

@@ -352,12 +352,24 @@ cargo xtask bench-playback --json target/bench-playback.json # machine-readable 
 | `stack3` | three 1080p H.264 clips on V1–V3; V2/V3 scaled, positioned, rotated, 70–85 % opacity |
 | `stack3-blend` | `stack3` with V2 in Screen and V3 in Overlay (blend modes on the GPU) |
 | `h264-2160` | one 2160p23.976 H.264 clip |
+| `still` | one 2160p JPEG in a 1080p sequence at 50 % (the preroll study's image case) |
 | `demo` | the built-in demo project (procedural footage, transitions, effects) |
 | `after-preview` | 1080p H.264 + Lumetri/Sharpen/Levels/Tint: a live play, Render In to Out, then two plays of the green segment |
 | `seek-storm` | 40 jumps to random frames 150 ms apart (scrubbing), time until the exact frame shows |
 
 Options: `--res full,half,quarter`, `--cpu` (CPU compositor + texture conversion instead of the
 GPU path), `--seconds`, `--refresh` (display Hz), `--workers`, `--repeat`, `--json <file>`.
+
+`--preroll-study` (#2281) compares when Play starts its clock: the app's rule (`PREROLL_FRAMES`)
+against "the first n frames ready" for n = 1, 2, 3, 4, 6. Each play starts cold (fresh session and
+frame server) from a keyframe and from mid-GOP with the frame under the playhead already on screen,
+as in the app, and from mid-GOP right after a jump; it reports the wait (p50 / max) and the frames
+dropped in the first second and in the whole play. `still` (one 2160p JPEG in a 1080p sequence) is
+a scenario for it:
+
+```sh
+cargo run --release -p filmcraft-ui-egui --example bench_playback -- --preroll-study --scenario still,h264-1080,stack3-fx --res full --seconds 2.5 --repeat 3
+```
 Fixtures are made with ffmpeg in `target/fixtures/playback/` (set `FILMCRAFT_FIXTURES` to share one
 set between worktrees).
 

@@ -346,7 +346,9 @@ file ──► codecs (MP4/MOV, MKV, audio)        demux + decode, GOP-aware see
 - **Frame scheduling.** `crates/ui-egui/src/frames.rs` runs a small pool of worker threads with
   prioritised jobs: the frame on screen first, then playback prefetch, then thumbnails. The UI never
   decodes. It shows the exact frame when it is ready and holds the nearest cached frame meanwhile.
-  Play waits for the first frames (`PREROLL_FRAMES`, at most 0.5 s) before starting the clock.
+  Play waits for the first three frames (`PREROLL_FRAMES`, at most 0.5 s) before starting the
+  clock; the logic pass checks them too, so the clock starts in the pass they become ready rather
+  than after the monitor draws again (#2281).
   Every refresh, `schedule_playback` asks for the next frames and drops (or cancels, through
   `filmcraft_media::cancel`) jobs for frames the playhead has passed; a new on-screen frame
   replaces the one asked for before (scrubbing); Stop cancels the prefetch. When frames cost more
@@ -366,7 +368,12 @@ file ──► codecs (MP4/MOV, MKV, audio)        demux + decode, GOP-aware see
   thread only copies them.
 - **Audio clock.** The desktop app passes a cpal output (`apps/filmcraft/src/audio.rs`) to the UI as
   `AudioOut`. While playing, the samples played by the sound card drive the playhead and video follows.
-  Without an audio device, playback falls back to the wall clock. `PlaybackMeter` counts timeline
+  Without an audio device, playback falls back to the wall clock. The stream lives on its own thread
+  and is never opened or closed on the UI thread (a cold WASAPI open takes 0.5-1 s, #2281): `start`
+  and `stop` only swap what the open stream plays, Play asks for the device as its preroll begins,
+  and while it is still opening playback runs on the wall clock (`AudioReadiness::Opening`); once it
+  is open the sound starts where the playhead got to and its clock takes over. A scrub is silent
+  until then. An idle stream stays open 5 s so the next scrub or Play starts at once. `PlaybackMeter` counts timeline
   frames: shown when the exact picture was on screen while due, dropped otherwise (including frames
   passed over without a refresh, not while the window is hidden). `cargo xtask bench-playback`
   measures the whole path headlessly ([testing.md](testing.md) §5).

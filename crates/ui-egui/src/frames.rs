@@ -435,8 +435,16 @@ pub fn prefetch_depth(speed: f64) -> i64 {
 
 /// Playback starts its clock once this many frames from the playhead are ready, or after
 /// [`PREROLL_TIMEOUT_S`]: otherwise the first frames after Play are due before any decoder had a
-/// chance to produce them (a seek decodes from the previous keyframe).
-pub const PREROLL_FRAMES: i64 = 6;
+/// chance to produce them (a seek decodes from the previous keyframe). The frame due first and
+/// the two after it show the decoder keeps up: `bench_playback --preroll-study` (#2281) measured
+/// no more drops in the first second than with the 6 frames waited for before, and the clock
+/// starting 20-110 ms sooner, while starting on the first frame alone dropped up to 8 frames in
+/// the first second of H.264 playback (`docs/performance.md`).
+pub const PREROLL_FRAMES: i64 = 3;
+
+/// Frames from the playhead asked for during the preroll: the ones that gate start and a few
+/// more, already on their way when the clock starts.
+pub const PREROLL_REQUEST: i64 = 6;
 
 /// Seconds before a scrubbed-to frame whose frames a seek still decodes in full (see
 /// [`FrameServer::request`]); earlier non-reference pictures are skipped on the way.
@@ -699,9 +707,9 @@ impl FrameServer {
                 catch_up: (!preroll && dir > 0).then_some(Tick::ZERO),
             });
         }
-        // During preroll the clock has not started: only the frames that gate start, not a
-        // prefetch run that walks the rest of a LongGOP and evicts the playhead pictures.
-        let ahead = if preroll { (PREROLL_FRAMES - 1).max(0) } else { prefetch_depth(speed) };
+        // During preroll the clock has not started: only the frames that gate start and a few
+        // more, not a prefetch run that walks the rest of a LongGOP and evicts the playhead pictures.
+        let ahead = if preroll { (PREROLL_REQUEST - 1).max(0) } else { prefetch_depth(speed) };
         for i in 0..ahead {
             let f = key.frame + (lead + i * stride) * dir * step;
             if f >= 0 {
@@ -1353,5 +1361,32 @@ mod tests {
         first_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         server.request(FrameKey { frame: 1, ..key }, filmcraft_time::Tick::ZERO, 0.1, &p, 0);
         done_rx.recv_timeout(Duration::from_secs(5)).expect("worker must process the next job after a repaint callback panics");
+    }
+
+    /// #2281: the clock starts once the frame due first and the two after it are ready, in the
+    /// direction of play, and at the end of the sequence once the frames left are.
+    #[test]
+    fn the_preroll_waits_for_the_first_three_frames() {
+        use super::{FrameKey, FrameServer, PREROLL_FRAMES, Rgba};
+        use std::sync::{Arc, PoisonError};
+
+        assert_eq!(PREROLL_FRAMES, 3);
+        let s = filmcraft_engine::Session::default();
+        let server = FrameServer::new(s.media.clone(), s.services.clone(), s.previews.clone(), 1);
+        let key = FrameKey { target: Target::Item(ItemId(999)), frame: 10, size: 32, revision: 0, draft: false };
+        let ready = |frame: i64| {
+            let img = Arc::new(Rgba { w: 1, h: 1, px: vec![0; 4] });
+            server.shared.done.lock().unwrap_or_else(PoisonError::into_inner).insert(FrameKey { frame, ..key }, img);
+        };
+        ready(10);
+        ready(11);
+        assert!(!server.preroll_ready(key, 1.0, 100), "frame 12 is not ready yet");
+        assert!(server.preroll_ready(key, 1.0, 11), "the last frame of the sequence is 11");
+        ready(12);
+        assert!(server.preroll_ready(key, 1.0, 100));
+        assert!(!server.preroll_ready(key, -1.0, 100), "playing backwards needs frames 9 and 8");
+        ready(9);
+        ready(8);
+        assert!(server.preroll_ready(key, -1.0, 100));
     }
 }

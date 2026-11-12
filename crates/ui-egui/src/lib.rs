@@ -102,7 +102,7 @@ mod raw_input;
 use audio::shuttle_mix_rate;
 pub use audio::{AUDIO_RETRY_S, AUDIO_STALL_S, playback_mix};
 pub use gpu::{gpu_compositor_unsupported, software_rasterizer};
-pub use hooks::{AudioDevices, AudioOut, ClipboardMedia, HostHooks, RelinkHint, SystemThemeFn};
+pub use hooks::{AudioDevices, AudioOut, AudioReadiness, ClipboardMedia, HostHooks, RelinkHint, SystemThemeFn};
 pub(crate) use raw_input::rewrite_native_window_input;
 
 pub use ime_reset::install_ime_reset_callbacks;
@@ -158,10 +158,18 @@ pub struct Playback {
     pub audio_stats: std::sync::Arc<play_ahead::AudioStats>,
     /// Shown / dropped frame accounting for the current (or last) play.
     pub meter: frames::PlaybackMeter,
+    /// How the current (or last) play started, for `perf.stats` (#2281).
+    pub start: PlayStart,
     /// Waiting for the first frames before starting the clock: when the wait began (monotonic host time,
     /// s; negative = not yet stamped), and whether the Program monitor has them ready.
     pub preroll: Option<f64>,
     pub preroll_ready: bool,
+    /// The frame the Program monitor shows during the preroll and the last frame of the sequence,
+    /// so the logic pass can see the preroll is over without waiting for the monitor to draw again.
+    pub preroll_key: Option<(frames::FrameKey, i64)>,
+    /// The clock runs on wall time while the audio output opens on its own thread; once it runs,
+    /// the sound starts where the playhead got to and the audio clock takes over (#2281).
+    pub audio_pending: bool,
     /// The window was hidden (occluded/minimized) since the monitor last refreshed.
     pub hidden: bool,
     /// Forward playback stops here (Play In to Out, Play from Playhead to Out Point).
@@ -169,6 +177,35 @@ pub struct Playback {
     /// Resting playhead for an inclusive marked range; unlike stop_at, this
     /// names the last visible frame, not the following playback boundary.
     pub rest_at: Option<Tick>,
+}
+
+/// Timing of the current (or last) play, for `perf.stats` (#2281). Times are monotonic host
+/// seconds: when Play was pressed, when the clock started (the preroll ended) and from where,
+/// when the playhead first moved from there and when the sound started. Also the frames dropped
+/// during the clock's first second, and how long the UI thread spent starting the audio output.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlayStart {
+    pub pressed: f64,
+    pub clock: Option<f64>,
+    pub from: Tick,
+    pub moved: Option<f64>,
+    pub sound: Option<f64>,
+    pub dropped_first_second: Option<u64>,
+    pub audio_start_ms: f64,
+}
+
+impl PlayStart {
+    /// The timings in ms from the press.
+    pub fn to_json(&self) -> serde_json::Value {
+        let ms = |t: Option<f64>| t.map(|t| ((t - self.pressed) * 1e4).round() / 10.0);
+        serde_json::json!({
+            "prerollMs": ms(self.clock),
+            "firstMoveMs": ms(self.moved),
+            "soundMs": ms(self.sound),
+            "droppedFirstSecond": self.dropped_first_second,
+            "audioStartMs": (self.audio_start_ms * 10.0).round() / 10.0,
+        })
+    }
 }
 
 /// Incoming composition identity for the Program monitor. Interrupted compositions remain

@@ -76,6 +76,8 @@ const SPECS: &[Spec] = &[
     Spec { name: "dec_av1_2160.mp4", src: "testsrc2=s=3840x2160:r=24000/1001:d=3,noise=alls=6:allf=t", secs: 3, audio: false, codec: AV1 },
     Spec { name: "dec_prores_1080.mov", src: "testsrc2=s=1920x1080:r=24000/1001:d=2,noise=alls=6:allf=t", secs: 2, audio: false, codec: PRORES },
     Spec { name: "dec_prores_2160.mov", src: "testsrc2=s=3840x2160:r=24000/1001:d=1,noise=alls=6:allf=t", secs: 1, audio: false, codec: PRORES },
+    // A photo-sized still image (one frame), for the preroll study's image-on-the-timeline case.
+    Spec { name: "still2160.jpg", src: "testsrc2=s=3840x2160:d=1,noise=alls=6:allf=t", secs: 1, audio: false, codec: &["-frames:v", "1", "-q:v", "3"] },
     // Small clip media for the 1000-clip timeline / project benchmarks (video + audio).
     Spec { name: "clip360.mp4", src: "testsrc2=s=640x360:r=24000/1001:d=20", secs: 20, audio: true, codec: X264 },
 ];
@@ -107,7 +109,7 @@ pub fn fixture(name: &str) -> Option<PathBuf> {
         c.args(["-f", "lavfi", "-i", &format!("sine=f=440:d={}", spec.secs), "-c:a", "aac", "-shortest"]);
     }
     c.args(codec);
-    if ext != "webm" {
+    if matches!(ext, "mp4" | "mov") {
         c.args(["-movflags", "+faststart"]);
     }
     c.arg(&tmp);

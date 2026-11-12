@@ -6,12 +6,16 @@
 //! the new position. One output stream stays open for the whole scrub: each move only re-aims it,
 //! so the device is not reopened every frame. The stream closes when the button is released and
 //! the grain has played, when the setting is off, or when playback starts.
+//!
+//! Starting the stream never waits for the device (#2281): desktop opens it on its own thread
+//! (`AudioOut::start` returns at once), so the playhead follows the mouse from the first move,
+//! silently until the device is ready, then with the grain of wherever the playhead is.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
 use filmcraft_time::Tick;
 
-use crate::FilmcraftApp;
+use crate::{AudioReadiness, FilmcraftApp};
 
 /// Length of the grain played after each move.
 pub const GRAIN_S: f64 = 0.08;
@@ -19,6 +23,9 @@ pub const GRAIN_S: f64 = 0.08;
 const RAMP_S: f64 = 0.004;
 /// How long the stream stays open after the last move once the button is up.
 const LINGER_S: f64 = 0.25;
+/// How soon a scrub stream whose device could not be opened is asked for again while the drag
+/// goes on (each attempt runs on the device thread, so it never holds up the drag).
+const RETRY_S: f64 = 0.5;
 
 /// What the audio callback plays next: `left` of `total` frames from `cursor`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -35,6 +42,11 @@ pub struct ScrubAudio {
     open: bool,
     last_tick: Option<Tick>,
     last_move: f64,
+    /// When the scrub stream may be asked for again if its device could not be opened.
+    retry_at: f64,
+    /// How long the UI thread spent in the last call that started the scrub stream (ms), for
+    /// `perf.stats` (#2281).
+    start_ms: f64,
 }
 
 impl ScrubAudio {
@@ -45,6 +57,11 @@ impl ScrubAudio {
     /// The output device was stopped under the stream: the next grain reopens it.
     pub(crate) fn device_stopped(&mut self) {
         self.open = false;
+    }
+
+    /// How long the UI thread spent in the last call that started the scrub stream (ms).
+    pub fn start_ms(&self) -> f64 {
+        (self.start_ms * 10.0).round() / 10.0
     }
 }
 
@@ -89,6 +106,7 @@ impl FilmcraftApp {
         if sr == 0 {
             return;
         }
+        let failed = a.readiness() == AudioReadiness::Closed;
         let total = ((GRAIN_S * sr as f64) as i64).max(1);
         {
             let mut g = self.scrub.grain.lock().unwrap_or_else(PoisonError::into_inner);
@@ -96,13 +114,22 @@ impl FilmcraftApp {
         }
         self.scrub.last_move = now;
         if self.scrub.open {
-            return;
+            // a stream the device thread could not open is asked for again, so the rest of the
+            // drag is not silent
+            if !(failed && now >= self.scrub.retry_at) {
+                return;
+            }
+            self.scrub.open = false;
         }
+        self.scrub.retry_at = now + RETRY_S;
         let mix = crate::playback_mix(&self.session, seq_id, sr);
         let fill = grain_fill(mix, self.scrub.grain.clone(), ((RAMP_S * sr as f64) as i64).max(1));
         let Some(a) = self.audio.as_mut() else { return };
+        let t0 = web_time::Instant::now();
         a.stop();
-        match a.start(fill) {
+        let started = a.start(fill);
+        self.scrub.start_ms = t0.elapsed().as_secs_f64() * 1e3;
+        match started {
             Ok(_) => self.scrub.open = true,
             Err(e) => log::warn!("audio output unavailable for scrubbing: {e}"),
         }

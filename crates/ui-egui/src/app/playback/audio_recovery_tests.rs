@@ -411,3 +411,198 @@ fn a_scrub_stops_a_text_to_speech_preview_but_not_an_idle_output() {
     app.stop_for_scrub();
     assert_eq!(stops.load(Ordering::Relaxed), before + 1, "and a second seek has nothing left to stop");
 }
+
+/// An output that opens its device in the background, as desktop does (#2281): `Opening` once
+/// asked to open, `Ready` when the test says the device is open.
+struct Background {
+    readiness: Arc<std::sync::Mutex<crate::AudioReadiness>>,
+    prepares: Arc<AtomicUsize>,
+    starts: Arc<AtomicUsize>,
+}
+
+impl AudioOut for Background {
+    fn start(&mut self, _: Box<dyn FnMut(&mut [f32], usize) + Send>) -> Result<u32, String> {
+        self.starts.fetch_add(1, Ordering::Relaxed);
+        Ok(48_000)
+    }
+    fn stop(&mut self) {}
+    fn sample_rate(&self) -> u32 {
+        48_000
+    }
+    fn played_frames(&self) -> Option<u64> {
+        Some(0)
+    }
+    fn readiness(&self) -> crate::AudioReadiness {
+        *self.readiness.lock().unwrap()
+    }
+    fn prepare(&mut self) {
+        self.prepares.fetch_add(1, Ordering::Relaxed);
+        let mut r = self.readiness.lock().unwrap();
+        if *r == crate::AudioReadiness::Closed {
+            *r = crate::AudioReadiness::Opening;
+        }
+    }
+}
+
+type Shared<T> = Arc<std::sync::Mutex<T>>;
+
+/// The demo project (it has music) on a [`Background`] output that is closed: (app, readiness,
+/// prepare calls, start calls).
+fn background_app() -> (FilmcraftApp, Shared<crate::AudioReadiness>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let mut session = Session::default();
+    session.execute("file.openDemoProject", json!({})).unwrap();
+    let mut app = FilmcraftApp::new(session);
+    let readiness = Arc::new(std::sync::Mutex::new(crate::AudioReadiness::Closed));
+    let (prepares, starts) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    app.audio = Some(Box::new(Background { readiness: readiness.clone(), prepares: prepares.clone(), starts: starts.clone() }));
+    (app, readiness, prepares, starts)
+}
+
+/// #2281: the playhead never waits for the audio device. Play asks the output to open as its
+/// preroll begins; while it is still opening the clock runs on wall time, and once it is open the
+/// sound starts where the playhead got to and the audio clock takes over from there.
+#[test]
+fn play_never_waits_for_an_output_that_is_still_opening() {
+    use crate::AudioReadiness;
+    let (mut app, readiness, prepares, starts) = background_app();
+    let ctx = egui::Context::default();
+    let start = app.session.playhead();
+    app.set_now_for_test(10.0);
+    app.play(1.0);
+    assert_eq!(prepares.load(Ordering::Relaxed), 1, "Play opens the device during the preroll");
+    assert_eq!(*readiness.lock().unwrap(), AudioReadiness::Opening);
+    app.end_preroll(10.0);
+    assert!(app.playback.audio_pending && !app.playback.audio_clock);
+    assert_eq!(starts.load(Ordering::Relaxed), 0, "nothing is started on an output that is not open");
+    app.set_now_for_test(10.5);
+    app.advance_playback(&ctx);
+    let moved = app.session.playhead();
+    assert!(moved > start + Tick::from_seconds_f64(0.4), "the wall clock moves the playhead meanwhile: {moved:?}");
+    *readiness.lock().unwrap() = AudioReadiness::Ready;
+    app.set_now_for_test(10.6);
+    app.advance_playback(&ctx);
+    assert_eq!(starts.load(Ordering::Relaxed), 1, "the sound starts once the output is open");
+    assert!(app.playback.audio_clock && !app.playback.audio_pending, "and its clock takes over");
+    let expected = start + Tick::from_seconds_f64(0.6);
+    assert!((app.playback.anchor_tick.0 - expected.0).abs() < Tick::from_seconds_f64(0.001).0, "from where the wall clock got to");
+    assert!(app.session.playhead() >= moved, "the playhead does not jump back");
+    let timing = app.playback.start;
+    assert_eq!((timing.clock, timing.moved, timing.sound), (Some(10.0), Some(10.5), Some(10.6)), "perf.stats timings");
+    app.stop();
+    assert!(!app.playback.audio_pending);
+}
+
+/// An output that cannot be opened leaves playback running silently and is tried again on the
+/// retry timer, as a stream that dies mid-play is.
+#[test]
+fn an_output_that_fails_to_open_leaves_playback_running_and_retries() {
+    use crate::AudioReadiness;
+    let (mut app, readiness, _, starts) = background_app();
+    let ctx = egui::Context::default();
+    app.set_now_for_test(10.0);
+    app.play(1.0);
+    app.end_preroll(10.0);
+    // the device thread could not open it
+    *readiness.lock().unwrap() = AudioReadiness::Closed;
+    app.set_now_for_test(10.2);
+    app.advance_playback(&ctx);
+    assert!(!app.playback.audio_pending && !app.playback.audio_clock);
+    assert_eq!(app.playback.audio_retry_at, 10.2 + AUDIO_RETRY_S, "tried again on a timer");
+    assert!(app.playback.playing && app.session.playhead() > Tick::ZERO, "playing on without sound");
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+    app.set_now_for_test(10.2 + AUDIO_RETRY_S + 0.1);
+    app.advance_playback(&ctx);
+    assert!(app.playback.audio_pending, "the retry asks the output to open again");
+    *readiness.lock().unwrap() = AudioReadiness::Ready;
+    app.set_now_for_test(10.2 + AUDIO_RETRY_S + 0.2);
+    app.advance_playback(&ctx);
+    assert!(app.playback.audio_clock);
+    assert_eq!(starts.load(Ordering::Relaxed), 1);
+    app.stop();
+}
+
+/// #2281: the logic pass ends the preroll as soon as the frames are ready, without waiting for
+/// the monitor to draw them first (one UI pass earlier).
+#[test]
+fn the_preroll_ends_in_the_logic_pass_once_its_frames_are_ready() {
+    use crate::frames::{FrameKey, Target};
+    let (mut app, ..) = background_app();
+    let ctx = egui::Context::default();
+    app.set_now_for_test(10.0);
+    app.play(1.0);
+    app.advance_playback(&ctx);
+    assert!(app.playback.preroll.is_some(), "no frames asked for yet");
+    let seq = app.session.state.active_sequence.unwrap();
+    let rate = app.session.sequence_rate();
+    let last = rate.frame_at(app.session.active_sequence().unwrap().duration()) - 1;
+    let key = FrameKey { target: Target::Sequence(seq), frame: rate.frame_at(app.session.playhead()), size: 125, revision: app.session.revision, draft: false };
+    // what the monitor asks for as it draws; it has not drawn since the frames became ready
+    let project = app.session.project.clone();
+    app.frames.schedule_playback(key, rate, 0.125, &project, 1.0, true);
+    app.playback.preroll_key = Some((key, last));
+    let t0 = std::time::Instant::now();
+    while !app.frames.preroll_ready(key, 1.0, last) {
+        assert!(t0.elapsed() < std::time::Duration::from_secs(60), "the preroll frames were never rendered");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(!app.playback.preroll_ready, "the monitor has not seen them");
+    app.set_now_for_test(10.1);
+    app.advance_playback(&ctx);
+    assert!(app.playback.preroll.is_none(), "the clock started in this pass");
+    assert_eq!(app.playback.start.clock, Some(10.1));
+    app.stop();
+}
+
+/// A restart (#840) that takes longer than `AUDIO_STALL_S` to reopen the device: the frozen clock
+/// hands over to the wall clock, and the sound comes back once the device is open instead of
+/// playback staying silent with no retry.
+#[test]
+fn a_slow_restart_brings_the_sound_back_once_the_device_is_open() {
+    use crate::AudioReadiness;
+    let (mut app, readiness, _, starts) = background_app();
+    *readiness.lock().unwrap() = AudioReadiness::Ready;
+    let ctx = egui::Context::default();
+    app.set_now_for_test(10.0);
+    app.play(1.0);
+    app.end_preroll(10.0);
+    assert!(app.playback.audio_clock && starts.load(Ordering::Relaxed) == 1);
+    // the stream died and the device thread is reopening it; the clock holds meanwhile
+    *readiness.lock().unwrap() = AudioReadiness::Opening;
+    let late = 10.0 + AUDIO_STALL_S + 0.1;
+    app.set_now_for_test(late);
+    app.advance_playback(&ctx);
+    assert!(!app.playback.audio_clock && app.playback.audio_pending, "waits for the reopened device on the wall clock");
+    assert!(!app.ui.status.contains("not responding"), "a reopening device is not reported as stalled");
+    *readiness.lock().unwrap() = AudioReadiness::Ready;
+    app.set_now_for_test(late + 0.5);
+    app.advance_playback(&ctx);
+    assert_eq!(starts.load(Ordering::Relaxed), 2, "the sound starts again on the reopened device");
+    assert!(app.playback.audio_clock && !app.playback.audio_pending);
+    app.stop();
+}
+
+/// A scrub stream whose device could not be opened is asked for again while the drag goes on (at
+/// most every half second), so the rest of the drag is not silent; one still opening is left alone.
+#[test]
+fn a_scrub_retries_a_device_that_could_not_be_opened() {
+    use crate::AudioReadiness;
+    let (mut app, readiness, _, starts) = background_app();
+    app.session.prefs.audio.scrub_audio = true;
+    let frame = app.session.sequence_rate().frame_duration();
+    let drag = |app: &mut FilmcraftApp, now: f64| {
+        let next = app.session.playhead() + frame;
+        app.session.set_playhead(next);
+        app.scrub_tick(now, true)
+    };
+    app.scrub_tick(0.0, true);
+    assert!(drag(&mut app, 1.0), "the first move opens the scrub stream");
+    assert_eq!(starts.load(Ordering::Relaxed), 1);
+    // the device thread could not open it (readiness stays Closed)
+    drag(&mut app, 1.1);
+    assert_eq!(starts.load(Ordering::Relaxed), 1, "not asked for again at once");
+    drag(&mut app, 1.6);
+    assert_eq!(starts.load(Ordering::Relaxed), 2, "asked for again while the drag goes on");
+    *readiness.lock().unwrap() = AudioReadiness::Opening;
+    drag(&mut app, 2.5);
+    assert_eq!(starts.load(Ordering::Relaxed), 2, "a device that is still opening is left to open");
+}

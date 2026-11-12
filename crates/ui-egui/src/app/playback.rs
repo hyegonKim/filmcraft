@@ -1,6 +1,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 use super::play_ahead;
 use super::{AUDIO_RETRY_S, AUDIO_STALL_S, FilmcraftApp, Tick, frames, json, panels, shuttle};
+use crate::AudioReadiness;
 #[cfg(test)]
 use filmcraft_engine::Session;
 
@@ -34,6 +35,7 @@ impl FilmcraftApp {
         // A loop restart keeps counting into the same meter.
         if !self.playback.playing || self.playback.speed != speed {
             self.playback.meter.start(speed);
+            self.playback.start = crate::PlayStart { pressed: self.now(), ..Default::default() };
         }
         self.playback.playing = true;
         self.playback.speed = speed;
@@ -41,16 +43,24 @@ impl FilmcraftApp {
         self.playback.anchor_time = -1.0; // set when the preroll ends
         self.playback.preroll = Some(-1.0);
         self.playback.preroll_ready = false;
+        self.playback.preroll_key = None;
         if let Some(a) = self.audio.as_mut() {
             a.stop();
+            // the device opens while the first frames are made (desktop: on its own thread)
+            a.prepare();
         }
         self.playback.audio_clock = false;
+        self.playback.audio_pending = false;
         self.playback.audio_retry_at = 0.0;
     }
 
     /// Start the clock (and audio) once the first frames are ready or the preroll timed out.
     fn end_preroll(&mut self, now: f64) {
         self.playback.preroll = None;
+        if self.playback.start.clock.is_none() {
+            self.playback.start.clock = Some(now);
+            self.playback.start.from = self.session.playhead();
+        }
         self.playback.anchor_time = now;
         self.playback.anchor_tick = self.session.playhead();
         self.playback.audio_seen = (0, now);
@@ -117,6 +127,7 @@ impl FilmcraftApp {
         self.playback.stop_at = None;
         self.playback.rest_at = None;
         self.playback.preroll = None;
+        self.playback.audio_pending = false;
         self.playback.meter.finish();
         self.frames.stop_prefetch();
         if let Some(a) = self.audio.as_mut() {
@@ -145,10 +156,22 @@ impl FilmcraftApp {
         }
     }
 
+    /// Start the sound at `anchor_tick` and hand the clock to the output. While the output is
+    /// still opening (desktop opens it on its own thread) playback runs on the wall clock, and
+    /// `advance_playback` calls this again once it is open (#2281).
     pub(super) fn start_audio(&mut self, now: f64) {
         let Some(seq_id) = self.session.state.active_sequence else { return };
-        let start_tick = self.session.playhead();
+        let start_tick = self.playback.anchor_tick;
         let Some(a) = self.audio.as_mut() else { return };
+        if a.readiness() != AudioReadiness::Ready {
+            a.stop();
+            a.prepare();
+            self.playback.audio_clock = false;
+            self.playback.audio_pending = a.readiness() == AudioReadiness::Opening;
+            self.playback.audio_retry_at = if self.playback.audio_pending { 0.0 } else { now + AUDIO_RETRY_S };
+            return;
+        }
+        self.playback.audio_pending = false;
         let sr = a.sample_rate();
         // Output frames still follow the accelerated timeline. The pitch preference selects
         // either the original rate conversion or pitch-corrected program audio.
@@ -171,10 +194,15 @@ impl FilmcraftApp {
                 cursor += (buf.len() / ch.max(1)) as i64;
             })
         };
-        match a.start(fill) {
+        let t0 = web_time::Instant::now();
+        let started = a.start(fill);
+        self.playback.start.audio_start_ms += t0.elapsed().as_secs_f64() * 1e3;
+        match started {
             Ok(_) => {
                 self.playback.audio_clock = true;
                 self.playback.audio_retry_at = 0.0;
+                let at = self.now();
+                self.playback.start.sound.get_or_insert(at);
                 if let Some(note) = self.audio.as_ref().and_then(|audio| audio.note()) {
                     self.ui.status = note;
                 }
@@ -197,7 +225,11 @@ impl FilmcraftApp {
         if let Some(since) = self.playback.preroll {
             let since = if since < 0.0 { now } else { since };
             self.playback.preroll = Some(since);
-            if self.playback.preroll_ready || now - since >= frames::PREROLL_TIMEOUT_S {
+            // The frames the monitor asked for may have become ready since it last drew: start
+            // now rather than one UI pass later (#2281).
+            let ready =
+                self.playback.preroll_ready || self.playback.preroll_key.is_some_and(|(key, last)| self.frames.preroll_ready(key, self.playback.speed, last));
+            if ready || now - since >= frames::PREROLL_TIMEOUT_S {
                 self.end_preroll(now);
             } else {
                 ctx.request_repaint();
@@ -206,6 +238,25 @@ impl FilmcraftApp {
         }
         if self.playback.anchor_time < 0.0 {
             self.playback.anchor_time = now;
+        }
+        if self.playback.audio_pending {
+            match self.audio.as_ref().map(|a| a.readiness()) {
+                Some(AudioReadiness::Opening) => {}
+                Some(AudioReadiness::Ready) => {
+                    // The output is open: the sound starts where the wall clock got to, and the
+                    // audio clock takes over from there.
+                    self.playback.anchor_tick += Tick::from_seconds_f64((now - self.playback.anchor_time) * self.playback.speed);
+                    self.playback.anchor_time = now;
+                    self.playback.audio_seen = (0, now);
+                    self.start_audio(now);
+                }
+                _ => {
+                    // it could not be opened: go on without sound and try again on a timer
+                    log::warn!("audio output unavailable; playing without sound");
+                    self.playback.audio_pending = false;
+                    self.playback.audio_retry_at = now + AUDIO_RETRY_S;
+                }
+            }
         }
         if !self.playback.audio_clock && self.playback.audio_retry_at > 0.0 && now >= self.playback.audio_retry_at {
             // The output failed mid-play: open it again where the wall clock got to (what
@@ -246,11 +297,18 @@ impl FilmcraftApp {
                 self.playback.anchor_tick += Tick::from_seconds_f64(played * self.playback.speed);
                 self.playback.anchor_time = now;
                 self.playback.audio_clock = false;
+                let reopening = self.audio.as_ref().is_some_and(|a| a.readiness() == AudioReadiness::Opening);
                 if let Some(a) = self.audio.as_mut() {
                     a.stop();
                 }
-                log::warn!("audio output stalled (no samples consumed for {AUDIO_STALL_S} s); playing without sound");
-                self.ui.status = tl!("Audio output is not responding: playing without sound (check Settings > Audio Hardware)").into();
+                if reopening {
+                    // a restart (#840) is still opening the device: the sound comes back where
+                    // the wall clock got to once it is open, as after Play
+                    self.playback.audio_pending = true;
+                } else {
+                    log::warn!("audio output stalled (no samples consumed for {AUDIO_STALL_S} s); playing without sound");
+                    self.ui.status = tl!("Audio output is not responding: playing without sound (check Settings > Audio Hardware)").into();
+                }
             }
         }
         let elapsed = match reading {
@@ -258,6 +316,13 @@ impl FilmcraftApp {
             _ => now - self.playback.anchor_time,
         };
         let t = self.playback.anchor_tick + Tick::from_seconds_f64(elapsed * self.playback.speed);
+        let start = &mut self.playback.start;
+        if start.moved.is_none() && start.clock.is_some() && t != start.from {
+            start.moved = Some(now);
+        }
+        if start.dropped_first_second.is_none() && start.clock.is_some_and(|c| now - c >= 1.0) {
+            start.dropped_first_second = Some(self.playback.meter.counts().1);
+        }
         let seq = self.session.active_sequence();
         let dur = seq.map(|q| q.duration()).unwrap_or_default();
         let (lo, hi) = if self.playback.looping {

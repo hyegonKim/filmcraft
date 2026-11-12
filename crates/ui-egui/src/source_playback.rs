@@ -8,7 +8,7 @@ use filmcraft_render::SourceProvider;
 use filmcraft_time::Tick;
 use serde_json::json;
 
-use crate::{AUDIO_RETRY_S, AUDIO_STALL_S, FilmcraftApp, Playback, shuttle};
+use crate::{AUDIO_RETRY_S, AUDIO_STALL_S, AudioReadiness, FilmcraftApp, Playback, shuttle};
 
 #[derive(Default)]
 pub struct SourcePlayback {
@@ -112,6 +112,7 @@ impl FilmcraftApp {
         }
         self.source_playback.clock.playing = false;
         self.source_playback.clock.audio_clock = false;
+        self.source_playback.clock.audio_pending = false;
         self.source_playback.clock.meter.finish();
         self.frames.stop_prefetch();
         if let Some(audio) = self.audio.as_mut() {
@@ -228,6 +229,18 @@ impl FilmcraftApp {
             }
             _ => return,
         };
+        if audio.readiness() != AudioReadiness::Ready {
+            // Desktop opens the device on its own thread: play on the wall clock meanwhile, and
+            // start the sound where the playhead got to once it is open (#2281).
+            drop(fill);
+            audio.stop();
+            audio.prepare();
+            let pending = audio.readiness() == AudioReadiness::Opening;
+            self.source_playback.clock.audio_pending = pending;
+            self.source_playback.clock.audio_retry_at = if pending { 0.0 } else { now + AUDIO_RETRY_S };
+            return;
+        }
+        self.source_playback.clock.audio_pending = false;
         match audio.start(fill) {
             Ok(_) => {
                 self.source_playback.clock.audio_clock = true;
@@ -265,6 +278,22 @@ impl FilmcraftApp {
             self.source_playback.clock.audio_seen = (0, now);
             self.start_source_audio(now);
         }
+        if self.source_playback.clock.audio_pending {
+            match self.audio.as_ref().map(|a| a.readiness()) {
+                Some(AudioReadiness::Opening) => {}
+                Some(AudioReadiness::Ready) => {
+                    // the output is open: the sound starts from the Source playhead, and its clock takes over
+                    self.source_playback.clock.anchor_tick = time;
+                    self.source_playback.clock.anchor_time = now;
+                    self.source_playback.clock.audio_seen = (0, now);
+                    self.start_source_audio(now);
+                }
+                _ => {
+                    self.source_playback.clock.audio_pending = false;
+                    self.source_playback.clock.audio_retry_at = now + AUDIO_RETRY_S;
+                }
+            }
+        }
         if !self.source_playback.clock.audio_clock && self.source_playback.clock.audio_retry_at > 0.0 && now >= self.source_playback.clock.audio_retry_at {
             // The output failed mid-play: open it again where the wall clock got to, so a
             // recovering device brings the sound back without a pause/play.
@@ -294,14 +323,19 @@ impl FilmcraftApp {
             clock.anchor_tick = time;
             clock.anchor_time = now;
             clock.audio_clock = false;
-            // A dead stream is reopened on a timer; a stalled one keeps the wall clock (#136).
+            // A dead stream is reopened on a timer; a stalled one keeps the wall clock (#136),
+            // unless a restart (#840) is still opening the device: its sound comes back once open.
+            let reopening = reading.is_some() && self.audio.as_ref().is_some_and(|a| a.readiness() == AudioReadiness::Opening);
             if reading.is_none() {
                 clock.audio_retry_at = now + AUDIO_RETRY_S;
             }
+            clock.audio_pending = reopening;
             if let Some(audio) = self.audio.as_mut() {
                 audio.stop();
             }
-            self.ui.status = "Source audio output stopped responding: playing without sound (check Settings > Audio Hardware)".into();
+            if !reopening {
+                self.ui.status = "Source audio output stopped responding: playing without sound (check Settings > Audio Hardware)".into();
+            }
         }
         let elapsed = match reading {
             Some((frames, sr)) if clock.audio_clock && sr > 0 => frames as f64 / f64::from(sr),
