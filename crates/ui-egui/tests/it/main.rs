@@ -32,6 +32,7 @@ mod hot_number_ui;
 mod interchange_export_ui;
 mod interface_zoom_ui;
 mod keyboard_ui;
+mod keyframe_zoom_ui;
 mod keyframes_ui;
 mod links_ui;
 mod marked_playback_position;

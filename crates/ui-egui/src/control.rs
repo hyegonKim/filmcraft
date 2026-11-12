@@ -119,6 +119,12 @@ fn point(app: &FilmcraftApp, p: &Value) -> Result<egui::Pos2, String> {
 
 fn handle_ui_set(app: &mut FilmcraftApp, ctx: &egui::Context, p: &Value) -> Outcome {
     let s = |k: &str| p.get(k).and_then(Value::as_str);
+    // Effect Controls' keyframe lane zoom (#2202) is checked before anything is applied, so a bad
+    // range fails the request with nothing changed
+    let zoom = match p.get("effectControlsZoom").map(|v| crate::panels::effect_controls::parse_zoom(app, v)) {
+        Some(Err(e)) => return err(e),
+        z => z.and_then(Result::ok),
+    };
     // Text to Speech panel draft (voice, pitch, pace, text…), merged into the current one
     if let Some(patch) = p.get("tts") {
         let mut cur = serde_json::to_value(&app.ui.tts).unwrap_or_default();
@@ -179,6 +185,11 @@ fn handle_ui_set(app: &mut FilmcraftApp, ctx: &egui::Context, p: &Value) -> Outc
             Ok(sel) => app.ui.keyframe_selection = sel,
             Err(e) => return err(format!("`keyframeSelection`: {e}")),
         }
+    }
+    // Effect Controls' keyframe lane zoom (#2202): `[start, end]` fractions of the clip it shows,
+    // or null for the whole clip
+    if let Some(z) = zoom {
+        crate::panels::effect_controls::apply_zoom(app, z);
     }
     if let Some(v) = p.get("safeMargins").and_then(Value::as_bool) {
         app.ui.program.safe_margins = v;

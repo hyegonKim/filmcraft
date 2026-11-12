@@ -18,7 +18,6 @@ use crate::icons::{self, Icon};
 use crate::panels::monitor_view;
 use crate::state::{DisplayMode, PlaybackRes};
 use crate::theme::Tokens;
-use crate::widgets::ZoomThumbPart;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Which {
@@ -762,10 +761,6 @@ pub fn fit(area: Rect, w: f32, h: f32) -> Rect {
     Rect::from_center_size(area.center(), vec2(w * s, h * s))
 }
 
-/// The narrowest the time zoom bar's thumb gets, the same as on the Timeline's zoom scroll bar:
-/// room for its two handles and a part between them to grab.
-const MIN_ZOOM_THUMB_W: f32 = 34.0;
-
 /// The fewest frames the time ruler can be zoomed in to.
 const MIN_ZOOM_FRAMES: i64 = 5;
 
@@ -818,76 +813,10 @@ fn time_zoom_bar(app: &mut FilmcraftApp, ui: &mut egui::Ui, bar: Rect, which: Wh
     let prefix = if which == Which::Program { "program" } else { "source" };
     let len = end.0.saturating_sub(origin.0);
     let min_span = if len > 0 { (rate.frame_duration().0.saturating_mul(MIN_ZOOM_FRAMES) as f64 / len as f64).min(1.0) } else { 1.0 };
-    let (s, e) = time_zoom_range(monitor_view::view(app, which).time_zoom);
-    let span = e - s;
-    let w = (span as f32 * bar.width()).clamp(MIN_ZOOM_THUMB_W.min(bar.width()), bar.width());
-    let travel = (bar.width() - w).max(0.0);
-    let range = (1.0 - span).max(0.0);
-    let left = bar.min.x + if range > 0.0 { (s / range).clamp(0.0, 1.0) as f32 * travel } else { 0.0 };
-    let per_point = if travel > 0.5 { range / travel as f64 } else { 0.0 };
-    let thumb = Rect::from_min_max(pos2(left, bar.min.y), pos2(left + w, bar.max.y));
-    let p = ui.painter();
-    p.rect_filled(bar, bar.height() / 2.0, t.separator);
-    let hover = ui.rect_contains_pointer(thumb);
-    p.rect_filled(thumb, thumb.height() / 2.0, if hover { t.scroll_thumb_hover } else { t.scroll_thumb });
-    for x in [thumb.min.x + thumb.height() / 2.0, thumb.max.x - thumb.height() / 2.0] {
-        p.circle_filled(pos2(x, thumb.center().y), 4.5, t.panel_bg);
-        p.circle_stroke(pos2(x, thumb.center().y), 4.5, Stroke::new(1.5, t.icon_active));
-    }
+    let range = time_zoom_range(monitor_view::view(app, which).time_zoom);
+    let (thumb, _, set) = crate::widgets::zoom_scroll_bar(ui, bar, egui::Id::unique((prefix, "zoomBar")), range, min_span, &t);
     app.auto.add(&format!("{prefix}.zoomBar"), thumb, "zoom scroll bar");
     app.auto.add(&format!("{prefix}.zoomBar.track"), bar, "zoom scroll bar track");
-    let resp = ui.interact(bar, egui::Id::unique((prefix, "zoomBar")), Sense::click_and_drag());
-    // the start that brings the thumb's middle under `x`
-    let jump = |x: f32| ((x - bar.min.x - w / 2.0) as f64 * per_point).clamp(0.0, range);
-    let mut set = None;
-    if resp.clicked()
-        && per_point > 0.0
-        && let Some(ns) = resp.interact_pointer_pos().filter(|pos| !thumb.contains(*pos)).map(|pos| jump(pos.x))
-    {
-        set = Some((ns, ns + span));
-    }
-    // (a drag is known to be one only after the pointer has moved: what was grabbed is what was
-    // under the pointer when the button went down)
-    let drag_id = egui::Id::unique((prefix, "zoomBar-drag"));
-    if resp.drag_started_by(egui::PointerButton::Primary)
-        && let Some(pos) = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos())
-    {
-        let mut start = s;
-        let part = ZoomThumbPart::at(thumb, pos);
-        if part == ZoomThumbPart::Beside && per_point > 0.0 {
-            start = jump(pos.x);
-            set = Some((start, start + span));
-        }
-        let mode = match part {
-            ZoomThumbPart::Left => 1u8,
-            ZoomThumbPart::Right => 2,
-            ZoomThumbPart::Beside | ZoomThumbPart::Middle => 0,
-        };
-        ui.data_mut(|d| d.insert_temp(drag_id, (pos.x, start, mode)));
-    }
-    if resp.dragged_by(egui::PointerButton::Primary)
-        && let Some((grab, start, mode)) = ui.data(|d| d.get_temp::<(f32, f64, u8)>(drag_id))
-    {
-        match mode {
-            // the thumb's middle: scroll, the thumb staying under the pointer
-            0 => {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    let ns = (start + (pos.x - grab) as f64 * per_point).clamp(0.0, range);
-                    set = Some((ns, ns + span));
-                }
-            }
-            // a handle: zoom, the other end staying where it is
-            _ => {
-                let dx = resp.drag_delta().x as f64 / bar.width().max(1.0) as f64;
-                set = Some(if mode == 1 { ((s + dx).clamp(0.0, (e - min_span).max(0.0)), e) } else { (s, (e + dx).clamp((s + min_span).min(1.0), 1.0)) });
-            }
-        }
-    }
-    if resp.drag_stopped() {
-        ui.data_mut(|d| d.remove::<(f32, f64, u8)>(drag_id));
-    }
-    let handle_grabbed = ui.data(|d| d.get_temp::<(f32, f64, u8)>(drag_id)).is_some_and(|(_, _, mode)| mode != 0);
-    crate::widgets::zoom_thumb_cursor(ui, &resp, thumb, handle_grabbed);
     if let Some((s, e)) = set {
         monitor_view::view_mut(app, which).time_zoom = (s > 0.0 || e < 1.0).then_some([s, e.min(1.0)]);
     }

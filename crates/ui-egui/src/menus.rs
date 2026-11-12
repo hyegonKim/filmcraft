@@ -222,6 +222,10 @@ pub fn invoke_command(app: &mut FilmcraftApp, ctx: &egui::Context, id: &str, mut
     if id == "edit.selectAll" && (crate::panels::graphics::select_all_edited_text(app) || crate::panels::effect_controls::select_all_keyframes(app)) {
         return Ok(Value::Null);
     }
+    // = - \ zoom Effect Controls' keyframe lane while that panel has the focus (#2202)
+    if matches!(id, "view.zoomIn" | "view.zoomOut" | "view.zoomToSequence") && crate::panels::effect_controls::zoom_command(app, id) {
+        return Ok(Value::Null);
+    }
     // Insert / Overwrite of a first clip that doesn't match the empty sequence: the Clip Mismatch Warning asks first
     if matches!(id, "source.insert" | "source.overwrite") && crate::panels::clip_mismatch::ask(app, id, &params) {
         return Ok(json!({"dialog": "clipMismatch"}));

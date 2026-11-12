@@ -542,6 +542,88 @@ pub(crate) fn zoom_thumb_cursor(ui: &Ui, resp: &Response, thumb: Rect, handle_gr
     }
 }
 
+/// The narrowest a zoom scroll bar's thumb gets, as on the Timeline's: room for its two handles
+/// and a part between them to grab.
+const MIN_ZOOM_THUMB_W: f32 = 34.0;
+
+/// A zoom scroll bar (the monitors' time rulers, Effect Controls' keyframe lane): its thumb is the
+/// part `range` shows of the whole, as (start, end) fractions. Drag a handle at either end to zoom
+/// (the other end stays put, the range no narrower than `min_span`), the middle to scroll, or press
+/// beside the thumb to bring it there. A thumb filling the bar shows all of it. Returns the thumb,
+/// the bar's response and the new range when it changed.
+pub(crate) fn zoom_scroll_bar(ui: &Ui, bar: Rect, id: egui::Id, range: (f64, f64), min_span: f64, t: &Tokens) -> (Rect, Response, Option<(f64, f64)>) {
+    let (s, e) = range;
+    let span = e - s;
+    let w = (span as f32 * bar.width()).clamp(MIN_ZOOM_THUMB_W.min(bar.width()), bar.width());
+    let travel = (bar.width() - w).max(0.0);
+    let room = (1.0 - span).max(0.0);
+    let left = bar.min.x + if room > 0.0 { (s / room).clamp(0.0, 1.0) as f32 * travel } else { 0.0 };
+    let per_point = if travel > 0.5 { room / f64::from(travel) } else { 0.0 };
+    let thumb = Rect::from_min_max(pos2(left, bar.min.y), pos2(left + w, bar.max.y));
+    let p = ui.painter();
+    p.rect_filled(bar, bar.height() / 2.0, t.separator);
+    let hover = ui.rect_contains_pointer(thumb);
+    p.rect_filled(thumb, thumb.height() / 2.0, if hover { t.scroll_thumb_hover } else { t.scroll_thumb });
+    for x in [thumb.min.x + thumb.height() / 2.0, thumb.max.x - thumb.height() / 2.0] {
+        p.circle_filled(pos2(x, thumb.center().y), 4.5, t.panel_bg);
+        p.circle_stroke(pos2(x, thumb.center().y), 4.5, Stroke::new(1.5, t.icon_active));
+    }
+    let resp = ui.interact(bar, id, Sense::click_and_drag());
+    // the start that brings the thumb's middle under `x`
+    let jump = |x: f32| (f64::from(x - bar.min.x - w / 2.0) * per_point).clamp(0.0, room);
+    let mut set = None;
+    if resp.clicked()
+        && per_point > 0.0
+        && let Some(ns) = resp.interact_pointer_pos().filter(|pos| !thumb.contains(*pos)).map(|pos| jump(pos.x))
+    {
+        set = Some((ns, ns + span));
+    }
+    // (a drag is known to be one only after the pointer has moved: what was grabbed is what was
+    // under the pointer when the button went down). Held: (press x, start then, what was grabbed:
+    // 0 the middle, 1 the left handle, 2 the right one)
+    let drag_id = id.with("drag");
+    if resp.drag_started_by(egui::PointerButton::Primary)
+        && let Some(pos) = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos())
+    {
+        let mut start = s;
+        let part = ZoomThumbPart::at(thumb, pos);
+        if part == ZoomThumbPart::Beside && per_point > 0.0 {
+            start = jump(pos.x);
+            set = Some((start, start + span));
+        }
+        let mode = match part {
+            ZoomThumbPart::Left => 1u8,
+            ZoomThumbPart::Right => 2,
+            ZoomThumbPart::Beside | ZoomThumbPart::Middle => 0,
+        };
+        ui.data_mut(|d| d.insert_temp(drag_id, (pos.x, start, mode)));
+    }
+    if resp.dragged_by(egui::PointerButton::Primary)
+        && let Some((grab, start, mode)) = ui.data(|d| d.get_temp::<(f32, f64, u8)>(drag_id))
+    {
+        match mode {
+            // the thumb's middle: scroll, the thumb staying under the pointer
+            0 => {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    let ns = (start + f64::from(pos.x - grab) * per_point).clamp(0.0, room);
+                    set = Some((ns, ns + span));
+                }
+            }
+            // a handle: zoom, the other end staying where it is
+            _ => {
+                let dx = f64::from(resp.drag_delta().x) / f64::from(bar.width().max(1.0));
+                set = Some(if mode == 1 { ((s + dx).clamp(0.0, (e - min_span).max(0.0)), e) } else { (s, (e + dx).clamp((s + min_span).min(1.0), 1.0)) });
+            }
+        }
+    }
+    if resp.drag_stopped() {
+        ui.data_mut(|d| d.remove::<(f32, f64, u8)>(drag_id));
+    }
+    let handle_grabbed = ui.data(|d| d.get_temp::<(f32, f64, u8)>(drag_id)).is_some_and(|(_, _, mode)| mode != 0);
+    zoom_thumb_cursor(ui, &resp, thumb, handle_grabbed);
+    (thumb, resp, set)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
