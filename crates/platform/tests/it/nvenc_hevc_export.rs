@@ -1,7 +1,8 @@
 //! Export as H.265 (HEVC Main, NVENC) through the real export pipeline: MP4 and QuickTime files that
 //! ffprobe (an external oracle only) describes as `hvc1` Main 8-bit 4:2:0 BT.709, that ffmpeg decodes
 //! without errors and that our own decoder decodes to the pictures of the software H.264 export; the
-//! counters; and what NVENC declines (an error that says why, counted, never a crash). Its own test
+//! counters; and what NVENC declines (counted, with the reason, and written by FilmCraft's own
+//! encoder instead, never a crash). Its own test
 //! binary: the encoder registry and the counters are process-wide. Skips without an NVIDIA GPU with
 //! an HEVC encoder.
 #![cfg(target_os = "windows")]
@@ -114,7 +115,8 @@ fn delta(before: filmcraft_export::HwEncodeStats) -> (u64, u64, u64) {
 fn hevc_exports_play_everywhere() {
     let _one = crate::common::NVENC_SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     filmcraft_platform::register();
-    assert_eq!(filmcraft_export::available(Format::Hevc), hevc_available(), "the format is available iff NVENC can encode HEVC");
+    // the format is available everywhere: FilmCraft's own encoder takes what NVENC cannot
+    assert!(filmcraft_export::available(Format::Hevc));
     if !hevc_available() {
         eprintln!("SKIPPED: no NVENC HEVC here");
         return;
@@ -288,9 +290,12 @@ fn interlaced_output_is_refused_before_any_encoder_is_asked() {
     assert_eq!(delta(before), (0, 0, 0));
 
     if !hevc_available() {
-        // no HEVC encoder: the export's own "encoder not available" error, nothing written, no panic
-        let err = export(&p, seq, &hevc(tmp("none.mp4")), &m, &Progress::default()).expect_err("no encoder").to_string();
-        assert!(err.contains("encoder not available"), "{err}");
+        // no HEVC encoder here: FilmCraft's own encoder writes the file, and NVENC is not counted
+        let path = tmp("none.mp4");
+        let before = hw_encode_stats();
+        export(&p, seq, &hevc(path.clone()), &m, &Progress::default()).unwrap_or_else(|e| panic!("software H.265: {e}"));
+        assert_eq!(delta(before), (0, 0, 0));
+        assert_eq!(decode(&path).len(), 6);
     }
 }
 
@@ -308,17 +313,15 @@ fn sizes_outside_the_gpu_limits_are_declined_through_the_export() {
         let path = tmp(&format!("small-{w}x{h}.mp4"));
         let s = ExportSettings { frame_size: Some((w, h)), ..hevc(path.clone()) };
         let before = hw_encode_stats();
-        let r = export(&p, seq, &s, &m, &Progress::default());
-        match r {
-            Err(e) => {
-                let e = e.to_string();
-                eprintln!("{w}x{h}: {e}");
-                assert!(e.contains("NVENC"), "{w}x{h}: {e}");
-                assert_eq!(delta(before), (0, 0, 1), "{w}x{h}");
-            }
-            // a GPU that does take the size: a good file
-            Ok(_) => assert_eq!(delta(before).1, 1, "{w}x{h}"),
+        export(&p, seq, &s, &m, &Progress::default()).unwrap_or_else(|e| panic!("{w}x{h}: {e}"));
+        match delta(before) {
+            // a GPU that does take the size
+            (_, 1, 0) => {}
+            // declined (counted, with the reason in the log): FilmCraft's own encoder wrote the file
+            (0, 0, 1) => eprintln!("{w}x{h}: declined by NVENC, written by the software encoder"),
+            d => panic!("{w}x{h}: counters {d:?}"),
         }
+        assert_eq!(decode(&path).len(), 6, "{w}x{h}");
     }
 }
 

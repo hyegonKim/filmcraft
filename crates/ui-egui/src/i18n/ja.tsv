@@ -3481,7 +3481,7 @@
 	Main 10 (10-bit, HDR)	メイン 10 (10 ビット、HDR)
 	Main (8-bit; Main 10 for HDR sequences)	メイン (8 ビット、HDR シーケンスではメイン 10)
 	Encoder	エンコーダー
-	Hardware (H.265 has no software encoder)	ハードウェア (H.265 にはソフトウェアエンコーダーがありません)
+	Hardware where available, otherwise software	利用可能ならハードウェア、なければソフトウェア
 	Hardware (AV1 has no software encoder)	ハードウェア (AV1 にはソフトウェアエンコーダーがありません)
 	Text Properties	テキストのプロパティ
 	Text Box Height	テキストボックスの高さ
@@ -3652,7 +3652,6 @@
 	Web Link	Web リンク
 	Flash Cue Point	フラッシュキューポイント
 	Invalid duration: {error}	無効なデュレーション: {error}
-	H.265 (HEVC) needs a hardware encoder (NVENC on NVIDIA GPUs, VideoToolbox on macOS); none was found on this machine, and FilmCraft has no software H.265 encoder yet. Choose H.264 or ProRes instead.	H.265 (HEVC) にはハードウェアエンコーダー（NVIDIA GPU の NVENC、macOS の VideoToolbox）が必要です。このマシンには見つからず、FilmCraft にはまだソフトウェアの H.265 エンコーダーがありません。代わりに H.264 または ProRes を選んでください。
 	AV1 needs a hardware encoder; none was found on this machine, and FilmCraft has no software AV1 encoder yet.	AV1 にはハードウェアエンコーダーが必要です。このマシンには見つからず、FilmCraft にはまだソフトウェアの AV1 エンコーダーがありません。
 	Enter a positive duration within the supported speed range.	対応する速度の範囲内で正の長さを入力してください。
 	Show Video Names	ビデオ名を表示
@@ -3732,3 +3731,6 @@
 	Previous	前へ
 	Next	次へ
 	Enter a valid HH:MM:SS:FF timecode	有効なタイムコードを HH:MM:SS:FF 形式で入力してください
+	Frame Size Preset:	フレームサイズのプリセット:
+	Vertical (1080 × 1920)	縦長 (1080 × 1920)
+	Square (1080 × 1080)	正方形 (1080 × 1080)

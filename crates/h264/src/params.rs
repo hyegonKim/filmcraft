@@ -4,9 +4,10 @@ use crate::error::{Result, ensure, unsupported};
 use crate::tables::{DEFAULT_4X4_INTER, DEFAULT_4X4_INTRA, DEFAULT_8X8_INTER, DEFAULT_8X8_INTRA, ZIGZAG4, ZIGZAG8};
 use filmcraft_bitstream::BitReader;
 
-/// Maximum supported reconstructed luma area. 8K UHD fits comfortably while
-/// hostile SPS dimensions cannot allocate full pictures and decoder work state.
-const MAX_LUMA_SAMPLES: u64 = 1 << 25;
+/// Maximum supported reconstructed luma area: Level 6.2's MaxFS (139 264 macroblocks), the largest
+/// frame any H.264 level allows, so 8K UHD (7680x4320) and 8K DCI (8192x4320) fit while hostile SPS
+/// dimensions cannot allocate full pictures and decoder work state.
+pub const MAX_LUMA_SAMPLES: u64 = 139_264 * 256;
 
 /// Scaling matrices after applying fall-back rules, stored in raster order (weightScale).
 #[derive(Clone, Debug, PartialEq, Eq)]

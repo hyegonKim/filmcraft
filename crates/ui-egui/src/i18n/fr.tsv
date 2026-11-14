@@ -3459,7 +3459,7 @@
 	Main 10 (10-bit, HDR)	Main 10 (10 bits, HDR)
 	Main (8-bit; Main 10 for HDR sequences)	Main (8 bits ; Main 10 pour les séquences HDR)
 	Encoder	Encodeur
-	Hardware (H.265 has no software encoder)	Matériel (H.265 n'a pas d'encodeur logiciel)
+	Hardware where available, otherwise software	Matériel si disponible, sinon logiciel
 	Hardware (AV1 has no software encoder)	Matériel (AV1 n'a pas d'encodeur logiciel)
 	Text Properties	Propriétés du texte
 	Text Box Height	Hauteur de la zone de texte
@@ -3700,7 +3700,6 @@
 	Start: {tc}	Début : {tc}
 	End: {tc}	Fin : {tc}
 	Duration: {tc}	Durée : {tc}
-	H.265 (HEVC) needs a hardware encoder (NVENC on NVIDIA GPUs, VideoToolbox on macOS); none was found on this machine, and FilmCraft has no software H.265 encoder yet. Choose H.264 or ProRes instead.	H.265 (HEVC) nécessite un encodeur matériel (NVENC sur les GPU NVIDIA, VideoToolbox sur macOS) ; aucun n'a été trouvé sur cet ordinateur, et FilmCraft n'a pas encore d'encodeur H.265 logiciel. Choisissez plutôt H.264 ou ProRes.
 	AV1 needs a hardware encoder; none was found on this machine, and FilmCraft has no software AV1 encoder yet.	AV1 nécessite un encodeur matériel ; aucun n'a été trouvé sur cet ordinateur, et FilmCraft n'a pas encore d'encodeur AV1 logiciel.
 	Hardware decoding: Auto uses the system's video decoder (VideoToolbox on macOS, Media Foundation on Windows, VA-API for H.264 and HEVC on Linux) for the streams it supports, and FilmCraft's own decoder for everything else or if the hardware fails. Media that is already open keeps its decoder until it is reopened.	Décodage matériel : Auto utilise le décodeur vidéo du système (VideoToolbox sur macOS, Media Foundation sur Windows, VA-API pour H.264 et HEVC sous Linux) pour les flux qu'il prend en charge, et le décodeur de FilmCraft pour tout le reste ou en cas d'échec du matériel. Un média déjà ouvert garde son décodeur jusqu'à sa réouverture.
 	Check for Updates…	Rechercher les mises à jour…
@@ -3726,3 +3725,6 @@
 	Options:	Options :
 	Invalid duration: {error}	Durée non valide : {error}
 # Control server: the bind-failure notice (port collisions; #3318 may show it too).
+	Frame Size Preset:	Préréglage de taille de l'image :
+	Vertical (1080 × 1920)	Vertical (1080 × 1920)
+	Square (1080 × 1080)	Carré (1080 × 1080)

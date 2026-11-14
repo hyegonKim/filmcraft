@@ -3484,7 +3484,7 @@
 	Main 10 (10-bit, HDR)	Main 10 (10 Bit, HDR)
 	Main (8-bit; Main 10 for HDR sequences)	Main (8 Bit; Main 10 für HDR-Sequenzen)
 	Encoder	Encoder
-	Hardware (H.265 has no software encoder)	Hardware (für H.265 gibt es keinen Software-Encoder)
+	Hardware where available, otherwise software	Hardware, falls verfügbar, sonst Software
 	Hardware (AV1 has no software encoder)	Hardware (für AV1 gibt es keinen Software-Encoder)
 	Text Properties	Texteigenschaften
 	Text Box Height	Textfeldhöhe
@@ -3684,3 +3684,6 @@
 	Previous	Zurück
 	Next	Weiter
 	Enter a valid HH:MM:SS:FF timecode	Gültigen Timecode als HH:MM:SS:FF eingeben
+	Frame Size Preset:	Bildgrößenvorgabe:
+	Vertical (1080 × 1920)	Hochformat (1080 × 1920)
+	Square (1080 × 1080)	Quadratisch (1080 × 1080)

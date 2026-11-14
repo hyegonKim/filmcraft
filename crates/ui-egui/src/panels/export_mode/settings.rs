@@ -49,17 +49,14 @@ fn combo_why(ui: &mut egui::Ui, reg: &mut Reg, id: &str, selected: &str, options
     chosen
 }
 
-/// Why a format cannot be exported on this machine, or None when it can. H.265 and AV1 have no
-/// software encoder: without a hardware one (NVENC on NVIDIA, VideoToolbox on macOS) they are
-/// greyed out with the reason, instead of failing at export time.
+/// Why a format cannot be exported on this machine, or None when it can. AV1 has no software
+/// encoder: without a hardware one it is greyed out with the reason, instead of failing at export
+/// time. (H.265 has one, so it is always available.)
 fn unavailable_why(format: Format) -> Option<&'static str> {
     if filmcraft_engine::export::available(format) {
         return None;
     }
     Some(match format {
-        Format::Hevc => tl!(
-            "H.265 (HEVC) needs a hardware encoder (NVENC on NVIDIA GPUs, VideoToolbox on macOS); none was found on this machine, and FilmCraft has no software H.265 encoder yet. Choose H.264 or ProRes instead."
-        ),
         Format::Av1 => tl!("AV1 needs a hardware encoder; none was found on this machine, and FilmCraft has no software AV1 encoder yet."),
         _ => tl!("Not supported by FilmCraft's encoders yet"),
     })
@@ -482,21 +479,25 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
     }
     match s.video_format() {
         f @ (Format::H264 | Format::Hevc | Format::Av1) => {
-            // H.265 and AV1: hardware encoders only (one profile, level chosen by the encoder)
+            // H.265 and AV1: one profile, level chosen by the encoder
             let hevc = f != Format::H264;
             if hevc {
                 if f == Format::Av1 {
                     row(ui, t, tl!("Profile"), |ui| ui.label(tl!("Main (8-bit)")));
                     row(ui, t, tl!("Encoder"), |ui| ui.label(tl!("Hardware (AV1 has no software encoder)")));
                 } else {
-                    // the hardware encoder writes Main (8-bit 4:2:0), or Main 10 for HDR sequences where it can; level chosen by the encoder
-                    let label = match (filmcraft_engine::export::hdr_available(Format::Hevc), seq_hdr && !s.sdr) {
-                        (true, true) => tl!("Main 10 (10-bit, HDR)"),
-                        (true, false) => tl!("Main (8-bit; Main 10 for HDR sequences)"),
-                        (false, _) => tl!("Main (8-bit)"),
-                    };
-                    row(ui, t, tl!("Profile"), |ui| ui.label(label));
-                    row(ui, t, tl!("Encoder"), |ui| ui.label(tl!("Hardware (H.265 has no software encoder)")));
+                    // Main (8-bit 4:2:0), or Main 10 for HDR sequences: a hardware encoder where one takes
+                    // the export, else FilmCraft's own; the level is the encoder's choice
+                    let label = if seq_hdr && !s.sdr { tl!("Main 10 (10-bit, HDR)") } else { tl!("Main (8-bit; Main 10 for HDR sequences)") };
+                    row(ui, t, tl!("Profile"), |ui| {
+                        let r = ui.label(label);
+                        reg.add("export.video.hevcProfile", r.rect, label);
+                    });
+                    row(ui, t, tl!("Encoder"), |ui| {
+                        let text = tl!("Hardware where available, otherwise software");
+                        let r = ui.label(text);
+                        reg.add("export.video.encoder", r.rect, text);
+                    });
                 }
             } else {
                 row(ui, t, tl!("Profile"), |ui| {
@@ -517,7 +518,7 @@ fn video_section(ui: &mut egui::Ui, reg: &mut Reg, s: &mut ExportSettings, t: &T
                 });
             }
             row(ui, t, tl!("Bitrate Encoding"), |ui| {
-                // a hardware encoder has one pass and no constant-quality mode: H.265 offers neither
+                // the H.265 encoders (hardware and ours) have one pass and no constant-quality mode
                 let o = [BitrateMode::Cbr, BitrateMode::Vbr1Pass, BitrateMode::Vbr2Pass, BitrateMode::Crf];
                 let labels: Vec<(String, bool)> =
                     o.iter().map(|m| (m.label().to_string(), !(hevc && matches!(m, BitrateMode::Vbr2Pass | BitrateMode::Crf)))).collect();

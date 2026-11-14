@@ -424,12 +424,23 @@ fn verify_video_preset(name: &str, format: &str, format_name: &str, settings: &V
     let pixel_rate = (width * height) as f64 / (1920.0 * 1080.0) * (24000.0 / 1001.0) / 29.97;
     match format {
         "h264" => verify_h264_preset(name, format_name, video, audio),
+        "hevc" => verify_hevc_preset(name, format_name, video, audio),
         "prores" => verify_prores_preset(name, settings, video, audio, video_bitrate, pixel_rate, format_name),
         "dnxhr" => verify_dnx_preset(name, settings, video, audio, video_bitrate, pixel_rate),
         "apv" => verify_apv_preset(name, settings, video, audio, format_name),
         "mxf-op1a" => verify_op1a_preset(name, settings, video, audio, format_name),
         other => panic!("{name}: unexpected format {other}"),
     }
+}
+
+/// H.265 presets: FilmCraft's own encoder here (no hardware encoder is registered in these tests),
+/// HEVC Main in an `hvc1` MP4 with AAC.
+fn verify_hevc_preset(name: &str, format_name: &str, video: &Value, audio: &Value) {
+    assert!(format_name.contains("mp4"), "{name}: {format_name}");
+    assert_eq!((video["codec_name"].as_str(), video["codec_tag_string"].as_str()), (Some("hevc"), Some("hvc1")), "{name}");
+    assert_eq!(video["profile"], "Main", "{name}");
+    assert_eq!(video["pix_fmt"], "yuv420p", "{name}");
+    assert_eq!(audio["codec_name"], "aac", "{name}");
 }
 
 fn verify_h264_preset(name: &str, format_name: &str, video: &Value, audio: &Value) {

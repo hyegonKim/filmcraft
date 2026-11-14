@@ -19,7 +19,8 @@
 //!
 //! Automation ids (`sequenceSettings.` + …): `tab.general`, `tab.color`, `tab.vr`; General:
 //! `name`, `editingMode`, `timebase` (+ `timebase.option.<num>/<den>` while open), `width`, `height`,
-//! `aspect`, `scaleMotion`, `par`, `fields`, `videoDisplay` (+ `videoDisplay.option.<df|ndf|tc>`),
+//! `aspect`, `sizePreset` (+ `sizePreset.option.<width>x<height>`: HD, UHD / DCI 4K, 8K UHD 7680x4320,
+//! 8K DCI 8192x4320, vertical, square), `scaleMotion`, `par`, `fields`, `videoDisplay` (+ `videoDisplay.option.<df|ndf|tc>`),
 //! `channelFormat` (+ `channelFormat.option.<Stereo|Mono|5.1|Adaptive>`), `channels`, `sampleRate`
 //! (+ `sampleRate.option.<hz>`), `audioDisplay`, `previewFormat`, `previewCodec`, `previewWidth`,
 //! `previewHeight`, `maxBitDepth`, `maxRenderQuality`, `linearColor`; Color Management:
@@ -57,6 +58,25 @@ const TIMEBASES: [(i64, i64); 15] = [
     (120, 1),
 ];
 const SAMPLE_RATES: [u32; 5] = [32_000, 44_100, 48_000, 88_200, 96_000];
+/// Common frame sizes offered under Frame Size (the width and height fields still take any size up
+/// to `MAX_FRAME_SIDE`): HD, 4K and 8K in their UHD and DCI widths, and the social shapes.
+pub const FRAME_SIZES: [(&str, u32, u32); 8] = [
+    ("HD 720 (1280 × 720)", 1280, 720),
+    ("HD 1080 (1920 × 1080)", 1920, 1080),
+    ("UHD 4K (3840 × 2160)", 3840, 2160),
+    ("DCI 4K (4096 × 2160)", 4096, 2160),
+    ("8K UHD (7680 × 4320)", 7680, 4320),
+    ("8K DCI (8192 × 4320)", 8192, 4320),
+    ("Vertical (1080 × 1920)", 1080, 1920),
+    ("Square (1080 × 1080)", 1080, 1080),
+];
+/// The Frame Size Preset shown for a size that is not in [`FRAME_SIZES`].
+const CUSTOM_SIZE: &str = "Custom";
+
+/// The [`FRAME_SIZES`] label for `w` x `h`, or [`CUSTOM_SIZE`].
+fn size_preset_label(w: u32, h: u32) -> &'static str {
+    FRAME_SIZES.iter().find(|(_, fw, fh)| (*fw, *fh) == (w, h)).map_or(CUSTOM_SIZE, |(label, _, _)| label)
+}
 const MIXES: [&str; 4] = ["Stereo", "Mono", "5.1", "Adaptive"];
 
 fn mix_name(c: AudioChannels) -> &'static str {
@@ -348,6 +368,21 @@ fn general(ui: &mut egui::Ui, d: &mut SequenceSettingsDraft, cur: &SequenceSetti
             let a = aspect(display_width(d.width, d.height, cur.par), d.height);
             let ar = ui.label(&a);
             elems.push(("sequenceSettings.aspect".into(), ar.rect, a));
+        });
+        row(ui, label_w, "Frame Size Preset:", true, |ui| {
+            let shown = size_preset_label(d.width, d.height);
+            let resp =
+                craft_ui::ComboBox::from_id_salt("seq-settings-size-preset").selected_text(t(shown)).width(list_w).height(f32::INFINITY).show_ui(ui, |ui| {
+                    for (label, w, h) in FRAME_SIZES {
+                        let o = ui.selectable_label((d.width, d.height) == (w, h), t(label));
+                        if o.clicked() {
+                            d.width = w;
+                            d.height = h;
+                        }
+                        elems.push((format!("sequenceSettings.sizePreset.option.{w}x{h}"), o.rect, label.to_string()));
+                    }
+                });
+            elems.push(("sequenceSettings.sizePreset".into(), resp.response.rect, shown.to_string()));
         });
         let r = ui.checkbox(&mut d.scale_motion, tl!("Scale motion effects proportionally when changing frame size"));
         elems.push(("sequenceSettings.scaleMotion".into(), r.rect, d.scale_motion.to_string()));

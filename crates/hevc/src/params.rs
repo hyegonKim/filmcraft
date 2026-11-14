@@ -618,6 +618,11 @@ impl Sps {
     pub fn sub_width_c(&self) -> u32 {
         if self.chroma_format_idc == 1 || self.chroma_format_idc == 2 { 2 } else { 1 }
     }
+    /// log2(SubHeightC): 1 for 4:2:0 (chroma halved vertically), 0 for 4:2:2. The decoder stores
+    /// chroma halved horizontally in both layouts it supports.
+    pub fn chroma_shift_y(&self) -> u32 {
+        self.sub_height_c().trailing_zeros()
+    }
     pub fn sub_height_c(&self) -> u32 {
         if self.chroma_format_idc == 1 { 2 } else { 1 }
     }
@@ -647,8 +652,10 @@ impl Sps {
 
     /// Features this decoder does not handle yet.
     pub fn check_supported(&self) -> Result<()> {
-        if self.chroma_format_idc != 1 {
-            return unsupported(format!("chroma_format_idc {} (only 4:2:0)", self.chroma_format_idc));
+        // 4:2:0 (Main, Main 10) and 4:2:2 (the format range extensions profiles' Main 4:2:2 10 / 12,
+        // with every range extension tool off)
+        if !matches!(self.chroma_format_idc, 1 | 2) || self.separate_colour_plane {
+            return unsupported(format!("chroma_format_idc {} (only 4:2:0 and 4:2:2)", self.chroma_format_idc));
         }
         if self.bit_depth_luma > 12 || self.bit_depth_chroma > 12 {
             return unsupported(format!("bit depth {}/{}", self.bit_depth_luma, self.bit_depth_chroma));

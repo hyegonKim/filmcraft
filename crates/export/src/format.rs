@@ -11,15 +11,14 @@ pub enum Format {
     #[default]
     #[serde(rename = "h264", alias = "H264")]
     H264,
-    /// MPEG-4 (or QuickTime, see [`Multiplexer`]), H.265 / HEVC Main (8-bit) video + AAC audio. There is no
-    /// built-in encoder: a platform hardware encoder registers one ([`register_encoder`]) and says so
-    /// with [`register_format_probe`]; [`available`] is false without it. HDR sequences export as HDR
-    /// (Main 10, PQ / HLG) only where an encoder also says so with [`register_hdr_probe`]
-    /// ([`hdr_available`]); elsewhere they are tone-mapped to SDR.
+    /// MPEG-4 (or QuickTime, see [`Multiplexer`]), H.265 / HEVC Main (8-bit) video + AAC audio; HDR
+    /// sequences export as Main 10 (PQ / HLG). A platform hardware encoder registered with
+    /// [`register_encoder`] is tried first; FilmCraft's own encoder (`filmcraft-hevcenc`) takes every
+    /// export the hardware declines or cannot open, so the format is available everywhere.
     #[serde(rename = "hevc", alias = "Hevc")]
     Hevc,
-    /// MPEG-4, AV1 Main (8-bit) video + AAC audio. Like H.265 it has no built-in encoder: offered
-    /// where a hardware encoder registers one.
+    /// MPEG-4, AV1 Main (8-bit) video + AAC audio. There is no built-in encoder: offered where a
+    /// hardware encoder registers one.
     #[serde(rename = "av1", alias = "Av1")]
     Av1,
     /// QuickTime, Apple ProRes 422 (HQ unless the settings pick another flavour) + PCM.
@@ -196,7 +195,7 @@ impl Format {
     /// Whether the crate carries an encoder for the format; the others need one registered at runtime
     /// ([`register_format_probe`]).
     pub fn has_builtin_encoder(self) -> bool {
-        !matches!(self, Format::Hevc | Format::Av1)
+        self != Format::Av1
     }
     /// Sound without picture: Waveform Audio, AIFF, AAC Audio and FLAC.
     pub fn is_audio_only(self) -> bool {
@@ -310,7 +309,7 @@ pub struct ExportSettings {
     pub frame_rate: Option<FrameRate>,
     /// How the picture fills a frame of another aspect ratio.
     pub scaling: Scaling,
-    /// Pixel aspect ratio (None = square pixels). Signalled in the H.264 VUI.
+    /// Pixel aspect ratio (None = square pixels). Signalled in the H.264 and H.265 VUI.
     pub pixel_aspect: Option<(u32, u32)>,
     pub field_order: FieldOrder,
     pub h264_profile: H264Profile,

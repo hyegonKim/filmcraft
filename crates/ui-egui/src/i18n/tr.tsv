@@ -3469,7 +3469,7 @@
 	Main 10 (10-bit, HDR)	Main 10 (10 bit, HDR)
 	Main (8-bit; Main 10 for HDR sequences)	Main (8 bit; HDR sekansları için Main 10)
 	Encoder	Kodlayıcı
-	Hardware (H.265 has no software encoder)	Donanım (H.265'in yazılımsal kodlayıcısı yoktur)
+	Hardware where available, otherwise software	Varsa donanım, yoksa yazılım
 	Hardware (AV1 has no software encoder)	Donanım (AV1'in yazılımsal kodlayıcısı yoktur)
 	Text Properties	Metin Özellikleri
 	Text Box Height	Metin Kutusu Yüksekliği
@@ -3623,7 +3623,9 @@
 	Open a sequence to search its graphics	Grafiklerinde arama yapmak için bir sekans açın
 	No text graphics in this sequence. Add text with the Type tool.	Bu sekansta metin grafiği yok. Yazım aracıyla metin ekleyin.
 	No matching text.	Eşleşen metin yok.
-	H.265 (HEVC) needs a hardware encoder (NVENC on NVIDIA GPUs, VideoToolbox on macOS); none was found on this machine, and FilmCraft has no software H.265 encoder yet. Choose H.264 or ProRes instead.	H.265 (HEVC) bir donanım kodlayıcısı gerektirir (NVIDIA GPU'larda NVENC, macOS'ta VideoToolbox); bu makinede hiçbiri bulunamadı ve FilmCraft henüz yazılımsal H.265 kodlayıcıya sahip değil. Bunun yerine H.264 veya ProRes seçin.
 	AV1 needs a hardware encoder; none was found on this machine, and FilmCraft has no software AV1 encoder yet.	AV1 bir donanım kodlayıcısı gerektirir; bu makinede hiçbiri bulunamadı ve FilmCraft henüz yazılımsal AV1 kodlayıcıya sahip değil.
 	Hardware decoding: Auto uses the system's video decoder (VideoToolbox on macOS, Media Foundation on Windows, VA-API for H.264 and HEVC on Linux) for the streams it supports, and FilmCraft's own decoder for everything else or if the hardware fails. Media that is already open keeps its decoder until it is reopened.	Donanım kod çözme: Otomatik, desteklediği akışlar için sistemin video kod çözücüsünü (macOS'ta VideoToolbox, Windows'ta Media Foundation, Linux'ta H.264 ve HEVC için VA-API), diğer her şey veya donanım başarısız olduğunda ise FilmCraft'ın kendi kod çözücüsünü kullanır. Zaten açık olan medya yeniden açılana kadar kod çözücüsünü korur.
 	The control server is disabled: FILMCRAFT_CONTROL_TOKEN must contain 64 random hex characters (see docs/control-protocol.md)	Denetim sunucusu devre dışı: FILMCRAFT_CONTROL_TOKEN 64 rastgele onaltılık karakter içermelidir (bkz. docs/control-protocol.md)
+	Frame Size Preset:	Kare Boyutu Ön Ayarı:
+	Vertical (1080 × 1920)	Dikey (1080 × 1920)
+	Square (1080 × 1080)	Kare (1080 × 1080)

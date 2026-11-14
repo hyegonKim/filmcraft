@@ -167,25 +167,27 @@ let availability = filmcraft_platform::register(); // Available("VideoToolbox") 
 ## Hardware H.265 (HEVC) encoding (macOS)
 
 The same session wrapper, created for `kCMVideoCodecType_HEVC` with the HEVC Main profile
-(`VtProfile::HevcMain`: the profile also says which codec the session is). `Format::Hevc` has no
-built-in encoder, which changes three things from H.264:
+(`VtProfile::HevcMain`: the profile also says which codec the session is), or HEVC Main 10 for HDR.
+`Format::Hevc` also has a built-in software encoder (`filmcraft-hevcenc`), which this one comes
+before, so two things differ from H.264:
 
 - **Choosing the format is the opt-in.** No `hardware_encoding` setting: Export ▸ Format ▸ H.265
-  (HEVC), or `"format": "hevc"` in `file.exportMedia` (`h265` is accepted too). The format is
-  listed as available only on a machine with a hardware HEVC encoder: `register()` hands
-  `hardware_encode::hevc_available` (one small hardware session, about 0.1 s) to
-  `filmcraft_export::register_format_probe`, and asks it right away on a thread of its own
-  (`warm_hevc_probe`), so the first draw of the format list does not create the session on the UI
-  thread.
-- **There is no fallback encoder.** What the hardware path does not take is an error, not a
-  different encoder: two-pass VBR is refused up front (`ExportSettings::validate`), HDR sequences
-  are exported as SDR (the H.265 path is 8-bit), and odd sizes, non-square pixels or a machine
-  without the encoder end in "H.265 (HEVC) encoder not available yet".
+  (HEVC), or `"format": "hevc"` in `file.exportMedia` (`h265` is accepted too), uses the hardware
+  encoder whenever it takes the export. `register()` hands `hardware_encode::hevc_available` (one
+  small hardware session, about 0.1 s) to `filmcraft_export::register_format_probe`, and asks it
+  right away on a thread of its own (`warm_hevc_probe`), so the first export does not create the
+  probe session on the UI thread. The format is listed on every machine.
+- **FilmCraft's encoder takes what this one declines.** Two-pass VBR and CRF are refused up front
+  (`ExportSettings::validate`); odd sizes, non-square pixels, an HDR signal other than BT.2020 PQ /
+  HLG, a machine without the encoder, or a session that does not open go to the software encoder,
+  which writes Main or Main 10 anywhere but is slower (about 5 frames/s at 1080p and 0.4 at 8K on an
+  M1).
 
 The sessions are created with a hardware encoder *required*, and `VtEncoder::uses_hardware()` asks
 VideoToolbox whether it agrees (`UsingHardwareAcceleratedVideoEncoder`; a test checks it for H.264 and
 HEVC), so a requirement dropped by accident could never turn into a silent software encode. Export
-mode says "Encoder: Hardware" for H.265, and the summary line "HEVC Main (hardware encoder)".
+mode says "Encoder: Hardware where available, otherwise software" for H.265, and the summary line
+"HEVC Main / Main 10 for HDR (hardware encoder where available)".
 
 What it takes is H.264's list: MP4 (`hvc1`, the tag QuickTime reads) or QuickTime, AAC
 audio, 8-bit 4:2:0 BT.709 limited range, even sizes up to 8192, constant or one-pass variable
@@ -211,10 +213,10 @@ level 4 High tier, which many hardware decoders refuse; it is now level 4.1 Main
   `filmcraft_export::register_format_probe`: one small HEVC session (a 640×360 encoder, the answer
   kept; about half a second in a fresh process, nearly all of it opening the Direct3D 11 device and
   the NVENC session, which every NVENC export pays too). `register()` also asks it on a thread of its
-  own (`nvenc::warm_hevc_probe`), so the first draw of the format list does not wait for it; a
-  caller that asks while it runs waits for the same answer. The
-  Hardware encoding toggle governs H.264 only: with H.265 selected NVENC is used whether it is Auto
-  or Off, because nothing else can encode it.
+  own (`nvenc::warm_hevc_probe`), so the first export does not wait for it; a caller that asks
+  while it runs waits for the same answer. The Hardware encoding toggle governs H.264 only: with
+  H.265 selected NVENC is used whether it is Auto or Off, and FilmCraft's software encoder
+  (`filmcraft-hevcenc`) takes what NVENC declines.
 - **What it writes:** HEVC Main, 8-bit 4:2:0, SDR BT.709 limited range (Main 10 HDR: see below) (the VUI says so, with the
   frame rate as `time_scale / num_units_in_tick`), progressive, preset P5 with high-quality tuning,
   constant or one-pass variable bitrate, an IDR at every keyframe distance, one B-frame when the GPU
@@ -236,21 +238,19 @@ level 4 High tier, which many hardware decoders refuse; it is now level 4.1 Main
   sample entry.
 - **Timestamps are the H.264 path's:** dts is the decode index minus the B-frame delay, composition
   offsets are `pts - dts` in frame durations, and the media starts `delay` frames early (edit list).
-- **There is no fallback encoder.** A request NVENC cannot take is counted in
-  `export.hardware.declined` and ends the export with "H.265 export with NVENC: …" and the reason:
-  10-bit on a GPU without it (HDR), interlaced output, two-pass (`ExportSettings::validate` refuses it first), non-square pixels,
-  MXF, sizes above 65535, odd sizes, sizes outside the GPU's limits (129×33 to 8192×8192 on the RTX
-  5060). On a machine without an HEVC encoder the format is not available and an export fails with
-  "encoder not available yet". Frames, sessions and declines are the same `export.hardware` counters
-  as for H.264.
+- **The software encoder is the fallback.** A request NVENC cannot take is counted in
+  `export.hardware.declined` with the reason ("H.265 export with NVENC: …"): 10-bit on a GPU without
+  it (HDR), interlaced output, two-pass (`ExportSettings::validate` refuses it first), non-square
+  pixels, MXF, sizes above 65535, odd sizes, sizes outside the GPU's limits (129×33 to 8192×8192 on
+  the RTX 5060). The export then goes on with `filmcraft-hevcenc`, as it does on a machine without an
+  HEVC encoder. Frames, sessions and declines are the same `export.hardware` counters as for H.264.
 - **Main 10 HDR (PQ / HLG).** An HDR sequence (Rec. 2100 PQ or HLG working space) exports as HEVC
   Main 10 when `settings.sdr` is off and this GPU has a 10-bit HEVC encoder. `register()` hands
   `nvenc::hevc_hdr_available` (a Main 10 session, cached, asked on the same background thread as the
   8-bit probe and short-circuiting when HEVC itself is missing) to `filmcraft_export::register_hdr_probe`,
-  and the export job makes the export HDR for `Format::Hevc` only when
-  `filmcraft_export::hdr_available(Format::Hevc)` says so: on macOS (VideoToolbox is 8-bit) and on GPUs
-  without 10-bit an HDR sequence is tone-mapped to 8-bit SDR HEVC exactly as before, and `settings.sdr`
-  still forces that. The pixels are real: `EncoderFrame::hdr` (encoded BT.2020 R'G'B', 3 floats per
+  so `filmcraft_export::hdr_available(Format::Hevc)` says whether the GPU takes 10-bit; on a GPU
+  without it the software encoder writes the Main 10 stream instead (HDR exports no longer fall back
+  to tone-mapped SDR), and `settings.sdr` still forces SDR. The pixels are real: `EncoderFrame::hdr` (encoded BT.2020 R'G'B', 3 floats per
   pixel) goes through `filmcraft_export::rgbf_to_yuv420_10` (BT.2020 non-constant-luminance matrix,
   Y = 64 + 876·Y', C = 512 + 896·C, 2x2 chroma average, NaN counts as 0, values clamp to 0..1 and codes
   to 4..1019, wrong-length input is an error) and into a **P010** input buffer (`code << 6`,

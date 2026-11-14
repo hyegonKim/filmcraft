@@ -68,6 +68,17 @@ pub fn qpc_420(qpi: i32) -> i32 {
     }
 }
 
+/// QpC for a ChromaArrayType (8.6.1, 8.7.2.5.5): Table 8-10 for 4:2:0, `Min(qPi, 51)` otherwise.
+#[inline]
+pub fn qpc(qpi: i32, chroma_array_type: u32) -> i32 {
+    if chroma_array_type == 1 { qpc_420(qpi) } else { qpi.min(51) }
+}
+
+/// Table 8-3: the 4:2:2 mapping of the chroma intra prediction mode (modeIdc to IntraPredModeC),
+/// which compensates for chroma being stretched vertically against luma.
+pub const INTRA_MODE_422: [u8; 35] =
+    [0, 1, 2, 2, 2, 2, 3, 5, 7, 8, 10, 12, 13, 15, 17, 18, 19, 20, 21, 22, 23, 23, 24, 24, 25, 25, 26, 27, 27, 28, 28, 29, 29, 30, 31];
+
 /// Table 9-50 ctxIdxMap for 4x4 sig_coeff_flag contexts.
 pub static CTX_IDX_MAP: [u8; 16] = [0, 1, 4, 5, 2, 3, 4, 5, 6, 6, 8, 8, 7, 7, 8, 8];
 
@@ -109,6 +120,48 @@ mod tests {
             for m in 0..16 {
                 let (a, b) = (TRANS_MATRIX[n][m] as i32, TRANS_MATRIX[n][31 - m] as i32);
                 assert_eq!(a, if n % 2 == 0 { b } else { -b }, "{n} {m}");
+            }
+        }
+    }
+
+    /// 4:2:0 maps qPi through Table 8-10; 4:2:2 (any ChromaArrayType but 1) caps it at 51.
+    #[test]
+    fn qpc_for_each_chroma_layout() {
+        for qpi in -12..=57 {
+            assert_eq!(qpc(qpi, 1), qpc_420(qpi), "{qpi}");
+            assert_eq!(qpc(qpi, 2), qpi.min(51), "{qpi}");
+        }
+    }
+
+    /// The 4:2:2 chroma intra mode mapping follows the angles: chroma is halved across, so a
+    /// horizontal-family angle doubles and a vertical-family one halves, then rounds to the nearest
+    /// mode (a near-diagonal horizontal angle becomes a vertical-family one). Entries 11 and 14
+    /// (12 and 17) were measured against ffmpeg on x265 4:2:2 streams: a block predicted with 16
+    /// instead of 17 put whole chroma regions off while luma stayed bit-exact.
+    #[test]
+    fn intra_mode_422_follows_the_angles() {
+        // intraPredAngle of modes 2..=34
+        const ANGLE: [i32; 33] =
+            [32, 26, 21, 17, 13, 9, 5, 2, 0, -2, -5, -9, -13, -17, -21, -26, -32, -26, -21, -17, -13, -9, -5, -2, 0, 2, 5, 9, 13, 17, 21, 26, 32];
+        assert_eq!((INTRA_MODE_422[0], INTRA_MODE_422[1]), (0, 1), "planar and DC stay");
+        assert_eq!((INTRA_MODE_422[11], INTRA_MODE_422[14]), (12, 17));
+        let angle = |m: u8| ANGLE[m as usize - 2];
+        for x in 2..=34usize {
+            let (a, m) = (ANGLE[x - 2], INTRA_MODE_422[x]);
+            if x <= 17 {
+                // horizontal: (32, a) becomes (16, a)
+                if 2 * a.abs() <= 32 {
+                    assert!((2..=17).contains(&m) && (angle(m) - 2 * a).abs() <= 2, "{x} -> {m}");
+                } else if a > 0 {
+                    assert_eq!(m, 2, "{x}");
+                } else {
+                    // past the diagonal: a vertical-family angle of -512 / |a|
+                    let v = 512.0 / f64::from(a.abs());
+                    assert!((18..=21).contains(&m) && (f64::from(-angle(m)) - v).abs() < 4.5, "{x} -> {m}");
+                }
+            } else {
+                // vertical: (a, 32) becomes (a / 2, 32)
+                assert!((18..=34).contains(&m) && (f64::from(angle(m)) - f64::from(a) / 2.0).abs() <= 2.5, "{x} -> {m}");
             }
         }
     }

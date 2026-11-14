@@ -198,16 +198,10 @@ pub fn stepped(format: Format) -> bool {
     )
 }
 
-/// Whether an export is HDR: an HDR working space, SDR not asked for, and a format whose encoder
-/// writes HDR (`hdr_available` says so for H.265, which has no built-in encoder).
-pub(crate) fn hdr_output(working_hdr: bool, sdr: bool, format: Format, hdr_available: impl Fn(Format) -> bool) -> bool {
-    working_hdr
-        && !sdr
-        && match format {
-            Format::H264 | Format::ProRes | Format::DnxHr | Format::Apv => true,
-            Format::Hevc => hdr_available(Format::Hevc),
-            _ => false,
-        }
+/// Whether an export is HDR: an HDR working space, SDR not asked for, and a format whose built-in
+/// encoder writes HDR (H.265 as Main 10, whether or not a hardware encoder can).
+pub(crate) fn hdr_output(working_hdr: bool, sdr: bool, format: Format) -> bool {
+    working_hdr && !sdr && matches!(format, Format::H264 | Format::Hevc | Format::ProRes | Format::DnxHr | Format::Apv)
 }
 
 fn make_venc(settings: &ExportSettings, w: u32, h: u32, rate: FrameRate) -> Result<Box<dyn VideoEncoder>> {
@@ -219,9 +213,9 @@ fn make_venc(settings: &ExportSettings, w: u32, h: u32, rate: FrameRate) -> Resu
 /// A factory answers in one of three ways: it takes the export (`Some(Ok(..))`), it is not its
 /// job (`None`), or it is its job and it failed (`Some(Err(..))`). **A failure must not stop the
 /// walk.** For H.264 the software encoder is the documented fallback ("Hardware encoding: Auto …
-/// otherwise the software encoder"), and for H.265 there is no software encoder at all, so the
-/// next factory may be the only one that can take the export. When no factory takes it, the
-/// first failure is what the user is told — the same message as before.
+/// otherwise the software encoder"), and for H.265 the hardware encoders come first and the
+/// software encoder takes what they cannot. When no factory takes it, the first failure is what
+/// the user is told — the same message as before.
 fn pick_encoder(factories: &[EncoderFactory], format: Format, w: u32, h: u32, rate: FrameRate, settings: &ExportSettings) -> Result<Box<dyn VideoEncoder>> {
     let mut first_failure: Option<ExportError> = None;
     for fac in factories {
@@ -247,10 +241,9 @@ impl Exporter {
         }
         settings.validate()?;
         let q = project.sequence(seq).ok_or(ExportError::NoSequence)?;
-        // HDR sequences export HDR (H.264 / ProRes / DNxHR / APV, and H.265 where a registered encoder
-        // writes Main 10) unless SDR is asked for; elsewhere H.265 is tone-mapped 8-bit SDR
+        // HDR sequences export HDR (H.264 / H.265 Main 10 / ProRes / DNxHR / APV) unless SDR is asked for
         let pipe = q.settings.color;
-        let hdr_out = hdr_output(pipe.working.is_hdr(), settings.sdr, settings.video_format(), crate::hdr_available);
+        let hdr_out = hdr_output(pipe.working.is_hdr(), settings.sdr, settings.video_format());
         let mut settings = settings.clone();
         settings.signal = match (hdr_out, pipe.working) {
             (true, filmcraft_color::WorkingSpace::Rec2100Pq) => ColorSignal::PQ,
@@ -729,8 +722,7 @@ mod tests {
     }
 
     /// A factory that *fails* must not stop the walk: the next factory may be the one that can
-    /// take the export. For H.264 that is FilmCraft's own encoder, and for H.265 it is a second
-    /// hardware encoder, because there is no software H.265 encoder at all.
+    /// take the export. For H.264 and H.265 that is FilmCraft's own encoder.
     #[test]
     fn a_failing_factory_does_not_stop_the_walk() {
         let s = ExportSettings { format: Format::Hevc, ..Default::default() };

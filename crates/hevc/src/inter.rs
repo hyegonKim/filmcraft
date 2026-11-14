@@ -258,17 +258,26 @@ pub fn mc_luma<S: Sample>(f: &Frame, (x, y): (i32, i32), mv: [i16; 2], (w, h): (
     predict_block::<S, 8>(f, 0, (xi - 3, yi - 3), &k, out, sc);
 }
 
-/// Chroma prediction samples of a w x h chroma block at chroma position (x, y) with a 1/8-sample
-/// vector (4:2:0).
-pub fn mc_chroma<S: Sample>(f: &Frame, c: usize, (x, y): (i32, i32), mv: [i16; 2], (w, h): (usize, usize), out: &mut [i16], sc: &mut McScratch) {
+/// Chroma prediction samples of a w x h chroma block at chroma position (x, y) with a vector in
+/// 1/8 chroma samples, mvCLX (8-228): the luma vector for 4:2:0, its vertical part doubled for 4:2:2
+/// (whose chroma has the full vertical resolution), see [`chroma_mv`].
+pub fn mc_chroma<S: Sample>(f: &Frame, c: usize, (x, y): (i32, i32), mv: [i32; 2], (w, h): (usize, usize), out: &mut [i16], sc: &mut McScratch) {
     let bd = f.bit_depth_c;
     let (fx, fy) = ((mv[0] & 7) as usize, (mv[1] & 7) as usize);
-    let xi = x + (mv[0] as i32 >> 3);
-    let yi = y + (mv[1] as i32 >> 3);
+    let xi = x + (mv[0] >> 3);
+    let yi = y + (mv[1] >> 3);
     let shift1 = bd.min(12) - 8;
     let shift3 = 14 - bd;
     let k = Interp { fx, fy, hf: &CHROMA_FILTER[fx], vf: &CHROMA_FILTER[fy], w, h, shift1, shift3 };
     predict_block::<S, 4>(f, c + 1, (xi - 1, yi - 1), &k, out, sc);
+}
+
+/// mvCLX in 1/8 chroma samples from the luma vector `mv` (quarter luma samples): `mv * 2 / SubWidthC`
+/// across and `mv * 2 / SubHeightC` down, chroma being halved across in both supported layouts and
+/// down by `csy` (1 for 4:2:0, 0 for 4:2:2).
+#[inline]
+pub fn chroma_mv(mv: [i16; 2], csy: u32) -> [i32; 2] {
+    [i32::from(mv[0]), i32::from(mv[1]) << (1 - csy.min(1))]
 }
 
 /// Calls `$f::<_, W>(args)` with `W` the prediction block width `$w` as a constant (block widths are
@@ -517,7 +526,7 @@ mod tests {
     }
 
     fn frame(rng: &mut Rng, w: usize, h: usize, bd: u32) -> Frame {
-        let like = Frame::new(0, 0, w, h, 4, bd, bd);
+        let like = Frame::new(0, 0, (w, h, 1), 4, bd, bd);
         let max = (1i32 << bd) - 1;
         let y: Vec<u16> = (0..w * h).map(|_| rng.range(0, max) as u16).collect();
         let c: Vec<u16> = (0..w * h / 4).map(|_| rng.range(0, max) as u16).collect();
@@ -566,7 +575,7 @@ mod tests {
                     let k = Interp { fx, fy, hf: &LUMA_FILTER[fx], vf: &LUMA_FILTER[fy], w, h, shift1, shift3 };
                     interpolate::<i16, 8>(strided(&win, WIN), &mut tmp, &k, &mut b);
                 } else {
-                    mc_chroma::<S>(&f, c - 1, (x, y), mv, (w, h), &mut a, &mut sc);
+                    mc_chroma::<S>(&f, c - 1, (x, y), chroma_mv(mv, 1), (w, h), &mut a, &mut sc);
                     let k = Interp { fx, fy, hf: &CHROMA_FILTER[fx], vf: &CHROMA_FILTER[fy], w, h, shift1, shift3 };
                     interpolate::<i16, 4>(strided(&win, WIN), &mut tmp, &k, &mut b);
                 }
@@ -600,7 +609,7 @@ mod tests {
                 assert!(a.iter().any(|&v| v != S::default()) || w * h < 8);
                 for c in 1..3 {
                     let (cw, ch) = (w / 2, h / 2);
-                    mc_chroma::<S>(&f, c - 1, (0, 0), [(x * 8) as i16, (y * 8) as i16], (cw, ch), &mut pred, &mut sc);
+                    mc_chroma::<S>(&f, c - 1, (0, 0), [x * 8, y * 8], (cw, ch), &mut pred, &mut sc);
                     let (mut a, mut b) = (vec![S::default(); cw * ch], vec![S::default(); cw * ch]);
                     put_uni(&pred, cw, ch, bd, &mut a, cw);
                     f.copy_block(c, (x, y), (cw, ch), &mut b, cw);

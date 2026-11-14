@@ -1,6 +1,6 @@
 # Hardware parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (new file: hardware decode / encode per platform and codec, GPU effects, devices; re-measured after NVDEC #549 and GPU export #421) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-11-08 · **Change:** minor (VideoToolbox HEVC Main 10 HDR encode; the software HEVC encoder is the fallback everywhere) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
 
 Each hardware feature Premiere uses, per platform, against ours. Implementation detail lives in
 [`crates/platform/README.md`](../crates/platform/README.md) (decode / encode backends, the one
@@ -36,8 +36,8 @@ and re-uploaded to wgpu (**no zero-copy** yet), which Premiere avoids.
 |---|---|---|---|---|---|
 | H.264 8-bit | yes | **yes** (VideoToolbox, opt-in, no B-frames; takes the RGBA pictures and converts them itself) | Intel QSV, NVENC, AMD | **NVENC only** (opt-in) | **NVENC only** |
 | H.264 10-bit / 4:2:2 | yes (Apple silicon) | no | Intel | no | no |
-| HEVC Main 8-bit | yes | **yes** (hardware-only format) | QSV, NVENC, AMD | **NVENC only** | no |
-| HEVC Main 10 / HDR (PQ, HLG) | yes | **no** (tone-mapped to 8-bit SDR) | yes | **NVENC yes** (HDR10 SEI, `mdcv` / `clli`) | no |
+| HEVC Main 8-bit | yes | **yes** (preferred; our software encoder takes what it declines) | QSV, NVENC, AMD | **NVENC** (preferred; software fallback) | software only |
+| HEVC Main 10 / HDR (PQ, HLG) | yes | **yes** (VideoToolbox Main 10, P010, HDR10 metadata) | yes | **NVENC yes** (HDR10 SEI, `mdcv` / `clli`) | software only |
 | ProRes | Apple silicon | software only | software | software | software |
 | AV1 | — | no | via plug-ins / newer GPUs | no | no |
 
@@ -84,4 +84,5 @@ one encoder ~4–8 h ([target-app-parity.md](target-app-parity.md#calibration)).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-08 | minor | VideoToolbox HEVC Main 10 HDR encode (PQ / HLG); HEVC encode falls back to the software encoder (`crates/hevcenc`) instead of failing, so Linux and machines without a hardware encoder export H.265 |
 | 2026-10-10 | major | Created from ROADMAP.md's performance-and-hardware row and `crates/platform/README.md`; added Linux NVDEC (#549), GPU export and Lumetri on the GPU (#421), Premiere's per-platform hardware list, devices and I/O |

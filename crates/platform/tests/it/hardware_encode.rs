@@ -483,6 +483,7 @@ fn hostile_configurations_give_errors_not_crashes() {
         keyframe_interval: 30,
         profile: VtProfile::High,
         rate: VtRate::Vbr { target_kbps: 8000, max_kbps: 12_000 },
+        hdr: None,
     };
     let variants: Vec<(&str, VtConfig)> = vec![
         ("zero width", VtConfig { width: 0, ..base.clone() }),
@@ -657,7 +658,18 @@ fn hevc_declines_what_the_hardware_path_does_not_take() {
     assert_eq!((config.profile, config.keyframe_interval, config.rate), (VtProfile::HevcMain, 30, VtRate::Vbr { target_kbps: 6000, max_kbps: 9000 }));
     let declined = |s: &ExportSettings, what: &str| assert!(config_for(W, H, FPS, s).is_err(), "{what} must not use the hardware encoder");
     declined(&ExportSettings { bitrate_mode: BitrateMode::Vbr2Pass, ..ok.clone() }, "two-pass VBR");
-    declined(&ExportSettings { signal: filmcraft_export::ColorSignal::PQ, ..ok.clone() }, "HDR");
+    // HDR is HEVC Main 10, BT.2020 with PQ or HLG (PQ with its HDR10 static metadata); other HDR signals are declined
+    let pq = config_for(W, H, FPS, &ExportSettings { signal: filmcraft_export::ColorSignal::PQ, ..ok.clone() }).expect("PQ is Main 10");
+    let hdr = pq.hdr.expect("an HDR signal");
+    assert_eq!((pq.profile, hdr.transfer), (VtProfile::HevcMain10, filmcraft_platform::videotoolbox_encode::VtTransfer::Pq));
+    assert!(hdr.mastering.is_some() && hdr.content_light == Some([0, 0, 0, 0]));
+    let hlg = config_for(W, H, FPS, &ExportSettings { signal: filmcraft_export::ColorSignal::HLG, ..ok.clone() }).expect("HLG is Main 10");
+    assert_eq!(hlg.hdr.map(|h| (h.transfer, h.mastering, h.content_light)), Some((filmcraft_platform::videotoolbox_encode::VtTransfer::Hlg, None, None)));
+    declined(&ExportSettings { signal: filmcraft_export::ColorSignal { primaries: 1, transfer: 16, matrix: 1 }, ..ok.clone() }, "HDR with BT.709 primaries");
+    declined(
+        &ExportSettings { format: Format::H264, hardware_encoding: HardwareEncoding::Auto, signal: filmcraft_export::ColorSignal::PQ, ..ok.clone() },
+        "HDR H.264",
+    );
     declined(&ExportSettings { pixel_aspect: Some((4, 3)), ..ok.clone() }, "non-square pixels");
     assert!(config_for(321, 181, FPS, &ok).is_err() && config_for(640, 361, FPS, &ok).is_err(), "odd sizes");
     assert!(config_for(W, H, FrameRate { num: 0, den: 1 }, &ok).is_err());
@@ -669,8 +681,8 @@ fn hevc_declines_what_the_hardware_path_does_not_take() {
 #[test]
 fn hevc_format_follows_the_machine() {
     filmcraft_platform::register();
-    // the format list asks `available`: it must agree with the probe
-    assert_eq!(filmcraft_export::available(Format::Hevc), hevc_available());
+    // the format is listed everywhere (the built-in encoder takes what the hardware does not)
+    assert!(filmcraft_export::available(Format::Hevc));
     let s = hevc_settings();
     // no hardware flag needed, but nothing else is taken by this factory
     assert_eq!(videotoolbox_encoder_factory(Format::Hevc, W, H, FPS, &s).is_some(), hevc_available());
@@ -774,6 +786,7 @@ fn hevc_hostile_configurations_give_errors_not_crashes() {
         keyframe_interval: 30,
         profile: VtProfile::HevcMain,
         rate: VtRate::Vbr { target_kbps: 6000, max_kbps: 9000 },
+        hdr: None,
     };
     let variants: Vec<(&str, VtConfig)> = vec![
         ("zero width", VtConfig { width: 0, ..base.clone() }),
@@ -914,6 +927,7 @@ fn the_sessions_run_on_the_hardware_encoder() {
         keyframe_interval: 30,
         profile,
         rate: VtRate::Vbr { target_kbps: 6000, max_kbps: 9000 },
+        hdr: None,
     };
     for (name, profile) in [("H.264", VtProfile::High), ("HEVC", VtProfile::HevcMain)] {
         match VtEncoder::new(config(profile)) {

@@ -50,6 +50,14 @@ fn adaptive(bpp: f32) -> ExportSettings {
     ExportSettings { adaptive_bitrate: Some(bpp), max_bitrate_kbps: None, ..h264(None, 10_000, 0) }
 }
 
+/// H.265 with the H.264 presets' audio. H.265 has no two-pass or CRF mode, so these use VBR 1 pass.
+fn hevc(size: Option<(u32, u32)>, kbps: u32, max_kbps: u32) -> ExportSettings {
+    ExportSettings { format: Format::Hevc, ..h264(size, kbps, max_kbps) }
+}
+
+/// 8K UHD, the delivery size of 8K television and video sharing sites.
+const UHD_8K: (u32, u32) = (7680, 4320);
+
 fn mov(format: Format, profile: &str) -> ExportSettings {
     let mut s = ExportSettings {
         format,
@@ -101,10 +109,20 @@ pub fn builtin_presets() -> Vec<ExportPreset> {
         p(DEFAULT_PRESET, ms, "H.264 at the sequence's frame size and rate; bitrate adapts to the frame size (0.2 bits per pixel)", adaptive(0.2)),
         p("Match Source – Adaptive Medium Bitrate", ms, "H.264 at the sequence's frame size and rate; 0.1 bits per pixel", adaptive(0.1)),
         p("Match Source – Adaptive Low Bitrate", ms, "H.264 at the sequence's frame size and rate; 0.05 bits per pixel", adaptive(0.05)),
+        p(
+            "Match Source – H.265 Adaptive High Bitrate",
+            ms,
+            "H.265 at the sequence's frame size and rate; bitrate adapts to the frame size (0.1 bits per pixel)",
+            ExportSettings { format: Format::Hevc, ..adaptive(0.1) },
+        ),
         p("High Quality 1080p HD", web, "H.264 1920×1080, VBR 1 pass, 20 Mbps target, AAC 320 kbps", h264(Some((1920, 1080)), 20_000, 24_000)),
         p("High Quality 2160p 4K", web, "H.264 3840×2160, VBR 1 pass, 60 Mbps target, AAC 320 kbps", h264(Some((3840, 2160)), 60_000, 72_000)),
+        p("High Quality 4320p 8K", web, "H.264 7680×4320 (Level 6.2), VBR 1 pass, 160 Mbps target, AAC 320 kbps", h264(Some(UHD_8K), 160_000, 192_000)),
+        p("H.265 High Quality 2160p 4K", web, "H.265 3840×2160, VBR 1 pass, 40 Mbps target, AAC 320 kbps", hevc(Some((3840, 2160)), 40_000, 48_000)),
+        p("H.265 High Quality 4320p 8K", web, "H.265 7680×4320, VBR 1 pass, 100 Mbps target, AAC 320 kbps", hevc(Some(UHD_8K), 100_000, 120_000)),
         p("YouTube 1080p Full HD", web, "H.264 1920×1080 for video sharing sites, VBR 1 pass, 16 Mbps", h264(Some((1920, 1080)), 16_000, 20_000)),
         p("YouTube 2160p 4K Ultra HD", web, "H.264 3840×2160 for video sharing sites, VBR 1 pass, 45 Mbps", h264(Some((3840, 2160)), 45_000, 54_000)),
+        p("YouTube 4320p 8K", web, "H.265 7680×4320 for video sharing sites, VBR 1 pass, 80 Mbps", hevc(Some(UHD_8K), 80_000, 100_000)),
         p(
             "Vimeo 1080p Full HD",
             web,

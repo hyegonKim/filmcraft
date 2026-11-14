@@ -3467,7 +3467,7 @@
 	Main 10 (10-bit, HDR)	主要 10（10 位，HDR）
 	Main (8-bit; Main 10 for HDR sequences)	主要（8 位；HDR 序列使用主要 10）
 	Encoder	编码器
-	Hardware (H.265 has no software encoder)	硬件（H.265 无软件编码器）
+	Hardware where available, otherwise software	有硬件时用硬件，否则用软件
 	Hardware (AV1 has no software encoder)	硬件（AV1 无软件编码器）
 	Text Properties	文本属性
 	Text Box Height	文本框高度
@@ -3619,7 +3619,6 @@
 	Web Link	Web 链接
 	Flash Cue Point	闪存提示点
 	Invalid duration: {error}	持续时间无效：{error}
-	H.265 (HEVC) needs a hardware encoder (NVENC on NVIDIA GPUs, VideoToolbox on macOS); none was found on this machine, and FilmCraft has no software H.265 encoder yet. Choose H.264 or ProRes instead.	H.265 (HEVC) 需要硬件编码器（NVIDIA GPU 上的 NVENC、macOS 上的 VideoToolbox）；本机未找到，且 FilmCraft 尚无软件 H.265 编码器。请改选 H.264 或 ProRes。
 	AV1 needs a hardware encoder; none was found on this machine, and FilmCraft has no software AV1 encoder yet.	AV1 需要硬件编码器；本机未找到，且 FilmCraft 尚无软件 AV1 编码器。
 	Enter a positive duration within the supported speed range.	请输入支持的速度范围内的正时长。
 	Show Video Names	显示视频名称
@@ -3699,3 +3698,6 @@
 	Previous	上一个
 	Next	下一个
 	Enter a valid HH:MM:SS:FF timecode	请输入有效的 HH:MM:SS:FF 时间码
+	Frame Size Preset:	帧大小预设：
+	Vertical (1080 × 1920)	竖屏（1080 × 1920）
+	Square (1080 × 1080)	方形（1080 × 1080）

@@ -75,20 +75,23 @@ pub fn register() -> Availability {
         filmcraft_codecs::register_video_decoder(videotoolbox_factory);
         filmcraft_export::register_encoder(hardware_encode::videotoolbox_encoder_factory);
         filmcraft_export::register_format_probe(filmcraft_export::Format::Hevc, hardware_encode::hevc_available);
-        // the probe creates a hardware session (about 0.1 s): answer it now, off the UI thread,
-        // before the first draw of the format list asks
+        // HDR sequences export as HEVC Main 10 (PQ / HLG) on VideoToolbox where it has a 10-bit
+        // encoder; elsewhere the software encoder writes them
+        filmcraft_export::register_hdr_probe(filmcraft_export::Format::Hevc, hardware_encode::hevc_hdr_available);
+        // the probes create hardware sessions (about 0.1 s each): answer them now, off the UI
+        // thread, before the first draw of the format list asks
         hardware_encode::warm_hevc_probe();
         filmcraft_codecs::hw::set_hw_backend("VideoToolbox");
         Availability::Available("VideoToolbox")
     }
-    // Export ▸ H.265: NVENC is FilmCraft's only HEVC encoder on Windows, so the format is available
-    // when a small HEVC session opens. That takes about half a second, so it is asked on a thread of
-    // its own now rather than by the first draw of the format list.
+    // Export ▸ H.265: NVENC comes before FilmCraft's software HEVC encoder on Windows when a small
+    // HEVC session opens. That takes about half a second, so it is asked on a thread of its own now
+    // rather than by the first export.
     #[cfg(target_os = "windows")]
     {
         filmcraft_export::register_format_probe(filmcraft_export::Format::Hevc, nvenc::hevc_available);
-        // HDR sequences export as HEVC Main 10 (PQ / HLG) only where NVENC has a 10-bit encoder; elsewhere
-        // (and on macOS, whose VideoToolbox path is 8-bit) they are tone-mapped to SDR, as before
+        // HDR sequences export as HEVC Main 10 (PQ / HLG) on NVENC where it has a 10-bit encoder;
+        // elsewhere the software encoder writes them
         filmcraft_export::register_hdr_probe(filmcraft_export::Format::Hevc, nvenc::hevc_hdr_available);
         nvenc::warm_hevc_probe();
     }

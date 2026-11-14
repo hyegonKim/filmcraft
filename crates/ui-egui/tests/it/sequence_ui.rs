@@ -1690,6 +1690,38 @@ fn sequence_settings_dialog_shows_the_sequence() {
     assert_eq!(d.app().session.history.undo.len(), history);
 }
 
+/// Frame Size Preset fills in the width and height: the list has 4K and 8K in their UHD and DCI
+/// widths, 8K DCI shows as 8192 x 4320, a size typed into the fields shows as Custom, and OK
+/// applies 8K UHD to the sequence.
+#[test]
+fn frame_size_preset_offers_8k() {
+    let mut d = Driver::demo();
+    d.ok("ui.menu.invoke", json!({"id": "sequence.settings"}));
+    d.frames(10);
+    assert_eq!(d.label("sequenceSettings.sizePreset"), "HD 1080 (1920 × 1080)");
+    d.click("sequenceSettings.sizePreset");
+    let options = d.ids("sequenceSettings.sizePreset.option.");
+    for size in ["3840x2160", "4096x2160", "7680x4320", "8192x4320"] {
+        assert!(options.iter().any(|i| i.ends_with(size)), "{size} missing: {options:?}");
+    }
+    d.snapshot("sequence-settings-size-presets", "sequenceSettings.");
+    d.click("sequenceSettings.sizePreset.option.8192x4320");
+    assert_eq!(d.label("sequenceSettings.width"), "8192");
+    assert_eq!(d.label("sequenceSettings.height"), "4320");
+    assert_eq!(d.label("sequenceSettings.sizePreset"), "8K DCI (8192 × 4320)");
+    assert_eq!(d.label("sequenceSettings.aspect"), "1.90:1");
+    d.app().ui.sequence_settings.width = 1000;
+    d.frames(2);
+    assert_eq!(d.label("sequenceSettings.sizePreset"), "Custom");
+    d.click("sequenceSettings.sizePreset");
+    d.click("sequenceSettings.sizePreset.option.7680x4320");
+    assert_eq!(d.label("sequenceSettings.aspect"), "16:9");
+    d.click("sequenceSettings.ok");
+    assert!(d.ids("sequenceSettings.").is_empty(), "dialog closed");
+    let st = d.app().session.active_sequence().unwrap().settings.clone();
+    assert_eq!((st.width, st.height), (7680, 4320));
+}
+
 /// OK applies the dialog in one undo step: a new timebase (29.97 starts on drop-frame timecode), a
 /// smaller frame with the clips' Motion scaled to match, and Maximum Render Quality.
 #[test]

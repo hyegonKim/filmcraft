@@ -32,7 +32,7 @@ fn export_stepped(batch: i64, settings: &ExportSettings) -> Vec<u8> {
 #[test]
 fn same_file_whatever_the_core_count() {
     // 24 frames: one full interleave group and a partial one
-    for (format, ext) in [(Format::ProRes, "mov"), (Format::H264, "mp4"), (Format::Mjpeg, "mov")] {
+    for (format, ext) in [(Format::ProRes, "mov"), (Format::H264, "mp4"), (Format::Hevc, "mp4"), (Format::Mjpeg, "mov")] {
         let settings = |name: &str| ExportSettings { format, path: tmp(&format!("{name}.{ext}")), ..Default::default() };
         let reference = export_with_cores(2, &settings(&format!("{}-2", format.id())));
         for threads in [3, 5, 16] {
@@ -127,7 +127,7 @@ fn export_overlapped(threads: usize, batch: i64, overlap: bool, settings: &Expor
 
 #[test]
 fn rendering_ahead_does_not_change_the_file() {
-    for (format, ext) in [(Format::ProRes, "mov"), (Format::H264, "mp4"), (Format::Mjpeg, "mov")] {
+    for (format, ext) in [(Format::ProRes, "mov"), (Format::H264, "mp4"), (Format::Hevc, "mp4"), (Format::Mjpeg, "mov")] {
         let settings = |name: &str| ExportSettings { format, path: tmp(&format!("{name}.{ext}")), ..Default::default() };
         let (reference, ahead) = export_overlapped(3, 7, false, &settings(&format!("ov-{}-off", format.id())));
         assert_eq!(ahead, 0, "{}: overlap is off", format.label());
@@ -165,7 +165,7 @@ fn rendering_ahead_in_a_two_pass_export() {
 #[test]
 fn hdr_with_audio_is_the_same_file_when_the_memory_budget_caps_the_batch() {
     use filmcraft_color::{ColorPipeline, WorkingSpace};
-    for (format, ext) in [(Format::ProRes, "mov"), (Format::H264, "mp4")] {
+    for (format, ext) in [(Format::ProRes, "mov"), (Format::H264, "mp4"), (Format::Hevc, "mp4")] {
         let run = |name: &str, batch: i64, overlap: bool, budget: Option<u64>| {
             let (p, seq, m) = project();
             let mut p = (*p).clone();
@@ -423,7 +423,7 @@ fn max_threads_never_adds_threads() {
 
 #[test]
 fn max_threads_does_not_change_the_file() {
-    for (format, ext) in [(Format::ProRes, "mov"), (Format::H264, "mp4"), (Format::Mjpeg, "mov")] {
+    for (format, ext) in [(Format::ProRes, "mov"), (Format::H264, "mp4"), (Format::Hevc, "mp4"), (Format::Mjpeg, "mov")] {
         let settings = |name: &str, max_threads: u32| ExportSettings { format, path: tmp(&format!("{name}.{ext}")), max_threads, ..Default::default() };
         let reference = export_with_cores(5, &settings(&format!("{}-uncapped", format.id()), 0));
         for cap in [1u32, 3] {

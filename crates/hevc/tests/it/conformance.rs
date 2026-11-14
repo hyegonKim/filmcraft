@@ -60,6 +60,21 @@ fixture_tests!(
     uhd_4k_main10,
     vt_main,
     vt_main10,
+    intra_422_10,
+    intra_422_8,
+    intra_nosao_nodbk_422_10,
+    intra_nosao_422_10,
+    medium_422_10,
+    slow_422_10,
+    bframes_422_10,
+    weightp_422_10,
+    ctu16_422_10,
+    tu4_422_10,
+    constrained_intra_422_10,
+    lossless_422_10,
+    crf51_422_10,
+    deblock_m3_3_422_10,
+    odd_1918x1078_422_10,
 );
 
 /// Draft mode: sub-layer non-reference pictures skip deblocking and SAO and are flagged; every

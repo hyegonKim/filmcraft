@@ -128,8 +128,9 @@ impl<'a, S: Sample> SliceDecoder<'a, S> {
         };
         let bi = f.pred(0) && f.pred(1);
         let pwt = self.sh.pwt.as_ref().filter(|_| weighted);
+        let csy = self.pic.csy;
         for c in 0..3 {
-            let (x, y, bw, bh, bd) = if c == 0 { (xp, yp, w, h, self.pic.bd_y) } else { (xp / 2, yp / 2, w / 2, h / 2, self.pic.bd_c) };
+            let (x, y, bw, bh, bd) = if c == 0 { (xp, yp, w, h, self.pic.bd_y) } else { (xp / 2, yp >> csy, w / 2, h >> csy, self.pic.bd_c) };
             // Explicit weights equal to the default ones (weight 2^denom and offset 0 for every
             // list used, as signalled for most slices of a weighted-prediction stream) give exactly
             // the default prediction: with log2WD = denom + shift1 the weighted sums of 8-265 /
@@ -140,13 +141,13 @@ impl<'a, S: Sample> SliceDecoder<'a, S> {
             if !bi && pwt.is_none() {
                 let l = if f.pred(0) { 0 } else { 1 };
                 let frac = if c == 0 { 3 } else { 7 };
-                let mv = f.mv[l];
+                let mv = if c == 0 { [i32::from(f.mv[l][0]), i32::from(f.mv[l][1])] } else { inter::chroma_mv(f.mv[l], csy) };
                 if f.pred(l) && mv[0] & frac == 0 && mv[1] & frac == 0 {
                     let sh = if c == 0 { 2 } else { 3 };
                     let stride = if c == 0 { self.pic.width } else { self.pic.cwidth };
                     let frame = &self.refs[l][f.ref_idx[l] as usize].frame;
                     let dst = &mut self.pic.planes[c][y as usize * stride + x as usize..];
-                    frame.copy_block(c, (x + (mv[0] as i32 >> sh), y + (mv[1] as i32 >> sh)), (bw, bh), dst, stride);
+                    frame.copy_block(c, (x + (mv[0] >> sh), y + (mv[1] >> sh)), (bw, bh), dst, stride);
                     continue;
                 }
             }
@@ -161,7 +162,7 @@ impl<'a, S: Sample> SliceDecoder<'a, S> {
                 if c == 0 {
                     inter::mc_luma::<S>(frame, (x, y), f.mv[l], (bw, bh), buf, &mut self.mc);
                 } else {
-                    inter::mc_chroma::<S>(frame, c - 1, (x, y), f.mv[l], (bw, bh), buf, &mut self.mc);
+                    inter::mc_chroma::<S>(frame, c - 1, (x, y), inter::chroma_mv(f.mv[l], csy), (bw, bh), buf, &mut self.mc);
                 }
             }
             let stride = if c == 0 { self.pic.width } else { self.pic.cwidth };

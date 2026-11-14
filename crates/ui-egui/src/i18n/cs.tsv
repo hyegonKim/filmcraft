@@ -3455,7 +3455,7 @@
 	Main 10 (10-bit, HDR)	Main 10 (10bitový, HDR)
 	Main (8-bit; Main 10 for HDR sequences)	Main (8bitový; Main 10 pro sekvence HDR)
 	Encoder	Kodér
-	Hardware (H.265 has no software encoder)	Hardwarový (H.265 nemá softwarový kodér)
+	Hardware where available, otherwise software	Hardwarový, kde je k dispozici, jinak softwarový
 	Hardware (AV1 has no software encoder)	Hardwarový (AV1 nemá softwarový kodér)
 	Text Properties	Vlastnosti textu
 	Text Box Height	Výška textového pole
@@ -3620,7 +3620,6 @@
 	Delete the dimmed actions after the current state? They cannot be redone.	Odstranit zašedlé akce za aktuálním stavem? Nepůjde je provést znovu.
 	Duration: {tc}	Doba trvání: {tc}
 	End: {tc}	Konec: {tc}
-	H.265 (HEVC) needs a hardware encoder (NVENC on NVIDIA GPUs, VideoToolbox on macOS); none was found on this machine, and FilmCraft has no software H.265 encoder yet. Choose H.264 or ProRes instead.	H.265 (HEVC) vyžaduje hardwarový kodér (NVENC na grafických kartách NVIDIA, VideoToolbox na macOS); v tomto počítači žádný nebyl nalezen a FilmCraft zatím nemá softwarový kodér H.265. Zvolte místo toho H.264 nebo ProRes.
 	Show Duplicate Frame Markers	Zobrazit značky duplicitních snímků
 	Start: {tc}	Začátek: {tc}
 	Transparency Grid	Mřížka průhlednosti
@@ -3634,3 +3633,6 @@
 	Could not check for updates:\n{error}	Aktualizace se nepodařilo zkontrolovat:\n{error}
 	FilmCraft {version} is currently the newest version available.	FilmCraft {version} je nejnovější dostupná verze.
 	Looks for a newer FilmCraft release and offers to update.	Vyhledá novější vydání FilmCraftu a nabídne aktualizaci.
+	Frame Size Preset:	Předvolba velikosti snímku:
+	Vertical (1080 × 1920)	Na výšku (1080 × 1920)
+	Square (1080 × 1080)	Čtverec (1080 × 1080)

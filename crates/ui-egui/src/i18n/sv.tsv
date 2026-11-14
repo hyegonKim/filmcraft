@@ -3470,7 +3470,7 @@
 	Main 10 (10-bit, HDR)	Main 10 (10 bitar, HDR)
 	Main (8-bit; Main 10 for HDR sequences)	Main (8 bitar; Main 10 för HDR-sekvenser)
 	Encoder	Kodare
-	Hardware (H.265 has no software encoder)	Hårdvara (H.265 saknar programvarukodare)
+	Hardware where available, otherwise software	Hårdvara om tillgänglig, annars programvara
 	Hardware (AV1 has no software encoder)	Hårdvara (AV1 saknar programvarukodare)
 	Text Properties	Textegenskaper
 	Text Box Height	Textrutans höjd
@@ -3621,7 +3621,6 @@
 	Open a sequence to search its graphics	Öppna en sekvens för att söka i dess grafik
 	No text graphics in this sequence. Add text with the Type tool.	Det finns ingen textgrafik i den här sekvensen. Lägg till text med textverktyget.
 	No matching text.	Ingen text matchar.
-	H.265 (HEVC) needs a hardware encoder (NVENC on NVIDIA GPUs, VideoToolbox on macOS); none was found on this machine, and FilmCraft has no software H.265 encoder yet. Choose H.264 or ProRes instead.	H.265 (HEVC) kräver en hårdvarukodare (NVENC på NVIDIA-grafikkort, VideoToolbox på macOS). Ingen hittades på den här datorn, och FilmCraft har ännu ingen programvarukodare för H.265. Välj H.264 eller ProRes i stället.
 	AV1 needs a hardware encoder; none was found on this machine, and FilmCraft has no software AV1 encoder yet.	AV1 kräver en hårdvarukodare. Ingen hittades på den här datorn, och FilmCraft har ännu ingen programvarukodare för AV1.
 	Checking for updates…	Söker efter uppdateringar…
 	Could not check for updates:\n{error}	Det gick inte att söka efter uppdateringar:\n{error}
@@ -3631,3 +3630,6 @@
 	Check for Updates…	Sök efter uppdateringar…
 	Set Work Area Bar In Point	Ange arbetsområdesfältets in-punkt
 	Set Work Area Bar Out Point	Ange arbetsområdesfältets ut-punkt
+	Frame Size Preset:	Förinställd bildstorlek:
+	Vertical (1080 × 1920)	Stående (1080 × 1920)
+	Square (1080 × 1080)	Kvadratisk (1080 × 1080)

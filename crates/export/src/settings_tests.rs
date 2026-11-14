@@ -1190,6 +1190,27 @@ fn builtin_presets_are_valid_and_unique() {
     assert_eq!(back.settings.adaptive_bitrate, Some(0.2));
 }
 
+/// The 8K presets deliver 8K UHD; the H.265 ones are VBR 1 pass with AAC (H.265 export has no
+/// two-pass or CRF mode), and H.265 Match Source spends half the bits per pixel of H.264's.
+#[test]
+fn h265_and_8k_presets() {
+    for name in ["High Quality 4320p 8K", "H.265 High Quality 4320p 8K", "YouTube 4320p 8K"] {
+        let p = presets::find_builtin(name).unwrap();
+        assert_eq!(p.settings.frame_size, Some((7680, 4320)), "{name}");
+    }
+    let hevc: Vec<ExportPreset> = builtin_presets().into_iter().filter(|p| p.settings.format == Format::Hevc).collect();
+    let names: Vec<&str> = hevc.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["Match Source – H.265 Adaptive High Bitrate", "H.265 High Quality 2160p 4K", "H.265 High Quality 4320p 8K", "YouTube 4320p 8K"]);
+    for p in &hevc {
+        assert_eq!(p.settings.bitrate_mode, BitrateMode::Vbr1Pass, "{}", p.name);
+        assert_eq!(p.settings.audio.codec, AudioCodec::Aac, "{}", p.name);
+        assert_eq!(p.settings.extension(), "mp4", "{}", p.name);
+    }
+    let adaptive = presets::find_builtin("match source - h.265 adaptive high bitrate").unwrap().settings;
+    assert_eq!(adaptive.resolve(1920, 1080, FrameRate::FPS_30, 48_000).target_kbps, 6_221);
+    assert_eq!(adaptive.resolve(7680, 4320, FrameRate::FPS_30, 48_000).target_kbps, 99_533);
+}
+
 /// #108: the default 320 kbps is more than AAC can carry in stereo at 22.05 kHz (6 bits per sample
 /// and channel). The export failed with "bitrate out of range"; it is now capped to the limit.
 #[test]
@@ -1253,8 +1274,7 @@ fn av1_is_an_mp4_format_that_needs_a_registered_encoder() {
 }
 
 #[test]
-fn h265_is_a_format_that_needs_a_registered_encoder() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+fn h265_has_a_built_in_encoder() {
     // names, ids, files and serialized settings
     for name in ["hevc", "H.265", "h265", "HVC1", "x265"] {
         assert_eq!(Format::from_name(name), Some(Format::Hevc), "{name}");
@@ -1275,35 +1295,51 @@ fn h265_is_a_format_that_needs_a_registered_encoder() {
     assert!((b as f64 - 25.4e6).abs() < 0.2e6, "{b}");
     let summary = h.summary(1920, 1080, FrameRate::FPS_25, 48_000, Tick(10 * TICKS_PER_SECOND));
     assert_eq!(summary.format, "H.265 (HEVC) (MP4)");
-    assert!(summary.video.contains("HEVC Main") && summary.video.contains("Target 20.00 Mbps"), "{}", summary.video);
+    assert!(summary.video.contains("HEVC Main / Main 10 for HDR") && summary.video.contains("Target 20.00 Mbps"), "{}", summary.video);
 
-    // a hardware encoder has one pass
+    // one pass, no constant-quality mode (neither the hardware encoders nor ours have them)
     let e = ExportSettings { bitrate_mode: BitrateMode::Vbr2Pass, ..h.clone() }.validate().unwrap_err();
     assert!(e.to_string().contains("two-pass"), "{e}");
     assert!(ExportSettings { bitrate_mode: BitrateMode::Cbr, ..h.clone() }.validate().is_ok());
     let e = ExportSettings { bitrate_mode: BitrateMode::Crf, ..h.clone() }.validate().unwrap_err();
     assert!(e.to_string().contains("CRF"), "{e}");
 
-    // formats with a built-in encoder are always available; this one only when a registered probe says so
+    // available everywhere: nothing registered a hardware encoder in this process
+    assert!(Format::Hevc.has_builtin_encoder() && available(Format::Hevc));
     assert!(Format::ALL.iter().filter(|f| f.has_builtin_encoder()).all(|f| available(*f)));
-    assert!(!Format::Hevc.has_builtin_encoder());
-    static HERE: AtomicBool = AtomicBool::new(false);
-    fn probe() -> bool {
-        HERE.load(Ordering::SeqCst)
+
+    // an export: Main, 8-bit 4:2:0, the asked-for keyframe distance and pixel aspect, and our
+    // decoder reads the picture back
+    let (p, seq, m) = matte([0.8, 0.5, 0.2, 1.0], 320, 180, None);
+    let sc = Scratch::new("h265-built-in");
+    let path = sc.path("x.mp4");
+    let s = ExportSettings { path: path.clone(), include_audio: false, keyframe_distance: Some(6), pixel_aspect: Some((4, 3)), ..h.clone() };
+    export(&p, seq, &s, &m, &Progress::default()).unwrap();
+    let bytes: Arc<[u8]> = std::fs::read(&path).unwrap().into();
+    let src = filmcraft_codecs::open_bytes("x.mp4", bytes).unwrap();
+    let v = src.info().video.clone().unwrap();
+    assert_eq!((v.width, v.height), (320, 180));
+    let f = src.video_frame(FrameRequest::full(Tick(TICKS_PER_SECOND / 2))).unwrap().to_rgba8();
+    // the matte's 0.8 / 0.5 / 0.2 are 8-bit codes 204 / 128 / 51
+    let px = &f[(90 * 320 + 160) * 4..][..3];
+    assert!((i32::from(px[0]) - 204).abs() < 6 && (i32::from(px[1]) - 128).abs() < 6 && (i32::from(px[2]) - 51).abs() < 6, "{px:?}");
+    if let Some(j) = ffprobe_json(&["-show_streams"], &path) {
+        let st = &j["streams"][0];
+        assert_eq!((st["codec_name"].as_str(), st["codec_tag_string"].as_str()), (Some("hevc"), Some("hvc1")), "{st}");
+        assert_eq!((st["profile"].as_str(), st["pix_fmt"].as_str()), (Some("Main"), Some("yuv420p")), "{st}");
+        assert_eq!(st["sample_aspect_ratio"].as_str(), Some("4:3"), "{st}");
+        assert_eq!(st["color_transfer"].as_str(), Some("bt709"), "{st}");
     }
-    assert!(!available(Format::Hevc), "nothing registered an encoder for it");
-    // and an export says so, honestly
-    let (p, seq, m) = matte([0.0, 0.0, 1.0, 1.0], 160, 90, None);
-    let sc = Scratch::new("h265-missing");
-    let err = export(&p, seq, &ExportSettings { path: sc.path("x.mp4"), include_audio: false, ..h.clone() }, &m, &Progress::default()).unwrap_err().to_string();
-    assert!(err.contains("H.265") && err.contains("encoder not available"), "{err}");
-    register_format_probe(Format::Hevc, probe);
-    register_format_probe(Format::Hevc, probe); // the same probe twice is harmless
-    assert!(!available(Format::Hevc));
-    HERE.store(true, Ordering::SeqCst);
-    assert!(available(Format::Hevc));
-    HERE.store(false, Ordering::SeqCst);
-    assert!(!available(Format::Hevc));
+    if let Some(j) = ffprobe_json(&["-show_frames", "-select_streams", "v:0", "-show_entries", "frame=key_frame"], &path) {
+        let keys = j["frames"].as_array().unwrap().iter().filter(|f| f["key_frame"] == 1).count();
+        assert_eq!(keys, 4, "24 frames, a keyframe every 6");
+    }
+    // a 4:2:0 stream has no odd frame size: the export rounds it to even
+    let odd = ExportSettings { path: sc.path("odd.mp4"), include_audio: false, frame_size: Some((321, 181)), ..h.clone() };
+    export(&p, seq, &odd, &m, &Progress::default()).unwrap();
+    let src = filmcraft_codecs::open_bytes("odd.mp4", std::fs::read(sc.path("odd.mp4")).unwrap().into()).unwrap();
+    let v = src.info().video.clone().unwrap();
+    assert!(v.width.is_multiple_of(2) && v.height.is_multiple_of(2) && v.width.abs_diff(321) == 1 && v.height.abs_diff(181) == 1, "{}x{}", v.width, v.height);
 }
 
 #[test]

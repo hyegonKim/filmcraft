@@ -1,6 +1,6 @@
 # Where FilmCraft falls short of Premiere Pro
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-30 · **Change:** minor (G14 catalog counts refreshed; G13 GIF binary transparency retained) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-11-08 · **Change:** minor (G3 HEVC 4:2:2 10-bit decode; G5 VideoToolbox HEVC Main 10 HDR encode; G13 HEVC software encoder and 8K presets) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
 
 Every known shortfall, one entry each, ranked by what most stops an editor using FilmCraft for real
 work. This is the work list: agents should prefer it over adding checklist items. Numbers are in
@@ -16,7 +16,7 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 |---|---|---|---|---|
 | G1 | Nothing compares our output with Premiere's | measurement | no, but every ready number depends on it | 40–70 h |
 | G2 | Premiere's `.prproj` cannot be opened | file format | **yes** | 60–120 h |
-| G3 | 10-bit and 4:2:2 camera media needs hardware | codec | yes | 30–50 h |
+| G3 | 10-bit and 4:2:2 camera media needs hardware | codec | yes | 15–25 h |
 | G4 | Crashes at start-up, and no test CI on pull requests | stability | yes | 40–80 h |
 | G5 | Hardware acceleration is partial | hardware | partly | 120–200 h |
 | G6 | No real-world media corpus or workflow acceptance tests | measurement | yes | 40–70 h |
@@ -66,7 +66,8 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 ## G3. 10-bit and 4:2:2 camera media needs hardware
 
 - **Missing:** our H.264 decoder is 8-bit 4:2:0 only (`crates/h264/README.md`: no High 10, High
-  4:2:2, 4:4:4, lossless, interlaced field / MBAFF); HEVC has no 4:2:2 / RExt. Most mirrorless and
+  4:2:2, 4:4:4, lossless, interlaced field / MBAFF); HEVC 4:2:2 (8- and 10-bit) now decodes in
+  software, bit-exact on 15 x265 streams (2026-11-08), but 4:4:4 and the other RExt tools do not. Most mirrorless and
   cinema cameras record exactly these (Sony XAVC S-I / XAVC HS 4:2:2 10-bit, Panasonic, Canon
   XF-AVC, Fujifilm).
 - **Evidence:** #626 (Panasonic Lumix 4K 10-bit 4:2:2 MOV). On macOS VideoToolbox decodes 10-bit
@@ -74,8 +75,8 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
   there is no software fallback, so the clip fails. Premiere decodes them everywhere (and in
   hardware on Apple silicon, Intel and NVIDIA Blackwell).
 - **Impact:** camera originals from most current cameras do not open on Windows or Linux.
-- **Estimate:** H.264 High 10 + High 4:2:2 (chroma geometry, deblocking, transforms) 15–25 h;
-  HEVC Main 4:2:2 10 (RExt subset) 15–25 h. Doc: [codec-parity.md](codec-parity.md).
+- **Estimate:** H.264 High 10 + High 4:2:2 (chroma geometry, deblocking, transforms) 15–25 h
+  (HEVC Main 4:2:2 10 is done). Doc: [codec-parity.md](codec-parity.md).
 
 ## G4. Crashes at start-up, and no test CI on pull requests
 
@@ -104,11 +105,11 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 
 - **Have:** hardware decode on macOS (VideoToolbox H.264 / HEVC), Windows (Media Foundation /
   D3D11: H.264, HEVC, VP9, AV1) and Linux (VA-API and NVDEC: H.264, HEVC); hardware encode
-  VideoToolbox H.264 / HEVC 8-bit, NVENC H.264 (Windows, Linux) and HEVC incl. Main 10 HDR
-  (Windows); GPU compositing, blend modes, 34 effect ids incl. Lumetri basic / creative / vignette,
+  VideoToolbox H.264 / HEVC incl. HEVC Main 10 HDR (PQ / HLG, P010 input, HDR10 metadata),
+  NVENC H.264 (Windows, Linux) and HEVC incl. Main 10 HDR (Windows); GPU compositing, blend modes, 34 effect ids incl. Lumetri basic / creative / vignette,
   GPU export rendering (#421).
 - **Missing:** zero-copy decoded frames into wgpu (every frame is read back to the CPU and
-  re-uploaded); VideoToolbox Main 10 / HDR HEVC encode and B-frames; ProRes hardware decode /
+  re-uploaded); VideoToolbox B-frames; ProRes hardware decode /
   encode on Apple silicon; Intel Quick Sync and AMD AMF encoders (and their 4:2:2 decode);
   VA-API VP9 / AV1 and VA-API encode; HEVC encode on Linux; AV1 hardware encode; ~48 of Premiere's
   ~82 accelerated effects (keys, masks, Lumetri curves / wheels / HSL, distortions, transitions);
@@ -238,11 +239,14 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 
 - **Missing:** AV1 export (software or hardware), MPEG-2 / DVD / Blu-ray, DCP, JPEG 2000 MXF,
   AS-10 / AS-11, XDCAM HD MXF, P2, PIZ / PXR24 / B44 / DWA OpenEXR compression, MP3 audio,
-  interlaced encoding, smart render, HEVC software encoder (HEVC exists only where a hardware
-  encoder does).
+  interlaced encoding, smart render; B-frames, deblocking and SAO in our HEVC encoder (its files
+  are larger than a hardware encoder's).
 - **Have:** PNG, TIFF, BMP, JPEG, Targa and DPX (10-bit) image sequences (#779); OpenEXR
   sequences (half float, linear; uncompressed, RLE, ZIPS or ZIP; #806, #874); AAC Audio
-  (audio-only `.m4a`, or ADTS `.aac`; #814); ProRes 4444 / 4444 XQ in the export UI (#342).
+  (audio-only `.m4a`, or ADTS `.aac`; #814); ProRes 4444 / 4444 XQ in the export UI (#342); a
+  software HEVC encoder (`crates/hevcenc`: Main / Main 10 with HDR10 metadata, intra and P
+  pictures; 4.8 fps at 1080p, 0.33 fps at 8K on an M1), so H.265 exports on every machine with the
+  hardware encoder preferred; 8K UHD / DCI sequences and H.264 / H.265 8K presets.
 - **GIF transparency:** Include Alpha Channel preserves binary transparency (#3396), with an
   explicit 128/255 alpha threshold; decoded synthetic animation tests cover moving transparent
   regions and clearing prior frames. Partial transparency remains a GIF limitation. See the
@@ -361,3 +365,4 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 | 2026-10-21 | minor | G10: PSD stills import the flattened composite, 8/16-bit grayscale and RGB (#2116) |
 | 2026-10-24 | minor | G8: dragging the cut on a transition's timeline in Effect Controls moves the cut, and the transition moves with it (#577) |
 | 2026-10-26 | minor | G13: optional GIF binary transparency, threshold and frame-disposal regression coverage (#3396); estimates unchanged |
+| 2026-11-08 | minor | G3: HEVC 4:2:2 8/10-bit software decode (15 streams bit-exact), estimate 30–50 → 15–25 h; G5: VideoToolbox HEVC Main 10 HDR encode; G13: software HEVC encoder (H.265 export everywhere), 8K presets and sequence sizes, H.264 Level 6.2 decode |

@@ -31,7 +31,8 @@ and fixture generators.
 | Frame-level multithreading (CTB-row granularity dependencies) | done |
 | Draft mode (non-reference pictures skip deblocking / SAO; reduced-resolution playback only) | done |
 | Tiles / WPP | parsed and decoded sequentially within a picture (parallelism is across pictures) |
-| 4:2:2 / 4:4:4 / monochrome, range-extension tools (RExt), 12-bit+ with extended precision | not yet (`Error::Unsupported`) |
+| 4:2:2, 8- and 10-bit (Main 4:2:2 10 streams without range-extension tools): two stacked chroma transform blocks and cbf flags, the Table 8-3 chroma intra mode mapping, vertical chroma MV scaling, chroma deblocking every 8 luma rows, QpC = Min(qPi, 51), SAO on (CTB / 2, CTB) chroma blocks | done |
+| 4:4:4 / monochrome, range-extension tools (RExt), 12-bit+ with extended precision | not yet (`Error::Unsupported`) |
 | SCC, multilayer (SHVC / MV-HEVC), 3D extensions | not supported (layers > 0 are ignored) |
 
 ## API
@@ -139,6 +140,13 @@ libx265 unless noted (x265 enables WPP by default, so most streams carry entry p
 | uhd_4k_main10 | 3840x2160 | Main 10 ultrafast |
 | vt_main / vt_main10 | 640x360 | Apple VideoToolbox (hevc_videotoolbox), macOS only |
 | synthetic (7 streams) | 96x64 | tiles, PCM, slices, dependent segments, LTR, list modification |
+| intra_422_10 / intra_422_8 | testsrc2+noise 352x288 | 4:2:2 intra, 10 / 8-bit |
+| intra_nosao_nodbk_422_10 / intra_nosao_422_10 | 352x288 | 4:2:2 intra, loop filters off / SAO off |
+| medium_422_10 / slow_422_10 | testsrc2 / mandelbrot 352x288 | 4:2:2 presets (slow: rect + AMP) |
+| bframes_422_10 / weightp_422_10 | 352x288 | 4:2:2 B-pyramid, ref=4 / weightp + weightb on a fade |
+| ctu16_422_10 / tu4_422_10 / constrained_intra_422_10 | 352x288 | 4:2:2 CTB 16, deep TU trees, constrained intra |
+| lossless_422_10 / crf51_422_10 / deblock_m3_3_422_10 | 176x144 / 352x288 | 4:2:2 CU lossless, coarsest quantizer, deblocking and chroma QP offsets |
+| odd_1918x1078_422_10 | 1918x1078 | 4:2:2 conformance-window cropping |
 
 `cargo test -p filmcraft-hevc --test it conformance::coverage_report -- --ignored --nocapture` prints the
 decoder statistics per fixture.
@@ -190,12 +198,11 @@ context-coded bins are branch-free. Single-threaded 4K now splits into CABAC res
 
 ## Known gaps
 
-- 4:2:2 (Main 4:2:2 10, RExt) is the next step: chroma geometry is 4:2:0-specific in `slicedec`
-  (chroma TU placement, second chroma cbf flags, Table 8-3 intra mode mapping), `inter` (vertical
-  chroma MV scaling), `filter` (chroma edge spacing, QpC = Min(qPi, 51)) and `picture`. Range
-  extension tools (implicit / explicit RDPCM, cross-component prediction, extended precision,
-  persistent Rice adaptation, bypass alignment, chroma QP offset lists) are rejected with
-  `Error::Unsupported`.
+- 4:4:4, monochrome and the range extension tools (implicit / explicit RDPCM, cross-component
+  prediction, extended precision, persistent Rice adaptation, bypass alignment, chroma QP offset
+  lists) are rejected with `Error::Unsupported`. 4:2:2 is decoded (Table 8-3's entries 11 and 14
+  map to 12 and 17: the derivation from the angles, confirmed against x265 streams where a block
+  predicted with 16 put whole chroma regions off).
 - Tiles and WPP substreams are decoded sequentially (entry points are parsed but the decoder finds
   substream starts itself); parallelism is at the picture level.
 - Error concealment is minimal: missing references are replaced by grey pictures, undecodable

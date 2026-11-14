@@ -20,10 +20,12 @@ fn the_probe_runs_once_and_registers_the_format() {
     assert_eq!(first, again);
     assert!(warm < Duration::from_millis(50), "the answer is cached: {warm:?}");
 
-    // `register` makes `available(Hevc)` follow the probe; registering again changes nothing
-    assert!(!filmcraft_export::available(Format::Hevc) || first);
+    // H.265 is available whatever the probe says (FilmCraft's own encoder takes what NVENC cannot);
+    // registering, twice, changes neither that nor the probe's answer
+    assert!(filmcraft_export::available(Format::Hevc));
     filmcraft_platform::register();
     filmcraft_platform::register();
-    assert_eq!(filmcraft_export::available(Format::Hevc), first);
+    assert!(filmcraft_export::available(Format::Hevc));
+    assert_eq!(hevc_available(), first);
     assert!(filmcraft_export::available(Format::H264));
 }

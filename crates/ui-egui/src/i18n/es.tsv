@@ -3488,7 +3488,7 @@
 	Main 10 (10-bit, HDR)	Main 10 (10 bits, HDR)
 	Main (8-bit; Main 10 for HDR sequences)	Main (8 bits; Main 10 para secuencias HDR)
 	Encoder	Codificador
-	Hardware (H.265 has no software encoder)	Hardware (H.265 no tiene codificador por software)
+	Hardware where available, otherwise software	Hardware si está disponible; si no, software
 	Hardware (AV1 has no software encoder)	Hardware (AV1 no tiene codificador por software)
 	Text Properties	Propiedades de texto
 	Text Box Height	Altura del cuadro de texto
@@ -3644,7 +3644,6 @@
 	Web Link	Vínculo web
 	Flash Cue Point	Punto de referencia Flash
 	Invalid duration: {error}	Duración no válida: {error}
-	H.265 (HEVC) needs a hardware encoder (NVENC on NVIDIA GPUs, VideoToolbox on macOS); none was found on this machine, and FilmCraft has no software H.265 encoder yet. Choose H.264 or ProRes instead.	H.265 (HEVC) necesita un codificador por hardware (NVENC en GPU NVIDIA, VideoToolbox en macOS); no se encontró ninguno en este equipo y FilmCraft aún no tiene un codificador H.265 por software. Elija H.264 o ProRes.
 	AV1 needs a hardware encoder; none was found on this machine, and FilmCraft has no software AV1 encoder yet.	AV1 necesita un codificador por hardware; no se encontró ninguno en este equipo y FilmCraft aún no tiene un codificador AV1 por software.
 
 # Reviewed Korean transcript cleanup
@@ -3749,3 +3748,6 @@
 	Previous	Anterior
 	Next	Siguiente
 	Enter a valid HH:MM:SS:FF timecode	Introduce un código de tiempo válido HH:MM:SS:FF
+	Frame Size Preset:	Ajuste preestablecido de tamaño del fotograma:
+	Vertical (1080 × 1920)	Vertical (1080 × 1920)
+	Square (1080 × 1080)	Cuadrado (1080 × 1080)

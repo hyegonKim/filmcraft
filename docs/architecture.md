@@ -29,7 +29,7 @@ Design principles:
  L2  edit · codecs · interchange · captions · speech · tts · tts-text
  L1  frame · media · project · audio-dsp · text
  L0  foundation: time · geom · color · bitstream · testkit (dev-dependency only)
-     codecs/containers: isobmff · matroska · mxf · cfb · mpegts · ogg · h264 · h264enc · hevc · vp9 · av1 · mpeg2v · prores · dnx · apv · dng · aac · ac3 · mpa · opus
+     codecs/containers: isobmff · matroska · mxf · cfb · mpegts · ogg · h264 · h264enc · hevc · hevcenc · vp9 · av1 · mpeg2v · prores · dnx · apv · dng · aac · ac3 · mpa · opus
 ```
 
 Crates are named `filmcraft-<dir>` (`crates/time` is `filmcraft-time`). The apps are `filmcraft`
@@ -48,7 +48,8 @@ and `filmcraft-cli`.
 | `mpegts` | L0 | MPEG-2 Systems demux (H.222.0): transport streams (188 / 192-byte BDAV / 204), program streams (MPEG-2 / MPEG-1, VOB, MOD), PSI, PES, PTS / PCR, access-unit index built on open ([README](../crates/mpegts/README.md)) |
 | `ogg` | L0 | Ogg demux (RFC 3533), Ogg Opus timing (RFC 7845 granules, pre-skip, end trimming), Vorbis headers |
 | `h264`, `h264enc` | L0 | H.264 decoder; H.264 encoder |
-| `hevc` | L0 | H.265 Main/Main 10 decoder |
+| `hevc` | L0 | H.265 Main / Main 10 / 4:2:2 decoder |
+| `hevcenc` | L0 | H.265 Main / Main 10 encoder (intra + P pictures, HDR10 SEI), the export's fallback behind the hardware HEVC encoders |
 | `prores` | L0 | ProRes decoder and encoder |
 | `dnx` | L0 | DNxHD / DNxHR (SMPTE ST 2019-1 VC-3) decoder and DNxHR encoder |
 | `apv` | L0 | Advanced Professional Video (IETF RFC 9924) decoder and encoder ([README](../crates/apv/README.md)) |
@@ -294,12 +295,11 @@ file ──► codecs (MP4/MOV, MKV, audio)        demux + decode, GOP-aware see
   stream. The same NVENC session also encodes H.265 (HEVC Main 8-bit 4:2:0 SDR, or Main 10 HDR: PQ / HLG,
   BT.2020, limited range, from the float R'G'B' pictures through `rgbf_to_yuv420_10` into P010 input
   buffers, with the HDR10 static metadata as SEI on every IDR for PQ; the `hvcC` is built from the SPS
-  the encoder wrote). An HDR sequence exports as HDR H.265 only where a registered probe says so
-  (`filmcraft_export::register_hdr_probe`, `hdr_available`; NVENC with 10-bit support), otherwise it is
-  tone-mapped to SDR as on macOS: `register()` hands `platform::nvenc::hevc_available` to
-  `filmcraft_export::register_format_probe`, so the H.265 format exists where an HEVC encoder does,
-  and choosing it is the opt-in (the Hardware encoding toggle governs H.264 only). With no software
-  H.265 encoder, what NVENC declines is counted and ends the export with an error that says why.
+  the encoder wrote). An HDR sequence always exports as HDR H.265; a registered probe
+  (`filmcraft_export::register_hdr_probe`, `hdr_available`; NVENC with 10-bit support) says whether
+  the hardware takes it. Choosing H.265 is the opt-in for the hardware encoder (the Hardware
+  encoding toggle governs H.264 only), and what NVENC declines is counted and goes to the software
+  encoder (`filmcraft-hevcenc`), which also serves machines without an HEVC encoder.
   On macOS, `platform::hardware_encode` (VideoToolbox H.264, opt-in the same way, and H.265) is
   registered likewise. It too takes the RGBA pictures as they are (`32BGRA` buffers tagged BT.709)
   and VideoToolbox converts them to 4:2:0, so the encode thread only copies: converting on the CPU

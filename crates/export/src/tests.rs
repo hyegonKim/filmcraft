@@ -300,14 +300,16 @@ fn hdr_exports_signal_pq_and_hlg() {
     for (ws, fmt, ext, transfer, ff_transfer) in [
         (WorkingSpace::Rec2100Pq, Format::ProRes, "mov", Transfer::Pq, "smpte2084"),
         (WorkingSpace::Rec2100Pq, Format::H264, "mp4", Transfer::Pq, "smpte2084"),
+        (WorkingSpace::Rec2100Pq, Format::Hevc, "mp4", Transfer::Pq, "smpte2084"),
         (WorkingSpace::Rec2100Hlg, Format::ProRes, "mov", Transfer::Hlg, "arib-std-b67"),
         (WorkingSpace::Rec2100Hlg, Format::H264, "mp4", Transfer::Hlg, "arib-std-b67"),
+        (WorkingSpace::Rec2100Hlg, Format::Hevc, "mp4", Transfer::Hlg, "arib-std-b67"),
     ] {
         let (p, seq, m) = project();
         let mut p = (*p).clone();
         p.sequence_mut(seq).unwrap().settings.color = ColorPipeline { working: ws, ..ColorPipeline::REC709 };
         let p = Arc::new(p);
-        let path = tmp(&format!("hdr-{}.{ext}", ws.id()));
+        let path = tmp(&format!("hdr-{}-{}.{ext}", ws.id(), fmt.id()));
         let s = ExportSettings { format: fmt, path: path.clone(), include_audio: false, ..Default::default() };
         export(&p, seq, &s, &m, &Progress::default()).unwrap();
         // our demuxer/decoder sees the signalling
@@ -337,7 +339,7 @@ fn hdr_exports_signal_pq_and_hlg() {
                 "-select_streams",
                 "v:0",
                 "-show_entries",
-                "stream=color_transfer,color_primaries,color_space:stream_side_data",
+                "stream=codec_name,profile,pix_fmt,color_transfer,color_primaries,color_space:stream_side_data",
                 "-of",
                 "default=nw=1",
                 &path,
@@ -348,6 +350,10 @@ fn hdr_exports_signal_pq_and_hlg() {
         assert!(txt.contains(&format!("color_transfer={ff_transfer}")), "{path}: {txt}");
         assert!(txt.contains("color_primaries=bt2020"), "{path}: {txt}");
         assert!(txt.contains("color_space=bt2020nc"), "{path}: {txt}");
+        if fmt == Format::Hevc {
+            // FilmCraft's encoder: Main 10, 10-bit 4:2:0
+            assert!(txt.contains("codec_name=hevc") && txt.contains("profile=Main 10") && txt.contains("pix_fmt=yuv420p10le"), "{path}: {txt}");
+        }
         if transfer == Transfer::Pq {
             assert!(txt.contains("Mastering display metadata") && txt.contains("max_luminance=10000000/10000"), "{path}: {txt}");
             assert!(txt.contains("Content light level metadata"), "{path}: {txt}");

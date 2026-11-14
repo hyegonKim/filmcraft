@@ -33,6 +33,7 @@ fixture_tests!(
     main_cabac_b,
     high_720p,
     high_1080p,
+    high_8k_dci,
     crop_1918x1078,
     bpyramid,
     weightp2,

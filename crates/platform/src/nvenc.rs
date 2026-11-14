@@ -8,7 +8,7 @@
 //! or the `hvcC` (HEVC, see [`hevc`]). One session, ring and NV12 path serves both codecs; the
 //! codec only chooses the GUIDs, the codec configuration and how NAL units are told apart.
 //! [`export`] plugs it into Export: as an alternative to the software encoder for H.264, and as the
-//! only encoder of the H.265 format (which has no software encoder).
+//! preferred encoder of the H.265 format (the software encoder takes what it declines).
 //!
 //! ```text
 //! RGBA (the export pipeline) ──► ABGR input buffer ──NVENC (BT.709 limited 4:2:0 on the GPU)──►
@@ -26,7 +26,7 @@
 //! call); this module is safe
 //! code. Hardware H.264 encoding never replaces an export that works in software: the factory
 //! declines what NVENC cannot do (no NVIDIA GPU or driver, sizes, HDR, two-pass, MXF...) and the
-//! software encoder takes over. A declined HEVC export is an error that says why.
+//! software encoder takes over, for HEVC too (`filmcraft-hevcenc`).
 
 #[allow(unsafe_code)]
 pub(crate) mod device;

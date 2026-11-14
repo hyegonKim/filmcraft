@@ -5,11 +5,16 @@ use super::{Align2, Color32, DEFAULT_PRESET, FilmcraftApp, Reg, Sense, Tokens, b
 // Quick Export (header)
 // ---------------------------------------------------------------------------------------------
 
-/// Presets offered by Quick Export: favourites first, then the common delivery presets.
+/// Presets offered by Quick Export: favourites first, then the common delivery presets this machine
+/// can encode (H.265 ones need an H.265 encoder).
 fn quick_presets(app: &FilmcraftApp) -> Vec<String> {
     let mut v: Vec<String> =
         app.session.export_presets.all().iter().filter(|p| app.session.export_presets.is_favorite(&p.name)).map(|p| p.name.clone()).collect();
-    for p in builtin_presets().into_iter().filter(|p| p.category == "Match Source" || p.category == "Web & Social").map(|p| p.name) {
+    let common = builtin_presets()
+        .into_iter()
+        .filter(|p| (p.category == "Match Source" || p.category == "Web & Social") && filmcraft_engine::export::available(p.settings.format))
+        .map(|p| p.name);
+    for p in common {
         if !v.contains(&p) {
             v.push(p);
         }

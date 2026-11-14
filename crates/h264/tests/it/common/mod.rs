@@ -159,6 +159,17 @@ pub const FIXTURES: &[Fixture] = &[
     Fixture { name: "main_cabac_b", source: "testsrc2", width: 352, height: 288, frames: 30, filter: NOISE, args: &["-profile:v", "main"] },
     Fixture { name: "high_720p", source: "smptehdbars", width: 1280, height: 720, frames: 10, filter: NOISE, args: &["-profile:v", "high"] },
     Fixture { name: "high_1080p", source: "testsrc2", width: 1920, height: 1080, frames: 6, filter: "", args: &["-profile:v", "high"] },
+    // 8K DCI, the largest frame Level 6.2 allows (138 240 of its 139 264 macroblocks); two frames
+    // keep the raw reference at ~106 MB
+    Fixture {
+        name: "high_8k_dci",
+        source: "testsrc2",
+        width: 8192,
+        height: 4320,
+        frames: 2,
+        filter: "",
+        args: &["-profile:v", "high", "-level", "6.2", "-x264-params", "bframes=0:ref=1"],
+    },
     Fixture { name: "crop_1918x1078", source: "testsrc2", width: 1918, height: 1078, frames: 5, filter: NOISE, args: &["-profile:v", "high"] },
     Fixture {
         name: "bpyramid",

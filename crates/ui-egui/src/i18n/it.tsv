@@ -3469,7 +3469,7 @@
 	Main 10 (10-bit, HDR)	Main 10 (10 bit, HDR)
 	Main (8-bit; Main 10 for HDR sequences)	Main (8 bit; Main 10 per le sequenze HDR)
 	Encoder	Codificatore
-	Hardware (H.265 has no software encoder)	Hardware (H.265 non ha un codificatore software)
+	Hardware where available, otherwise software	Hardware se disponibile, altrimenti software
 	Hardware (AV1 has no software encoder)	Hardware (AV1 non ha un codificatore software)
 	Text Properties	Proprietà testo
 	Text Box Height	Altezza casella di testo
@@ -3696,3 +3696,6 @@
 	Previous	Precedente
 	Next	Successivo
 	Enter a valid HH:MM:SS:FF timecode	Inserisci un timecode valido HH:MM:SS:FF
+	Frame Size Preset:	Predefinito dimensione fotogramma:
+	Vertical (1080 × 1920)	Verticale (1080 × 1920)
+	Square (1080 × 1080)	Quadrato (1080 × 1080)

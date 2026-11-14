@@ -284,17 +284,20 @@ fn h265_shows_the_h264_family_controls_without_the_h264_only_ones() {
     ] {
         assert!(d.has(id), "H.265: {id}");
     }
-    // Main is its only profile, the level is the encoder's choice, and hardware is the only encoder
+    // Main (Main 10 for HDR) is its only profile, the level is the encoder's choice, and the
+    // hardware encoder is used whenever it takes the export, whatever the H.264 checkbox says
     for id in ["export.video.profile", "export.video.level", "export.video.hardwareEncoding"] {
         assert!(!d.has(id), "H.265 has no {id}");
     }
-    let sum = d.ok("ui.elements", json!({"prefix": "export.summary"}))[0]["label"].as_str().unwrap().to_string();
-    assert!(sum.contains("HEVC Main") && sum.contains("Target 20.00 Mbps"), "{sum}");
-    // headless there is no hardware encoder: H.265 says so where the format is chosen (a preset
-    // can still name it), and its entry in the Format list is greyed out with the same reason
-    assert!(!filmcraft_engine::export::available(Format::Hevc), "no NVENC / VideoToolbox probe is registered here");
-    let why = d.ok("ui.elements", json!({"prefix": "export.format.unavailable"}))[0]["label"].as_str().unwrap().to_string();
-    assert!(why.contains("hardware encoder") && why.contains("H.265") && why.contains("H.264 or ProRes"), "{why}");
+    let label = |d: &mut Driver, id: &str| d.ok("ui.elements", json!({"prefix": id}))[0]["label"].as_str().unwrap_or_default().to_string();
+    assert_eq!(label(&mut d, "export.video.hevcProfile"), "Main (8-bit; Main 10 for HDR sequences)");
+    assert_eq!(label(&mut d, "export.video.encoder"), "Hardware where available, otherwise software");
+    let sum = label(&mut d, "export.summary");
+    assert!(sum.contains("HEVC Main / Main 10 for HDR") && sum.contains("Target 20.00 Mbps"), "{sum}");
+    // headless there is no hardware encoder, and H.265 is available anyway (FilmCraft's encoder):
+    // nothing is greyed out
+    assert!(filmcraft_engine::export::available(Format::Hevc), "the built-in encoder makes it available");
+    assert!(!d.has("export.format.unavailable"), "H.265 is not marked unavailable");
     d.click("export.format");
     let hevc = Format::ALL.iter().position(|f| *f == Format::Hevc).unwrap();
     let entries = d.ok("ui.elements", json!({"prefix": format!("export.format.option.{hevc}")}));

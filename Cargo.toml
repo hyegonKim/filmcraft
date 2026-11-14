@@ -28,6 +28,7 @@ filmcraft-mpa = { path = "crates/mpa" }
 filmcraft-ogg = { path = "crates/ogg" }
 filmcraft-h264 = { path = "crates/h264" }
 filmcraft-hevc = { path = "crates/hevc" }
+filmcraft-hevcenc = { path = "crates/hevcenc" }
 filmcraft-vp8 = { path = "crates/vp8" }
 filmcraft-vp9 = { path = "crates/vp9" }
 filmcraft-prores = { path = "crates/prores" }
@@ -119,6 +120,9 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.filmcraft-hevc]
+opt-level = 3
+
+[profile.dev.package.filmcraft-hevcenc]
 opt-level = 3
 
 [profile.dev.package.filmcraft-prores]
