@@ -8,8 +8,8 @@ fn run(w: usize, h: usize, frames: usize, bd: u32) {
     let mut cfg = EncoderConfig::new(w as u32, h as u32, 30, 1);
     cfg.bit_depth = bd;
     cfg.keyint = 30;
-    // the export's slice count: one per two CTU rows
-    cfg.slices = h.div_ceil(64).max(1);
+    // Match the export: one per four CTU rows, capped at 16 slices.
+    cfg.slices = h.div_ceil(128).clamp(1, 16);
     cfg.rate = RateControl::Average { kbps: (w * h / 200) as u32, max_kbps: (w * h / 120) as u32 };
     let mut enc = Encoder::new(cfg).unwrap();
     let max = f64::from((1u32 << bd) - 1);

@@ -1,0 +1,49 @@
+{
+  "date": "2026-11-14",
+  "base_source": "0c712e78b42ff191164a8b4902ae6a078feebae9",
+  "host": "Apple M1, 8 CPU, 16 GiB, macOS arm64",
+  "rust": "1.99.1",
+  "external_ffmpeg": "9.0.2, isolated HEVC-only build",
+  "external_kvazaar": "2.3.2",
+  "require_oracles": true,
+  "full_sweep": true,
+  "random_rounds_per_seed": 400,
+  "seed": 20771,
+  "fresh_fixture_root": true,
+  "libtest": {
+    "passed": 1,
+    "failed": 0,
+    "ignored": 0,
+    "seconds": 31.78
+  },
+  "source_test_unchanged": true,
+  "raw_log_sha256": "6dfd2a5dfa23000ede234692b7248efbe8edf446de7c4d39b00709974a6756ed",
+  "external_ffmpeg_sha256": "763230284fbb4780c3fb1c9905e110d2e7810d9eefecadbed4f24117f6e46af7",
+  "fixtures": [
+    {
+      "name": "hevc_fz_422_10.hevc",
+      "bytes": 6299,
+      "sha256": "dfe8dc57c2972d8574fff7a12ef5308565d91c1f7e22da8ad99fcd0c2a940bcf"
+    },
+    {
+      "name": "hevc_fz_main10.hevc",
+      "bytes": 6266,
+      "sha256": "e8c0f8c8179f3e0cc4eb2b9a0947ba60c22205250b01c1b83295f549a00a6079"
+    },
+    {
+      "name": "hevc_fz_main_b.hevc",
+      "bytes": 3301,
+      "sha256": "215e74164f5194ae85b0416be739740de8f93cdd586d241e9b96fdf717a35b8d"
+    },
+    {
+      "name": "hevc_fz_tiles_kvazaar.hevc",
+      "bytes": 2992,
+      "sha256": "e241e54f4e71ef8d8033189aa19b3d8c6ea567c3e831a2d1621c07c1fff538e8"
+    },
+    {
+      "name": "hevc_fz_wpp_slices.hevc",
+      "bytes": 6371,
+      "sha256": "8f27ff15dcdca8ef59b3a623d010ab2c32f100eb5f0484e8f05ee7933bc19100"
+    }
+  ]
+}

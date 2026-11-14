@@ -71,13 +71,33 @@ without them).
 ## Performance
 
 `cargo test --release -p filmcraft-hevcenc --test perf -- --ignored --nocapture` on an Apple M1
-(8 cores), the export's slice count (one per two CTU rows), average bitrate:
+(8 cores), the old benchmark slice count (one per two CTU rows), average bitrate. These historical
+measurements predate the export's current one-per-128-rows / maximum-16 policy; rerun the
+benchmark for current-policy numbers:
 
 | Picture | Speed |
 |---|---|
 | 1920x1080 8-bit | 4.8 frames/s |
 | 3840x2160 10-bit | 1.2 frames/s |
 | 7680x4320 8-bit | 0.33 frames/s |
+
+### Current delivery-policy run (2026-11-14)
+
+After aligning `tests/perf.rs` with the export policy (one slice per 128 luma rows, at most 16),
+this Apple M1 / 16 GiB run measured the following. Frame generation is included. These are short
+synthetic clips on a machine with other applications running, not real-time or long-form guarantees.
+
+| Picture | Frames | Seconds | Frames/s |
+| --- | --- | --- | --- |
+| 1920x1080 8-bit | 30 | 9.22 | 3.25 |
+| 3840x2160 10-bit | 8 | 10.21 | 0.78 |
+| 7680x4320 8-bit | 3 | 11.87 | 0.25 |
+
+The explicit `delivery_quality` test also writes source/reconstruction files and a quality/bitrate
+CSV for a 120-frame synthetic 720p sweep. Its encode-only timings exclude source generation and I/O;
+they are not directly comparable with the table above. See
+[the independent validation report](../../docs/h265-validation-2026-11-14.md) for the procedure,
+quality measurements and limitations.
 
 ## Limitations / not yet implemented
 
