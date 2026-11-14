@@ -13,11 +13,19 @@ use std::collections::{HashMap, HashSet};
 
 use roxmltree::{Node, NodeId};
 
+use filmcraft_geom::Vec2;
 use filmcraft_media::MediaKind;
-use filmcraft_project::{Caption, CaptionFormat, CaptionTrack, ClipId, ItemId, Label, Marker, MarkerId, MarkerKind, Sequence, TrackId, TrackKind};
+use filmcraft_project::{
+    BinId, Caption, CaptionFormat, CaptionTrack, ClipId, Interpolation, ItemId, Keyframe, Label, Marker, MarkerId, MarkerKind, Param, ParamValue, Sequence,
+    TimeInterpolation, TrackId, TrackItem, TrackKind, Transition, TransitionAlign, TransitionId, effect::BLEND_MODES, effect::find_effect_by_name, find_effect,
+    marker_web_url,
+};
 use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
 
-use crate::common::{Builder, MediaSpec, empty_sequence, file_name, file_stem, kind_from_ext, rate_from_f64, resolve_path, settings_for};
+use crate::common::{
+    Builder, MediaSpec, empty_sequence, file_name, file_stem, gain_to_db, kind_from_ext, label_from, rate_from_f64, resolve_path, set_param, settings_for,
+    transition_effect,
+};
 use crate::xml::{child, child_text, elements, parse, text};
 use crate::{Error, ImportOptions, Imported, Report, Result};
 
@@ -468,6 +476,10 @@ struct PrprojImporter<'a, 'i, 'r> {
     by_id: HashMap<&'i str, Node<'a, 'i>>,
     by_uid: HashMap<&'i str, Node<'a, 'i>>,
     media_by_node: HashMap<usize, ItemId>,
+    node_bin: HashMap<usize, BinId>,
+    bin_by_node: HashMap<usize, BinId>,
+    link_groups: HashMap<String, u64>,
+    clip_marker_nodes: HashSet<usize>,
     /// A property search stopped at [`SEARCH_BUDGET`] (reported once).
     search_cut: Cell<bool>,
 }
@@ -535,6 +547,108 @@ impl<'a, 'i, 'r> PrprojImporter<'a, 'i, 'r> {
         None
     }
 
+    fn parse_node_label(&self, n: Node<'a, 'i>) -> Option<Label> {
+        let resolved = self.resolve(n);
+        let raw = child_text(resolved, "ColorLabel")
+            .or_else(|| child_text(resolved, "Label"))
+            .or_else(|| resolved.attribute("ColorLabel"))
+            .or_else(|| resolved.attribute("Label"))
+            .or_else(|| self.find_text(resolved, &["ColorLabel", "Label"]))?;
+        Label::from_color_name(raw.trim()).or_else(|| label_from(raw.trim()))
+    }
+
+    fn parse_bins(&mut self, root: Node<'a, 'i>) {
+        let mut visited = HashSet::new();
+        let mut roots = Vec::new();
+        for n in root.descendants().filter(|n| n.is_element()) {
+            if n.attribute("ObjectRef").is_some() || n.attribute("ObjectURef").is_some() {
+                continue;
+            }
+            if matches!(n.tag_name().name(), "RootProjectItem" | "Project") {
+                roots.push((n, true));
+            }
+        }
+        for (n, _) in roots {
+            self.walk_bin_node(n, None, &mut visited, 0);
+        }
+        let mut top_bins = Vec::new();
+        for n in elements(root) {
+            let rn = self.resolve(n);
+            if matches!(rn.tag_name().name(), "BinProjectItem" | "Bin" | "Folder") && !visited.contains(&(rn.id().get() as usize)) {
+                top_bins.push(rn);
+            }
+        }
+        for b in top_bins {
+            self.walk_bin_node(b, None, &mut visited, 0);
+        }
+    }
+
+    fn walk_bin_node(&mut self, n: Node<'a, 'i>, parent: Option<BinId>, visited: &mut HashSet<usize>, depth: usize) {
+        if depth > 16 {
+            return;
+        }
+        let n = self.resolve(n);
+        let nid = n.id().get() as usize;
+        let tag = n.tag_name().name();
+        if matches!(tag, "RootProjectItem" | "Project" | "Items" | "Children" | "BinItems" | "ProjectItems" | "SubBins") {
+            if !visited.insert(nid) {
+                return;
+            }
+            let children_nodes: Vec<Node<'a, 'i>> = elements(n).map(|c| self.resolve(c)).collect();
+            for c in children_nodes {
+                self.walk_bin_node(c, parent, visited, depth + 1);
+            }
+            return;
+        }
+        if matches!(tag, "BinProjectItem" | "Bin" | "Folder") {
+            let bin_id = if let Some(&existing) = self.bin_by_node.get(&nid) {
+                Some(existing)
+            } else {
+                let raw_name = child_text(n, "Name").or_else(|| n.attribute("Name")).or_else(|| child_text(n, "Title")).unwrap_or("").trim();
+                if raw_name.is_empty() || (parent.is_none() && (raw_name.eq_ignore_ascii_case("root") || raw_name.eq_ignore_ascii_case("rootprojectitem"))) {
+                    parent
+                } else {
+                    let b = self.b.bin(raw_name, parent);
+                    self.bin_by_node.insert(nid, b);
+                    Some(b)
+                }
+            };
+            if !visited.insert(nid) {
+                return;
+            }
+            let children_nodes: Vec<Node<'a, 'i>> = elements(n).map(|c| self.resolve(c)).collect();
+            for c in children_nodes {
+                self.walk_bin_node(c, bin_id, visited, depth + 1);
+            }
+            return;
+        }
+        if let Some(b) = parent {
+            self.assign_bin_recursive(n, b, 0);
+        }
+    }
+
+    fn assign_bin_recursive(&mut self, n: Node<'a, 'i>, bin: BinId, depth: usize) {
+        if depth > 4 {
+            return;
+        }
+        let n = self.resolve(n);
+        let nid = n.id().get() as usize;
+        let tag = n.tag_name().name();
+        if matches!(tag, "BinProjectItem" | "Bin" | "Folder") {
+            return;
+        }
+        self.node_bin.entry(nid).or_insert(bin);
+        for c in elements(n) {
+            let rc = self.resolve(c);
+            if matches!(
+                rc.tag_name().name(),
+                "ClipProjectItem" | "MasterClip" | "Clip" | "SubClip" | "Media" | "MediaSource" | "Sequence" | "ClipItem" | "ProjectItem"
+            ) {
+                self.assign_bin_recursive(rc, bin, depth + 1);
+            }
+        }
+    }
+
     fn register_all_media(&mut self, root: Node<'a, 'i>) {
         let mut media_nodes = Vec::new();
         for n in root.descendants().filter(|n| n.is_element()) {
@@ -550,11 +664,11 @@ impl<'a, 'i, 'r> PrprojImporter<'a, 'i, 'r> {
             }
         }
         for n in media_nodes {
-            let _ = self.ensure_media_for_node(n, FrameRate::FPS_24);
+            let _ = self.ensure_media_for_node(n, FrameRate::FPS_24, None);
         }
     }
 
-    fn ensure_media_for_node(&mut self, n: Node<'a, 'i>, default_rate: FrameRate) -> Option<ItemId> {
+    fn ensure_media_for_node(&mut self, n: Node<'a, 'i>, default_rate: FrameRate, fallback_bin: Option<BinId>) -> Option<ItemId> {
         let resolved = self.resolve(n);
         let key_id = resolved.id().get() as usize;
         if let Some(&existing) = self.media_by_node.get(&key_id) {
@@ -576,7 +690,13 @@ impl<'a, 'i, 'r> PrprojImporter<'a, 'i, 'r> {
             start_tc: None,
             kind: Some(kind),
         };
-        let item_id = self.b.file_media(&resolved_path, name, &resolved_path, &spec, None);
+        let bin = self.node_bin.get(&key_id).copied().or(fallback_bin);
+        let item_id = self.b.file_media(&resolved_path, name, &resolved_path, &spec, bin);
+        if let Some(label) = self.parse_node_label(resolved)
+            && let Some(it) = self.b.p.item_mut(item_id)
+        {
+            it.label = label;
+        }
         self.media_by_node.insert(key_id, item_id);
         Some(item_id)
     }
@@ -597,10 +717,22 @@ impl<'a, 'i, 'r> PrprojImporter<'a, 'i, 'r> {
             })
             .unwrap_or((1920, 1080));
 
-        let settings = settings_for(rate, width, height, false);
-        let seq_id = self.b.reserve_sequence(name, settings.clone(), None);
+        let drop_frame = self.find_text(seq_node, &["DropFrame", "IsDropFrame"]).and_then(parse_bool).unwrap_or(false);
+        let settings = settings_for(rate, width, height, drop_frame);
+        let bin = self.node_bin.get(&(seq_node.id().get() as usize)).copied();
+        let seq_id = self.b.reserve_sequence(name, settings.clone(), bin);
+        if let Some(label) = self.parse_node_label(seq_node)
+            && let Some(it) = self.b.p.item_mut(seq_id)
+        {
+            it.label = label;
+        }
         self.b.top.push(seq_id);
         let mut seq = empty_sequence(settings);
+        if let Some(tc_str) = self.find_text(seq_node, &["ZeroPoint", "StartTimecode"])
+            && let Some(tc_tick) = parse_premiere_tick(tc_str, rate)
+        {
+            seq.start_timecode = rate.frame_at(tc_tick);
+        }
 
         let mut video_track_nodes = Vec::new();
         let mut audio_track_nodes = Vec::new();
@@ -639,28 +771,132 @@ impl<'a, 'i, 'r> PrprojImporter<'a, 'i, 'r> {
             let _ = self.b.ensure_tracks(&mut seq, TrackKind::Audio, 1);
         }
 
-        for m_node in seq_node.descendants().filter(|n| n.is_element() && n.tag_name().name() == "Marker") {
-            let rm = self.resolve(m_node);
-            if let Some(start) = child_text(rm, "Start").or_else(|| child_text(rm, "InPoint")).and_then(|s| parse_premiere_tick(s, rate)) {
-                let m_name = child_text(rm, "Name").unwrap_or("").to_string();
-                let comment = child_text(rm, "Comment").unwrap_or("").to_string();
-                let dur = child_text(rm, "Duration").and_then(|s| parse_premiere_tick(s, rate)).unwrap_or(Tick::ZERO);
-                seq.markers.push(Marker {
-                    id: MarkerId(self.b.alloc()),
-                    start,
-                    duration: dur,
-                    name: m_name,
-                    comment,
-                    kind: MarkerKind::Comment,
-                    color: Label::Cerulean,
-                    author: Default::default(),
-                    custom_color: Default::default(),
-                    url: Default::default(),
-                });
-            }
-        }
+        self.link_matching_av_clips(&mut seq);
+        self.collect_sequence_markers(seq_node, &mut seq, rate);
 
         self.b.put_sequence(seq_id, seq);
+    }
+
+    fn link_matching_av_clips(&mut self, seq: &mut Sequence) {
+        let mut unlinked_video: Vec<(usize, usize, ItemId, Tick, Tick, Tick)> = Vec::new();
+        for (vt_idx, vt) in seq.video_tracks.iter().enumerate() {
+            for (ci, clip) in vt.items.iter().enumerate() {
+                if clip.link.is_none() {
+                    unlinked_video.push((vt_idx, ci, clip.item, clip.start, clip.duration, clip.source_in));
+                }
+            }
+        }
+        for (vt_idx, v_ci, item_id, start, dur, src_in) in unlinked_video {
+            let mut matched_audio = None;
+            'audio_search: for (at_idx, at) in seq.audio_tracks.iter().enumerate() {
+                for (a_ci, aclip) in at.items.iter().enumerate() {
+                    if aclip.link.is_none() && aclip.item == item_id && aclip.start == start && aclip.duration == dur && aclip.source_in == src_in {
+                        matched_audio = Some((at_idx, a_ci));
+                        break 'audio_search;
+                    }
+                }
+            }
+            if let Some((at_idx, a_ci)) = matched_audio {
+                let lid = self.b.link_id();
+                if let Some(vc) = seq.video_tracks.get_mut(vt_idx).and_then(|t| t.items.get_mut(v_ci)) {
+                    vc.link = Some(lid);
+                }
+                if let Some(ac) = seq.audio_tracks.get_mut(at_idx).and_then(|t| t.items.get_mut(a_ci)) {
+                    ac.link = Some(lid);
+                }
+            }
+        }
+    }
+
+    fn collect_sequence_markers(&mut self, seq_node: Node<'a, 'i>, seq: &mut Sequence, rate: FrameRate) {
+        let mut seen = HashSet::new();
+        for c in elements(seq_node) {
+            let rc = self.resolve(c);
+            match rc.tag_name().name() {
+                "Marker" => {
+                    let mid = rc.id().get() as usize;
+                    if !self.clip_marker_nodes.contains(&mid) && seen.insert(mid) && let Some(m) = self.parse_marker_node(rc, rate) {
+                        seq.markers.push(m);
+                    }
+                }
+                "Markers" => {
+                    for m in elements(rc) {
+                        let rm = self.resolve(m);
+                        let mid = rm.id().get() as usize;
+                        if rm.tag_name().name() == "Marker"
+                            && !self.clip_marker_nodes.contains(&mid)
+                            && seen.insert(mid)
+                            && let Some(mk) = self.parse_marker_node(rm, rate)
+                        {
+                            seq.markers.push(mk);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for m_node in seq_node.descendants().filter(|n| n.is_element() && n.tag_name().name() == "Marker") {
+            if m_node.ancestors().any(|a| {
+                matches!(
+                    a.tag_name().name(),
+                    "VideoClipTrackItem" | "AudioClipTrackItem" | "ClipTrackItem" | "TrackItem" | "ClipItem" | "SubClip" | "MasterClip"
+                )
+            }) {
+                continue;
+            }
+            let rm = self.resolve(m_node);
+            let mid = rm.id().get() as usize;
+            if !self.clip_marker_nodes.contains(&mid) && seen.insert(mid) && let Some(mk) = self.parse_marker_node(rm, rate) {
+                seq.markers.push(mk);
+            }
+        }
+    }
+
+    fn parse_marker_node(&mut self, rm: Node<'a, 'i>, rate: FrameRate) -> Option<Marker> {
+        let start = child_text(rm, "Start")
+            .or_else(|| child_text(rm, "InPoint"))
+            .or_else(|| child_text(rm, "Time"))
+            .or_else(|| rm.attribute("Start"))
+            .and_then(|s| parse_premiere_tick(s, rate))?;
+        let m_name = child_text(rm, "Name").or_else(|| child_text(rm, "Title")).or_else(|| rm.attribute("Name")).unwrap_or("").to_string();
+        let comment = child_text(rm, "Comment").or_else(|| child_text(rm, "Note")).or_else(|| rm.attribute("Comment")).unwrap_or("").to_string();
+        let dur = child_text(rm, "Duration")
+            .and_then(|s| parse_premiere_tick(s, rate))
+            .or_else(|| {
+                let end = child_text(rm, "End").or_else(|| child_text(rm, "OutPoint")).and_then(|s| parse_premiere_tick(s, rate))?;
+                (end > start).then_some(end - start)
+            })
+            .unwrap_or(Tick::ZERO);
+        let kind = match child_text(rm, "Type").or_else(|| child_text(rm, "Kind")).or_else(|| child_text(rm, "MarkerType")).unwrap_or("") {
+            s if s.eq_ignore_ascii_case("chapter") => MarkerKind::Chapter,
+            s if s.eq_ignore_ascii_case("segmentation") => MarkerKind::Segmentation,
+            s if s.eq_ignore_ascii_case("weblink") || s.eq_ignore_ascii_case("url") => MarkerKind::WebLink,
+            s if s.eq_ignore_ascii_case("flashcue") || s.eq_ignore_ascii_case("cue") => MarkerKind::FlashCue,
+            _ => MarkerKind::Comment,
+        };
+        let color = child_text(rm, "Color")
+            .or_else(|| child_text(rm, "Label"))
+            .or_else(|| child_text(rm, "ColorLabel"))
+            .and_then(|s| Label::from_color_name(s.trim()).or_else(|| label_from(s.trim())))
+            .unwrap_or(Label::Cerulean);
+        let author = child_text(rm, "Author").or_else(|| child_text(rm, "User")).unwrap_or("").trim().to_string();
+        let url = child_text(rm, "Url")
+            .or_else(|| child_text(rm, "URL"))
+            .or_else(|| child_text(rm, "WebLink"))
+            .and_then(marker_web_url)
+            .unwrap_or_default();
+        Some(Marker {
+            id: MarkerId(self.b.alloc()),
+            start,
+            duration: dur,
+            name: m_name,
+            comment,
+            kind,
+            color,
+            author,
+            custom_color: None,
+            url,
+        })
     }
 
     fn collect_sequence_tracks(&self, seq_node: Node<'a, 'i>, video: &mut Vec<Node<'a, 'i>>, audio: &mut Vec<Node<'a, 'i>>, captions: &mut Vec<Node<'a, 'i>>) {
@@ -775,21 +1011,60 @@ impl<'a, 'i, 'r> PrprojImporter<'a, 'i, 'r> {
         if !self.b.ensure_tracks(seq, kind, track_idx + 1) {
             return;
         }
-        if let Some(t_name) = child_text(track_node, "Name").or_else(|| track_node.attribute("Name"))
-            && !t_name.is_empty()
-            && let Some(track) = seq.tracks_mut(kind).get_mut(track_idx)
-        {
-            track.name = t_name.to_string();
+        let track_label = self.parse_node_label(track_node);
+        if let Some(track) = seq.tracks_mut(kind).get_mut(track_idx) {
+            if let Some(t_name) = child_text(track_node, "Name").or_else(|| track_node.attribute("Name")).filter(|s| !s.is_empty()) {
+                track.name = t_name.to_string();
+            }
+            if let Some(locked) = child_text(track_node, "IsLocked").or_else(|| child_text(track_node, "Locked")).and_then(parse_bool) {
+                track.locked = locked;
+            }
+            if let Some(muted) = child_text(track_node, "IsMuted").or_else(|| child_text(track_node, "Muted")).and_then(parse_bool) {
+                track.muted = muted;
+            }
+            if let Some(solo) = child_text(track_node, "IsSolo").or_else(|| child_text(track_node, "Solo")).and_then(parse_bool) {
+                track.solo = solo;
+            }
+            if let Some(en) = child_text(track_node, "IsEnabled").or_else(|| child_text(track_node, "Enabled")).and_then(parse_bool) {
+                track.enabled = en;
+            } else if let Some(dis) = child_text(track_node, "Disabled").or_else(|| child_text(track_node, "IsDisabled")).and_then(parse_bool) {
+                track.enabled = !dis;
+            }
+            if let Some(vol) = child_text(track_node, "Volume").or_else(|| child_text(track_node, "TrackVolume")).and_then(|s| s.trim().parse::<f64>().ok())
+                && vol.is_finite()
+            {
+                track.volume_db = vol.clamp(-287.5, 15.0);
+            }
+            if let Some(pan) = child_text(track_node, "Pan").or_else(|| child_text(track_node, "Balance")).and_then(|s| s.trim().parse::<f64>().ok())
+                && pan.is_finite()
+            {
+                track.pan = if pan.abs() <= 1.0 && pan != 0.0 { pan * 100.0 } else { pan.clamp(-100.0, 100.0) };
+            }
+            if track_label.is_some() {
+                track.label = track_label;
+            }
         }
         let mut item_nodes = Vec::new();
+        let mut trans_nodes = Vec::new();
         for c in elements(track_node) {
             let rc = self.resolve(c);
             match rc.tag_name().name() {
                 "TrackItems" | "ClipItems" | "Items" => {
                     for it in elements(rc) {
-                        item_nodes.push(self.resolve(it));
+                        let rit = self.resolve(it);
+                        if is_transition_tag(rit.tag_name().name()) {
+                            trans_nodes.push(rit);
+                        } else {
+                            item_nodes.push(rit);
+                        }
                     }
                 }
+                "Transitions" | "TransitionItems" => {
+                    for tr in elements(rc) {
+                        trans_nodes.push(self.resolve(tr));
+                    }
+                }
+                tag if is_transition_tag(tag) => trans_nodes.push(rc),
                 "VideoClipTrackItem" | "AudioClipTrackItem" | "ClipTrackItem" | "TrackItem" | "ClipItem" => {
                     item_nodes.push(rc);
                 }
@@ -798,6 +1073,12 @@ impl<'a, 'i, 'r> PrprojImporter<'a, 'i, 'r> {
         }
         for item_node in item_nodes {
             self.place_track_item(seq, kind, track_idx, item_node, rate);
+        }
+        if let Some(t) = seq.tracks_mut(kind).get_mut(track_idx) {
+            t.sort();
+        }
+        for tr_node in trans_nodes {
+            self.place_transition(seq, kind, track_idx, tr_node, rate);
         }
     }
 
@@ -817,7 +1098,9 @@ impl<'a, 'i, 'r> PrprojImporter<'a, 'i, 'r> {
             .or_else(|| self.resolve_child(item_node, "MasterClip"))
             .unwrap_or(item_node);
 
-        let media_id = self.ensure_media_for_node(subclip, rate).or_else(|| self.ensure_media_for_node(item_node, rate)).unwrap_or_else(|| {
+        let fallback_bin = self.node_bin.get(&(item_node.id().get() as usize)).copied().or_else(|| self.node_bin.get(&(subclip.id().get() as usize)).copied());
+
+        let media_id = self.ensure_media_for_node(subclip, rate, fallback_bin).or_else(|| self.ensure_media_for_node(item_node, rate, fallback_bin)).unwrap_or_else(|| {
             let fallback_name = self.find_text(item_node, &["Name", "Title"]).unwrap_or("Offline Clip");
             self.report.warn(format!("clip \"{fallback_name}\" has no media file path; imported offline"));
             let spec = MediaSpec {
@@ -830,7 +1113,7 @@ impl<'a, 'i, 'r> PrprojImporter<'a, 'i, 'r> {
             // As the other importers do, the name is kept only as a relink hint for an item
             // marked offline, under its own key so it never merges with a real file's item.
             let hint = resolve_path(fallback_name, self.opts.base_dir.as_deref());
-            let id = self.b.file_media(&format!("offline:{fallback_name}"), fallback_name, &hint, &spec, None);
+            let id = self.b.file_media(&format!("offline:{fallback_name}"), fallback_name, &hint, &spec, fallback_bin);
             if let Some(m) = self.b.p.item_mut(id).and_then(|i| i.as_media_mut()) {
                 m.offline = true;
             }
@@ -843,8 +1126,455 @@ impl<'a, 'i, 'r> PrprojImporter<'a, 'i, 'r> {
             .map(str::to_string)
             .unwrap_or_else(|| self.b.p.item(media_id).map(|i| i.name.clone()).unwrap_or_else(|| "Clip".into()));
 
-        let ti = self.b.clip(media_id, kind, &clip_name, start, duration, source_in);
+        let mut ti = self.b.clip(media_id, kind, &clip_name, start, duration, source_in);
+        self.apply_clip_timing_and_flags(&mut ti, item_node, subclip, rate);
+        self.apply_clip_markers(&mut ti, item_node, subclip, rate);
+        self.apply_clip_components(&mut ti, item_node, subclip, kind, rate, (seq.settings.width, seq.settings.height));
+
         let _ = self.b.place(seq, kind, track_idx, ti);
+    }
+
+    fn apply_clip_timing_and_flags(&mut self, ti: &mut TrackItem, item_node: Node<'a, 'i>, subclip: Node<'a, 'i>, rate: FrameRate) {
+        if let Some(speed_str) = child_text(item_node, "Speed")
+            .or_else(|| child_text(item_node, "PlaybackSpeed"))
+            .or_else(|| child_text(subclip, "Speed"))
+            .or_else(|| child_text(subclip, "PlaybackSpeed"))
+            && let Some((spd, rev)) = parse_speed_value(speed_str)
+        {
+            ti.speed = spd;
+            if rev {
+                ti.reverse = true;
+            }
+        }
+        if let Some(rev_str) = child_text(item_node, "Reverse")
+            .or_else(|| child_text(item_node, "IsReversed"))
+            .or_else(|| child_text(subclip, "Reverse"))
+            .or_else(|| child_text(subclip, "IsReversed"))
+            && let Some(rev) = parse_bool(rev_str)
+        {
+            ti.reverse |= rev;
+        }
+        if let Some(hold_str) = child_text(item_node, "FrameHold")
+            .or_else(|| child_text(item_node, "HoldFrame"))
+            .or_else(|| child_text(item_node, "FreezeFrame"))
+            .or_else(|| child_text(subclip, "FrameHold"))
+        {
+            if parse_bool(hold_str) == Some(true) {
+                ti.frame_hold = Some(ti.source_in);
+            } else if parse_bool(hold_str) != Some(false)
+                && let Some(ht) = parse_premiere_tick(hold_str, rate)
+            {
+                ti.frame_hold = Some(ht);
+            }
+        }
+        if let Some(interp_str) = child_text(item_node, "TimeInterpolation").or_else(|| child_text(item_node, "FrameBlend"))
+            && let Some(interp) = TimeInterpolation::from_name(interp_str.trim())
+        {
+            ti.time_interpolation = interp;
+        }
+        if let Some(stf) = child_text(item_node, "ScaleToFrameSize").or_else(|| child_text(item_node, "SetToFrameSize")).and_then(parse_bool) {
+            ti.scale_to_frame = stf;
+        }
+        if let Some(en) = child_text(item_node, "Enabled").or_else(|| child_text(item_node, "IsEnabled")).and_then(parse_bool) {
+            ti.enabled = en;
+        } else if let Some(dis) = child_text(item_node, "Disabled").or_else(|| child_text(item_node, "IsDisabled")).and_then(parse_bool) {
+            ti.enabled = !dis;
+        }
+        if let Some(label) = self.parse_node_label(item_node).or_else(|| self.parse_node_label(subclip)) {
+            ti.label = label;
+        }
+        if let Some(link_key) = child_text(item_node, "LinkGroup")
+            .or_else(|| child_text(item_node, "LinkID"))
+            .or_else(|| child_text(item_node, "ClipLink"))
+            .or_else(|| item_node.attribute("LinkGroup"))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let lid = match self.link_groups.get(link_key) {
+                Some(&id) => id,
+                None => {
+                    let id = self.b.link_id();
+                    self.link_groups.insert(link_key.to_string(), id);
+                    id
+                }
+            };
+            ti.link = Some(lid);
+        }
+    }
+
+    fn apply_clip_markers(&mut self, ti: &mut TrackItem, item_node: Node<'a, 'i>, subclip: Node<'a, 'i>, rate: FrameRate) {
+        let mut seen = HashSet::new();
+        for holder in [item_node, subclip] {
+            for c in elements(holder) {
+                let rc = self.resolve(c);
+                match rc.tag_name().name() {
+                    "Marker" => {
+                        let mid = rc.id().get() as usize;
+                        self.clip_marker_nodes.insert(mid);
+                        if seen.insert(mid)
+                            && let Some(m) = self.parse_marker_node(rc, rate)
+                        {
+                            ti.markers.push(m);
+                        }
+                    }
+                    "Markers" => {
+                        for m in elements(rc) {
+                            let rm = self.resolve(m);
+                            let mid = rm.id().get() as usize;
+                            self.clip_marker_nodes.insert(mid);
+                            if rm.tag_name().name() == "Marker"
+                                && seen.insert(mid)
+                                && let Some(mk) = self.parse_marker_node(rm, rate)
+                            {
+                                ti.markers.push(mk);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn apply_clip_components(&mut self, ti: &mut TrackItem, item_node: Node<'a, 'i>, subclip: Node<'a, 'i>, kind: TrackKind, rate: FrameRate, frame: (u32, u32)) {
+        for holder in [item_node, subclip] {
+            self.apply_direct_clip_properties(ti, holder, kind, rate, frame);
+            for c in elements(holder) {
+                let rc = self.resolve(c);
+                match rc.tag_name().name() {
+                    "ComponentChain" | "VideoComponentChain" | "AudioComponentChain" | "Components" | "Effects" | "Filters" => {
+                        self.apply_component_chain(ti, rc, kind, rate, frame);
+                    }
+                    "Motion" | "BasicMotion" | "Transform" if kind == TrackKind::Video => {
+                        self.apply_motion_component(ti, rc, rate, frame);
+                    }
+                    "Opacity" if kind == TrackKind::Video => {
+                        self.apply_opacity_component(ti, rc, rate);
+                    }
+                    "Volume" | "AudioLevels" if kind == TrackKind::Audio => {
+                        self.apply_volume_component(ti, rc, rate);
+                    }
+                    "Panner" | "AudioPan" | "Balance" if kind == TrackKind::Audio => {
+                        self.apply_panner_component(ti, rc, rate);
+                    }
+                    "Component" | "VideoFilterComponent" | "AudioFilterComponent" | "Effect" | "Filter" => {
+                        self.apply_single_component(ti, rc, kind, rate, frame);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn apply_direct_clip_properties(&mut self, ti: &mut TrackItem, node: Node<'a, 'i>, kind: TrackKind, rate: FrameRate, frame: (u32, u32)) {
+        if kind == TrackKind::Video {
+            if let Some(bm) = child_text(node, "BlendMode").or_else(|| child_text(node, "CompositeMode")) {
+                self.set_blend_mode(ti, bm);
+            }
+            if let Some(rot) = child(node, "Rotation") {
+                set_param(ti, "motion", "rotation", read_prproj_scalar_param(rot, rate, |v| v));
+            }
+            if let Some(sc) = child(node, "Scale") {
+                set_param(ti, "motion", "scale", read_prproj_scalar_param(sc, rate, |v| v));
+            }
+            if let Some(pos) = child(node, "Position") {
+                let pr = read_prproj_point_param(pos, rate, frame);
+                set_param(ti, "motion", "position", pr);
+            }
+            if let Some(anc) = child(node, "AnchorPoint").or_else(|| child(node, "Anchor")) {
+                let pr = read_prproj_point_param(anc, rate, frame);
+                set_param(ti, "motion", "anchor", pr);
+            }
+            if let Some(op) = child(node, "Opacity")
+                && elements(op).next().is_none()
+            {
+                set_param(ti, "opacity", "opacity", read_prproj_scalar_param(op, rate, |v| v));
+            }
+        } else {
+            if let Some(g) = child_text(node, "Gain")
+                .or_else(|| child_text(node, "AudioGain"))
+                .or_else(|| child_text(node, "GainDb"))
+                .and_then(|s| s.trim().trim_end_matches("dB").trim().parse::<f64>().ok())
+                && g.is_finite()
+            {
+                ti.gain_db = g.clamp(-287.5, 96.0);
+            }
+            if let Some(lvl) = child(node, "Level").or_else(|| child(node, "AudioLevel")) {
+                set_param(ti, "volume", "level", read_prproj_audio_level_param(lvl, rate));
+            }
+            if let Some(pan) = child(node, "Pan").or_else(|| child(node, "Balance")) {
+                set_param(ti, "panner", "balance", read_prproj_pan_param(pan, rate));
+            }
+        }
+    }
+
+    fn apply_component_chain(&mut self, ti: &mut TrackItem, chain: Node<'a, 'i>, kind: TrackKind, rate: FrameRate, frame: (u32, u32)) {
+        for c in elements(chain) {
+            let rc = self.resolve(c);
+            match rc.tag_name().name() {
+                "Components" | "ComponentChain" => self.apply_component_chain(ti, rc, kind, rate, frame),
+                "Motion" | "BasicMotion" | "Transform" if kind == TrackKind::Video => self.apply_motion_component(ti, rc, rate, frame),
+                "Opacity" if kind == TrackKind::Video => self.apply_opacity_component(ti, rc, rate),
+                "Volume" | "AudioLevels" if kind == TrackKind::Audio => self.apply_volume_component(ti, rc, rate),
+                "Panner" | "AudioPan" | "Balance" if kind == TrackKind::Audio => self.apply_panner_component(ti, rc, rate),
+                _ => self.apply_single_component(ti, rc, kind, rate, frame),
+            }
+        }
+    }
+
+    fn apply_single_component(&mut self, ti: &mut TrackItem, comp: Node<'a, 'i>, kind: TrackKind, rate: FrameRate, frame: (u32, u32)) {
+        let match_name = child_text(comp, "MatchName")
+            .or_else(|| child_text(comp, "EffectID"))
+            .or_else(|| comp.attribute("MatchName"))
+            .or_else(|| comp.attribute("EffectID"))
+            .unwrap_or("");
+        let disp_name = child_text(comp, "DisplayName")
+            .or_else(|| child_text(comp, "Name"))
+            .or_else(|| comp.attribute("DisplayName"))
+            .or_else(|| comp.attribute("Name"))
+            .unwrap_or(match_name);
+        let clean_id = strip_adobe_prefix(match_name);
+        let clean_name = strip_adobe_prefix(disp_name);
+        if kind == TrackKind::Video {
+            if clean_id.eq_ignore_ascii_case("motion") || clean_id.eq_ignore_ascii_case("basic") || clean_name.eq_ignore_ascii_case("motion") {
+                self.apply_motion_component(ti, comp, rate, frame);
+                return;
+            }
+            if clean_id.eq_ignore_ascii_case("opacity") || clean_name.eq_ignore_ascii_case("opacity") {
+                self.apply_opacity_component(ti, comp, rate);
+                return;
+            }
+        } else {
+            if clean_id.eq_ignore_ascii_case("volume")
+                || clean_id.eq_ignore_ascii_case("audiolevels")
+                || clean_name.eq_ignore_ascii_case("volume")
+                || clean_name.eq_ignore_ascii_case("channel volume")
+            {
+                self.apply_volume_component(ti, comp, rate);
+                return;
+            }
+            if clean_id.eq_ignore_ascii_case("panner")
+                || clean_id.eq_ignore_ascii_case("audiopan")
+                || clean_id.eq_ignore_ascii_case("balance")
+                || clean_name.eq_ignore_ascii_case("panner")
+                || clean_name.eq_ignore_ascii_case("balance")
+            {
+                self.apply_panner_component(ti, comp, rate);
+                return;
+            }
+        }
+        let clean_id_no_ver = clean_id.trim_end_matches(|c: char| c.is_ascii_digit() || c == ' ');
+        let def = find_effect(clean_id)
+            .filter(|d| !d.intrinsic)
+            .or_else(|| find_effect_by_name(clean_id).filter(|d| !d.intrinsic))
+            .or_else(|| find_effect_by_name(clean_id_no_ver).filter(|d| !d.intrinsic))
+            .or_else(|| find_effect_by_name(clean_name).filter(|d| !d.intrinsic))
+            .or_else(|| find_effect_by_name(disp_name).filter(|d| !d.intrinsic));
+        let Some(def) = def else {
+            return;
+        };
+        let mut inst = def.instance();
+        if let Some(en) = child_text(comp, "Enabled").or_else(|| child_text(comp, "Bypass").map(|b| if parse_bool(b) == Some(true) { "false" } else { "true" })).and_then(parse_bool) {
+            inst.enabled = en;
+        }
+        let params = self.collect_component_params(comp);
+        for pd in &def.params {
+            let Some(pnode) = find_param_node(&params, &[pd.id, pd.label]) else { continue };
+            let pr = match &pd.default {
+                ParamValue::Float(_) => read_prproj_scalar_param(pnode, rate, |v| v),
+                ParamValue::Vec2(_) => read_prproj_point_param(pnode, rate, frame),
+                ParamValue::Bool(_) => {
+                    let bval = child_text(pnode, "Value").or_else(|| child_text(pnode, "StartKeyframe")).unwrap_or_else(|| text(pnode));
+                    Param::new(ParamValue::Bool(parse_bool(bval).unwrap_or(false)))
+                }
+                ParamValue::Choice(_) => {
+                    let cval = child_text(pnode, "Value").unwrap_or_else(|| text(pnode)).trim().parse::<u32>().unwrap_or(0);
+                    Param::new(ParamValue::Choice(cval))
+                }
+                _ => continue,
+            };
+            inst.params.insert(pd.id.to_string(), pr);
+        }
+        ti.effects.push(inst);
+    }
+
+    fn collect_component_params(&self, comp: Node<'a, 'i>) -> Vec<Node<'a, 'i>> {
+        let mut out = Vec::new();
+        for c in elements(comp) {
+            let rc = self.resolve(c);
+            if matches!(rc.tag_name().name(), "Params" | "Parameters" | "ComponentParams") {
+                for p in elements(rc) {
+                    out.push(self.resolve(p));
+                }
+            } else {
+                out.push(rc);
+            }
+        }
+        out
+    }
+
+    fn apply_motion_component(&mut self, ti: &mut TrackItem, comp: Node<'a, 'i>, rate: FrameRate, frame: (u32, u32)) {
+        let params = self.collect_component_params(comp);
+        if let Some(p) = find_param_node(&params, &["Position", "position", "Center", "center"]) {
+            set_param(ti, "motion", "position", read_prproj_point_param(p, rate, frame));
+        }
+        if let Some(p) = find_param_node(&params, &["Scale", "scale", "ScaleHeight", "scale_height"]) {
+            set_param(ti, "motion", "scale", read_prproj_scalar_param(p, rate, |v| v));
+        }
+        if let Some(p) = find_param_node(&params, &["ScaleWidth", "scale_width", "Scale Width"]) {
+            set_param(ti, "motion", "scale_width", read_prproj_scalar_param(p, rate, |v| v));
+            let uniform = find_param_node(&params, &["UniformScale", "uniform_scale", "Uniform Scale"])
+                .and_then(|u| child_text(u, "Value").or_else(|| Some(text(u))))
+                .and_then(parse_bool)
+                .unwrap_or(false);
+            set_param(ti, "motion", "uniform_scale", Param::new(ParamValue::Bool(uniform)));
+        } else if let Some(u) = find_param_node(&params, &["UniformScale", "uniform_scale", "Uniform Scale"])
+            .and_then(|u| child_text(u, "Value").or_else(|| Some(text(u))))
+            .and_then(parse_bool)
+            && !u
+        {
+            set_param(ti, "motion", "uniform_scale", Param::new(ParamValue::Bool(false)));
+        }
+        if let Some(p) = find_param_node(&params, &["Rotation", "rotation"]) {
+            set_param(ti, "motion", "rotation", read_prproj_scalar_param(p, rate, |v| v));
+        }
+        if let Some(p) = find_param_node(&params, &["AnchorPoint", "anchor", "Anchor Point", "Anchor", "CenterOffset"]) {
+            set_param(ti, "motion", "anchor", read_prproj_point_param(p, rate, frame));
+        }
+        if let Some(p) = find_param_node(&params, &["AntiFlicker", "anti_flicker", "Anti-flicker Filter"]) {
+            set_param(ti, "motion", "anti_flicker", read_prproj_scalar_param(p, rate, |v| v));
+        }
+        if let Some(en) = child_text(comp, "Enabled").and_then(parse_bool)
+            && let Some(m) = ti.effect_mut("motion")
+        {
+            m.enabled = en;
+        }
+    }
+
+    fn apply_opacity_component(&mut self, ti: &mut TrackItem, comp: Node<'a, 'i>, rate: FrameRate) {
+        let params = self.collect_component_params(comp);
+        if let Some(p) = find_param_node(&params, &["Opacity", "opacity"]) {
+            set_param(ti, "opacity", "opacity", read_prproj_scalar_param(p, rate, |v| v));
+        } else if let Some(v) = child_text(comp, "Value").or_else(|| (elements(comp).next().is_none()).then(|| text(comp)))
+            && !v.trim().is_empty()
+        {
+            set_param(ti, "opacity", "opacity", read_prproj_scalar_param(comp, rate, |x| x));
+        }
+        if let Some(bm) = find_param_node(&params, &["BlendMode", "blend", "Blend Mode", "CompositeMode"])
+            .and_then(|p| child_text(p, "Value").or_else(|| Some(text(p))))
+            .or_else(|| child_text(comp, "BlendMode"))
+        {
+            self.set_blend_mode(ti, bm);
+        }
+        if let Some(en) = child_text(comp, "Enabled").and_then(parse_bool)
+            && let Some(o) = ti.effect_mut("opacity")
+        {
+            o.enabled = en;
+        }
+    }
+
+    fn set_blend_mode(&mut self, ti: &mut TrackItem, raw: &str) {
+        let mode = raw.trim();
+        if mode.is_empty() || mode.eq_ignore_ascii_case("normal") {
+            return;
+        }
+        let normalized = match mode.to_ascii_lowercase().as_str() {
+            "add" | "linear dodge" | "lineardodge" => "Linear Dodge (Add)",
+            _ => mode,
+        };
+        if let Some(idx) = BLEND_MODES.iter().position(|m| m.eq_ignore_ascii_case(normalized)) {
+            if idx != 0 {
+                set_param(ti, "opacity", "blend", Param::new(ParamValue::Choice(idx as u32)));
+            }
+        } else {
+            self.report.warn(format!("blend mode \"{mode}\" is not supported"));
+        }
+    }
+
+    fn apply_volume_component(&mut self, ti: &mut TrackItem, comp: Node<'a, 'i>, rate: FrameRate) {
+        let params = self.collect_component_params(comp);
+        if let Some(p) = find_param_node(&params, &["Level", "level", "Volume", "Gain"]) {
+            set_param(ti, "volume", "level", read_prproj_audio_level_param(p, rate));
+        } else {
+            set_param(ti, "volume", "level", read_prproj_audio_level_param(comp, rate));
+        }
+    }
+
+    fn apply_panner_component(&mut self, ti: &mut TrackItem, comp: Node<'a, 'i>, rate: FrameRate) {
+        let params = self.collect_component_params(comp);
+        if let Some(p) = find_param_node(&params, &["Balance", "balance", "Pan", "pan"]) {
+            set_param(ti, "panner", "balance", read_prproj_pan_param(p, rate));
+        } else {
+            set_param(ti, "panner", "balance", read_prproj_pan_param(comp, rate));
+        }
+    }
+
+    fn place_transition(&mut self, seq: &mut Sequence, kind: TrackKind, track_idx: usize, tr_node: Node<'a, 'i>, rate: FrameRate) {
+        let tr_node = self.resolve(tr_node);
+        let start = self
+            .find_text(tr_node, &["Start", "TimelineIn", "CutPoint"])
+            .and_then(|s| parse_premiere_tick(s, rate))
+            .unwrap_or(Tick::ZERO);
+        let end = self.find_text(tr_node, &["End", "TimelineOut"]).and_then(|s| parse_premiere_tick(s, rate));
+        let duration = match end {
+            Some(e) if e > start => e - start,
+            _ => self.find_text(tr_node, &["Duration"]).and_then(|s| parse_premiere_tick(s, rate)).unwrap_or(Tick::ZERO),
+        };
+        if duration <= Tick::ZERO {
+            return;
+        }
+        let s = start;
+        let e = start + duration;
+        let raw_name = self
+            .find_text(tr_node, &["MatchName", "EffectID", "DisplayName", "Name"])
+            .or_else(|| tr_node.attribute("MatchName"))
+            .or_else(|| tr_node.attribute("Name"))
+            .unwrap_or(if kind == TrackKind::Audio { "Constant Power" } else { "Cross Dissolve" });
+        let clean_name = strip_adobe_prefix(raw_name);
+        let effect = transition_effect(clean_name, kind == TrackKind::Audio, self.report);
+        let align_s = self
+            .find_text(tr_node, &["Alignment", "Align"])
+            .or_else(|| tr_node.attribute("Alignment"))
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let reverse = self.find_text(tr_node, &["Reverse", "IsReversed"]).and_then(parse_bool).unwrap_or(false);
+
+        let Some(track) = seq.tracks_mut(kind).get_mut(track_idx) else { return };
+        let tol = rate.frame_duration();
+        let (mut from, mut to) = (None, None);
+        if !matches!(align_s.as_str(), "start-black" | "startatcut") {
+            from = track
+                .items
+                .iter()
+                .filter(|i| i.end() + tol >= s && i.end() <= e + tol)
+                .max_by_key(|i| i.end())
+                .map(|i| (i.id, i.end()));
+        }
+        if !matches!(align_s.as_str(), "end-black" | "endatcut") {
+            to = track
+                .items
+                .iter()
+                .filter(|i| i.start + tol >= s && i.start <= e + tol)
+                .min_by_key(|i| i.start)
+                .map(|i| (i.id, i.start));
+        }
+        if from.is_none() && to.is_none() {
+            self.report.warn(format!("transition \"{clean_name}\" at frame {} has no adjacent clip; skipped", rate.frame_at(s)));
+            return;
+        }
+        let cut = from.map(|f| f.1).or(to.map(|t| t.1)).unwrap_or(s);
+        let align = match align_s.as_str() {
+            "center" | "centeratcut" => TransitionAlign::CenterAtCut,
+            "start" | "start-black" | "startatcut" => TransitionAlign::StartAtCut,
+            "end" | "end-black" | "endatcut" => TransitionAlign::EndAtCut,
+            _ if cut == s => TransitionAlign::StartAtCut,
+            _ if cut == e => TransitionAlign::EndAtCut,
+            _ => TransitionAlign::CenterAtCut,
+        };
+        let id = TransitionId(self.b.alloc());
+        track.transitions.push(Transition { id, effect, start: s, duration, from: from.map(|f| f.0), to: to.map(|t| t.0), align, reverse });
+        track.sort();
     }
 
     fn populate_caption_track(&mut self, seq: &mut Sequence, idx: usize, ct_node: Node<'a, 'i>, rate: FrameRate) {
@@ -872,13 +1602,14 @@ impl<'a, 'i, 'r> PrprojImporter<'a, 'i, 'r> {
                 _ => self.find_text(rc, &["Duration"]).and_then(|s| parse_premiere_tick(s, rate)).unwrap_or_else(|| Tick::from_seconds_f64(2.0)),
             };
             let caption_text = self.find_text(rc, &["Text", "CaptionText", "Value"]).unwrap_or_else(|| text(rc)).to_string();
+            let speaker = self.find_text(rc, &["Speaker", "Voice"]).filter(|s| !s.is_empty()).map(str::to_string);
             if !caption_text.is_empty() {
                 captions.push(Caption {
                     id: ClipId(self.b.alloc()),
                     start,
                     duration,
                     text: caption_text,
-                    speaker: None,
+                    speaker,
                     cue_id: None,
                     settings: String::new(),
                 });
@@ -889,6 +1620,211 @@ impl<'a, 'i, 'r> PrprojImporter<'a, 'i, 'r> {
         ct.captions = captions;
         seq.caption_tracks.push(ct);
     }
+}
+
+fn is_transition_tag(tag: &str) -> bool {
+    matches!(tag, "VideoTransitionTrackItem" | "AudioTransitionTrackItem" | "TransitionTrackItem" | "TransitionItem" | "Transition")
+}
+
+fn strip_adobe_prefix(s: &str) -> &str {
+    let s = s.trim();
+    for prefix in ["AE.ADBE ", "PR.ADBE ", "ADBE "] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            return rest.trim();
+        }
+    }
+    s
+}
+
+fn find_param_node<'a, 'i>(params: &[Node<'a, 'i>], names: &[&str]) -> Option<Node<'a, 'i>> {
+    for &want in names {
+        for &p in params {
+            if p.tag_name().name().eq_ignore_ascii_case(want) {
+                return Some(p);
+            }
+            if let Some(n) = child_text(p, "Name")
+                .or_else(|| child_text(p, "ParamID"))
+                .or_else(|| child_text(p, "ParameterID"))
+                .or_else(|| p.attribute("Name"))
+                .or_else(|| p.attribute("ParamID"))
+                && n.trim().eq_ignore_ascii_case(want)
+            {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+fn parse_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_speed_value(raw: &str) -> Option<(f64, bool)> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num_s, is_pct) = match s.strip_suffix('%') {
+        Some(p) => (p.trim(), true),
+        None => (s, false),
+    };
+    let v = num_s.parse::<f64>().ok()?;
+    if !v.is_finite() || v == 0.0 {
+        return None;
+    }
+    let rev = v < 0.0;
+    let spd = (if is_pct { v.abs() / 100.0 } else { v.abs() }).clamp(0.001, 1000.0);
+    Some((spd, rev))
+}
+
+fn parse_interp(raw: Option<&str>) -> Interpolation {
+    match raw.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+        "hold" | "step" => Interpolation::Hold,
+        "bezier" | "ease" | "easein" | "easeout" | "easeinout" => Interpolation::Bezier,
+        _ => Interpolation::Linear,
+    }
+}
+
+fn read_prproj_scalar_param(p: Node<'_, '_>, rate: FrameRate, map_fn: impl Fn(f64) -> f64) -> Param {
+    let val_str = child_text(p, "Value").or_else(|| child_text(p, "StartValue")).or_else(|| p.attribute("Value")).unwrap_or_else(|| text(p));
+    let default_val = val_str.trim().trim_end_matches('%').trim().parse::<f64>().ok().filter(|v| v.is_finite()).map(&map_fn).unwrap_or(0.0);
+    let mut param = Param::new(ParamValue::Float(default_val));
+    let mut kfs = Vec::new();
+    for kf in p.descendants().filter(|n| n.is_element() && matches!(n.tag_name().name(), "Keyframe" | "Key")) {
+        let t_str = child_text(kf, "Time").or_else(|| child_text(kf, "When")).or_else(|| kf.attribute("Time")).or_else(|| kf.attribute("When"));
+        let v_str = child_text(kf, "Value").or_else(|| kf.attribute("Value")).unwrap_or_else(|| text(kf));
+        if let Some(t) = t_str.and_then(|s| parse_premiere_tick(s, rate))
+            && let Ok(v) = v_str.trim().trim_end_matches('%').trim().parse::<f64>()
+            && v.is_finite()
+        {
+            let mut k = Keyframe::new(t, ParamValue::Float(map_fn(v)));
+            k.interp = parse_interp(child_text(kf, "Interpolation").or_else(|| kf.attribute("Interpolation")));
+            kfs.push(k);
+        }
+    }
+    if !kfs.is_empty() {
+        kfs.sort_by_key(|k| k.time);
+        if let Some(first) = kfs.first() {
+            param.value = first.value.clone();
+        }
+        param.keyframes = kfs;
+    }
+    param
+}
+
+fn parse_point_pair(raw: &str, frame: (u32, u32)) -> Option<Vec2> {
+    let s = raw.trim().trim_matches(['(', ')', '[', ']']);
+    let mut parts = s.split([',', ';']).map(str::trim).filter(|x| !x.is_empty());
+    let (a, b) = match (parts.next(), parts.next()) {
+        (Some(x), Some(y)) => (x.parse::<f64>().ok()?, y.parse::<f64>().ok()?),
+        _ => {
+            let mut ws = s.split_whitespace();
+            (ws.next()?.parse::<f64>().ok()?, ws.next()?.parse::<f64>().ok()?)
+        }
+    };
+    if !a.is_finite() || !b.is_finite() {
+        return None;
+    }
+    // Premiere's intrinsic Motion stores Position and Anchor Point in normalized 0..1 frame
+    // coordinates (0.5, 0.5 = center); convert normalized coordinates to pixel coordinates.
+    let (fw, fh) = (frame.0.max(1) as f64, frame.1.max(1) as f64);
+    if (0.0..=1.0).contains(&a) && (0.0..=1.0).contains(&b) && (a <= 1.0 && b <= 1.0) && (fw > 2.0 && fh > 2.0) && (a.fract() != 0.0 || b.fract() != 0.0) {
+        Some(Vec2::new(a * fw, b * fh))
+    } else {
+        Some(Vec2::new(a, b))
+    }
+}
+
+fn read_point_from_node(n: Node<'_, '_>, frame: (u32, u32)) -> Option<Vec2> {
+    if let (Some(x), Some(y)) = (
+        child_text(n, "X").or_else(|| child_text(n, "Horiz")).or_else(|| n.attribute("X")),
+        child_text(n, "Y").or_else(|| child_text(n, "Vert")).or_else(|| n.attribute("Y")),
+    ) {
+        return parse_point_pair(&format!("{x},{y}"), frame);
+    }
+    let val_str = child_text(n, "Value").or_else(|| n.attribute("Value")).unwrap_or_else(|| text(n));
+    parse_point_pair(val_str, frame)
+}
+
+fn read_prproj_point_param(p: Node<'_, '_>, rate: FrameRate, frame: (u32, u32)) -> Param {
+    let default_pt = read_point_from_node(p, frame).unwrap_or_else(|| Vec2::new(frame.0 as f64 / 2.0, frame.1 as f64 / 2.0));
+    let mut param = Param::new(ParamValue::Vec2(default_pt));
+    let mut kfs = Vec::new();
+    for kf in p.descendants().filter(|n| n.is_element() && matches!(n.tag_name().name(), "Keyframe" | "Key")) {
+        let t_str = child_text(kf, "Time").or_else(|| child_text(kf, "When")).or_else(|| kf.attribute("Time")).or_else(|| kf.attribute("When"));
+        if let Some(t) = t_str.and_then(|s| parse_premiere_tick(s, rate))
+            && let Some(pt) = read_point_from_node(kf, frame)
+        {
+            let mut k = Keyframe::new(t, ParamValue::Vec2(pt));
+            k.interp = parse_interp(child_text(kf, "Interpolation").or_else(|| kf.attribute("Interpolation")));
+            kfs.push(k);
+        }
+    }
+    if !kfs.is_empty() {
+        kfs.sort_by_key(|k| k.time);
+        if let Some(first) = kfs.first() {
+            param.value = first.value.clone();
+        }
+        param.keyframes = kfs;
+    }
+    param
+}
+
+fn parse_audio_db(raw: &str, is_linear: bool) -> Option<f64> {
+    let s = raw.trim();
+    if let Some(db_s) = s.strip_suffix("dB").or_else(|| s.strip_suffix("db")) {
+        let v = db_s.trim().parse::<f64>().ok()?;
+        return v.is_finite().then(|| v.clamp(-287.5, 15.0));
+    }
+    let v = s.parse::<f64>().ok()?;
+    if !v.is_finite() {
+        return None;
+    }
+    if is_linear {
+        Some(gain_to_db(v).clamp(-287.5, 15.0))
+    } else {
+        Some(v.clamp(-287.5, 15.0))
+    }
+}
+
+fn read_prproj_audio_level_param(p: Node<'_, '_>, rate: FrameRate) -> Param {
+    let is_linear = child_text(p, "Units").or_else(|| p.attribute("Units")).is_some_and(|u| u.eq_ignore_ascii_case("linear"));
+    let val_str = child_text(p, "Value").or_else(|| child_text(p, "Level")).or_else(|| p.attribute("Value")).unwrap_or_else(|| text(p));
+    let def_db = parse_audio_db(val_str, is_linear).unwrap_or(0.0);
+    let mut param = Param::new(ParamValue::Float(def_db));
+    let mut kfs = Vec::new();
+    for kf in p.descendants().filter(|n| n.is_element() && matches!(n.tag_name().name(), "Keyframe" | "Key")) {
+        let t_str = child_text(kf, "Time").or_else(|| child_text(kf, "When")).or_else(|| kf.attribute("Time")).or_else(|| kf.attribute("When"));
+        let v_str = child_text(kf, "Value").or_else(|| kf.attribute("Value")).unwrap_or_else(|| text(kf));
+        if let Some(t) = t_str.and_then(|s| parse_premiere_tick(s, rate))
+            && let Some(db) = parse_audio_db(v_str, is_linear)
+        {
+            let mut k = Keyframe::new(t, ParamValue::Float(db));
+            k.interp = parse_interp(child_text(kf, "Interpolation").or_else(|| kf.attribute("Interpolation")));
+            kfs.push(k);
+        }
+    }
+    if !kfs.is_empty() {
+        kfs.sort_by_key(|k| k.time);
+        if let Some(first) = kfs.first() {
+            param.value = first.value.clone();
+        }
+        param.keyframes = kfs;
+    }
+    param
+}
+
+fn read_prproj_pan_param(p: Node<'_, '_>, rate: FrameRate) -> Param {
+    let scale_pan = |v: f64| {
+        let scaled = if v.abs() <= 1.0 && v.fract() != 0.0 { v * 100.0 } else { v };
+        scaled.clamp(-100.0, 100.0)
+    };
+    read_prproj_scalar_param(p, rate, scale_pan)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1013,14 +1949,27 @@ pub(crate) fn import(text: &str, opts: &ImportOptions, report: &mut Report) -> R
         n.attribute("ObjectRef").is_some_and(|r| !by_id.contains_key(r)) || n.attribute("ObjectURef").is_some_and(|u| !by_uid.contains_key(u))
     };
     let unresolved = root.descendants().filter(|n| n.is_element() && dangling(n)).count();
-    report.info("Premiere project import is experimental: only sequences, tracks, clip timing, markers and captions are read");
-    report.warn("not imported from the Premiere project: effects, transitions, speed changes, audio levels, bins and labels");
+    report.info("Premiere project import is experimental: sequences, bins, tracks, clip timing/speed, motion/opacity, transitions, audio levels, markers, labels and captions are read");
+    report.warn("not imported from the Premiere project: third-party effects, essential graphics, audio mixer automation and multicam");
     if unresolved > 0 {
         report.warn(format!("{unresolved} object reference(s) point to objects that are not in the document"));
     }
 
-    let mut imp = PrprojImporter { b: Builder::new(project_name), opts, report, by_id, by_uid, media_by_node: HashMap::new(), search_cut: Cell::new(false) };
+    let mut imp = PrprojImporter {
+        b: Builder::new(project_name),
+        opts,
+        report,
+        by_id,
+        by_uid,
+        media_by_node: HashMap::new(),
+        node_bin: HashMap::new(),
+        bin_by_node: HashMap::new(),
+        link_groups: HashMap::new(),
+        clip_marker_nodes: HashSet::new(),
+        search_cut: Cell::new(false),
+    };
 
+    imp.parse_bins(root);
     imp.register_all_media(root);
 
     let seq_nodes: Vec<Node<'_, '_>> = root
@@ -1349,4 +2298,234 @@ mod tests {
         let e = maybe_decompress(&[0xFF, 0xFE, 0x00, 0xD8]).unwrap_err().to_string();
         assert!(e.contains("XML text"), "{e}");
     }
+
+    #[test]
+    fn prproj_imports_bins_effects_transitions_speed_markers_and_links() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<PremiereData Version="3">
+  <Project ObjectID="1" Name="Rich Premiere Cut">
+    <RootProjectItem ObjectRef="10"/>
+    <Sequence ObjectRef="2"/>
+  </Project>
+  <RootProjectItem ObjectID="10">
+    <Items>
+      <BinProjectItem ObjectRef="11"/>
+    </Items>
+  </RootProjectItem>
+  <BinProjectItem ObjectID="11" Name="Rushes">
+    <Items>
+      <ClipProjectItem ObjectRef="200"/>
+      <ClipProjectItem ObjectRef="201"/>
+    </Items>
+  </BinProjectItem>
+  <Sequence ObjectID="2">
+    <Name>Edited Timeline</Name>
+    <FrameRate>10584000000</FrameRate>
+    <FrameRect>0,0,1920,1080</FrameRect>
+    <Markers>
+      <Marker ObjectID="900">
+        <Start>254016000000</Start>
+        <Duration>0</Duration>
+        <Name>Act 1</Name>
+        <Comments>Intro chapter</Comments>
+        <Type>Chapter</Type>
+        <Color>Blue</Color>
+        <Author>Editor</Author>
+        <Url>https://example.com/act1</Url>
+      </Marker>
+    </Markers>
+    <TrackGroup>
+      <VideoTrackGroup ObjectRef="3"/>
+      <AudioTrackGroup ObjectRef="4"/>
+    </TrackGroup>
+  </Sequence>
+  <VideoTrackGroup ObjectID="3">
+    <VideoClipTrack ObjectID="30">
+      <Name>V1 Main</Name>
+      <IsLocked>true</IsLocked>
+      <ColorLabel>Iris</ColorLabel>
+      <TrackItems>
+        <VideoClipTrackItem ObjectRef="100"/>
+        <VideoClipTrackItem ObjectRef="102"/>
+        <VideoTransitionTrackItem ObjectRef="150"/>
+      </TrackItems>
+    </VideoClipTrack>
+  </VideoTrackGroup>
+  <AudioTrackGroup ObjectID="4">
+    <AudioClipTrack ObjectID="40">
+      <Name>A1 Dialogue</Name>
+      <IsSolo>true</IsSolo>
+      <Volume>-2.5</Volume>
+      <Pan>-15</Pan>
+      <TrackItems>
+        <AudioClipTrackItem ObjectRef="101"/>
+      </TrackItems>
+    </AudioClipTrack>
+  </AudioTrackGroup>
+  <VideoClipTrackItem ObjectID="100">
+    <Start>0</Start>
+    <End>1270080000000</End>
+    <InPoint>254016000000</InPoint>
+    <Speed>200%</Speed>
+    <Reverse>true</Reverse>
+    <TimeInterpolation>OpticalFlow</TimeInterpolation>
+    <ScaleToFrameSize>true</ScaleToFrameSize>
+    <ColorLabel>Rose</ColorLabel>
+    <SubClip ObjectRef="200"/>
+    <Markers>
+      <Marker ObjectID="901">
+        <Start>508032000000</Start>
+        <Name>Clip Beat</Name>
+        <Color>Mango</Color>
+      </Marker>
+    </Markers>
+    <ComponentChain>
+      <Component MatchName="ADBE Motion">
+        <Param Name="Position">
+          <Value>0.5,0.5</Value>
+          <Keyframe Time="0" Value="0.5,0.5"/>
+          <Keyframe Time="254016000000" Value="0.25,0.75" Interpolation="Bezier"/>
+        </Param>
+        <Param Name="Scale"><Value>125</Value></Param>
+        <Param Name="Rotation"><Value>15</Value></Param>
+      </Component>
+      <Component MatchName="ADBE Opacity">
+        <Param Name="Opacity"><Value>80</Value></Param>
+        <Param Name="BlendMode"><Value>Screen</Value></Param>
+      </Component>
+      <Component MatchName="ADBE Gaussian Blur 2" DisplayName="Gaussian Blur">
+        <Param Name="Blurriness"><Value>12.5</Value></Param>
+      </Component>
+    </ComponentChain>
+  </VideoClipTrackItem>
+  <VideoClipTrackItem ObjectID="102">
+    <Start>1270080000000</Start>
+    <End>2540160000000</End>
+    <InPoint>0</InPoint>
+    <FrameHold>true</FrameHold>
+    <SubClip ObjectRef="201"/>
+  </VideoClipTrackItem>
+  <VideoTransitionTrackItem ObjectID="150">
+    <Start>1143072000000</Start>
+    <End>1397088000000</End>
+    <MatchName>ADBE Cross Dissolve</MatchName>
+    <Alignment>CenterAtCut</Alignment>
+  </VideoTransitionTrackItem>
+  <AudioClipTrackItem ObjectID="101">
+    <Start>0</Start>
+    <End>1270080000000</End>
+    <InPoint>254016000000</InPoint>
+    <Gain>-3.5 dB</Gain>
+    <SubClip ObjectRef="200"/>
+    <ComponentChain>
+      <Component MatchName="ADBE Aud Volume" DisplayName="Volume">
+        <Param Name="Level"><Value>-6.0 dB</Value></Param>
+      </Component>
+      <Component MatchName="ADBE Aud Pan" DisplayName="Panner">
+        <Param Name="Balance"><Value>-25</Value></Param>
+      </Component>
+    </ComponentChain>
+  </AudioClipTrackItem>
+  <SubClip ObjectID="200">
+    <Name>shot_a.mov</Name>
+    <ColorLabel>Mango</ColorLabel>
+    <Media ObjectRef="300"/>
+  </SubClip>
+  <SubClip ObjectID="201">
+    <Name>shot_b.mov</Name>
+    <Media ObjectRef="301"/>
+  </SubClip>
+  <Media ObjectID="300">
+    <Title>shot_a.mov</Title>
+    <ActualMediaFilePath>/footage/shot_a.mov</ActualMediaFilePath>
+    <Duration>5080320000000</Duration>
+  </Media>
+  <Media ObjectID="301">
+    <Title>shot_b.mov</Title>
+    <ActualMediaFilePath>/footage/shot_b.mov</ActualMediaFilePath>
+    <Duration>5080320000000</Duration>
+  </Media>
+</PremiereData>"#;
+
+        let (imported, _report) = import_bytes(xml.as_bytes(), Format::Fcp7Xml, None).unwrap();
+        let proj = &imported.project;
+
+        // 1. Bins
+        let rushes_bin = proj.root.children.iter().find_map(|c| match c {
+            filmcraft_project::BinEntry::Bin(b) if b.name == "Rushes" => Some(b),
+            _ => None,
+        });
+        assert!(rushes_bin.is_some(), "expected 'Rushes' bin in project root");
+        assert_eq!(rushes_bin.unwrap().children.len(), 2);
+
+        let seq = proj.sequence(imported.sequences[0]).unwrap();
+        assert_prproj_video_and_motion(seq);
+        assert_prproj_audio_and_markers(seq);
+    }
+
+    fn assert_prproj_video_and_motion(seq: &Sequence) {
+        let vtrack = &seq.video_tracks[0];
+        assert!(vtrack.locked);
+        assert_eq!(vtrack.label, Some(Label::Iris));
+        assert_eq!(vtrack.items.len(), 2);
+
+        let vc0 = &vtrack.items[0];
+        assert!((vc0.speed - 2.0).abs() < 1e-6);
+        assert!(vc0.reverse);
+        assert_eq!(vc0.time_interpolation, TimeInterpolation::OpticalFlow);
+        assert!(vc0.scale_to_frame);
+        assert_eq!(vc0.label, Label::Rose);
+
+        let motion = vc0.effect("motion").unwrap();
+        let pos = motion.params.get("position").unwrap();
+        assert_eq!(pos.keyframes.len(), 2);
+        assert_eq!(pos.value, ParamValue::Vec2(Vec2::new(960.0, 540.0)));
+        assert_eq!(pos.keyframes[1].value, ParamValue::Vec2(Vec2::new(480.0, 810.0)));
+        assert_eq!(pos.keyframes[1].interp, Interpolation::Bezier);
+        assert_eq!(motion.params.get("scale").unwrap().value, ParamValue::Float(125.0));
+        assert_eq!(motion.params.get("rotation").unwrap().value, ParamValue::Float(15.0));
+
+        let opacity = vc0.effect("opacity").unwrap();
+        assert_eq!(opacity.params.get("opacity").unwrap().value, ParamValue::Float(80.0));
+        let screen_idx = BLEND_MODES.iter().position(|&m| m == "Screen").unwrap() as u32;
+        assert_eq!(opacity.params.get("blend").unwrap().value, ParamValue::Choice(screen_idx));
+        assert!(vc0.effect("gaussian_blur").is_some(), "expected Gaussian Blur effect");
+
+        let vc1 = &vtrack.items[1];
+        assert_eq!(vc1.frame_hold, Some(Tick::ZERO));
+
+        assert_eq!(vtrack.transitions.len(), 1);
+        let tr = &vtrack.transitions[0];
+        assert_eq!(tr.effect.effect, "cross_dissolve");
+        assert_eq!(tr.from, Some(vc0.id));
+        assert_eq!(tr.to, Some(vc1.id));
+        assert_eq!(tr.align, TransitionAlign::CenterAtCut);
+    }
+
+    fn assert_prproj_audio_and_markers(seq: &Sequence) {
+        assert_eq!(seq.markers.len(), 1);
+        assert_eq!(seq.markers[0].name, "Act 1");
+        assert_eq!(seq.markers[0].kind, MarkerKind::Chapter);
+        assert_eq!(seq.markers[0].color, Label::Blue);
+        assert_eq!(seq.markers[0].author, "Editor");
+        assert_eq!(seq.markers[0].url, "https://example.com/act1");
+
+        let vc0 = &seq.video_tracks[0].items[0];
+        assert_eq!(vc0.markers.len(), 1);
+        assert_eq!(vc0.markers[0].name, "Clip Beat");
+        assert_eq!(vc0.markers[0].color, Label::Mango);
+
+        let atrack = &seq.audio_tracks[0];
+        assert!(atrack.solo);
+        assert!((atrack.volume_db - (-2.5)).abs() < 1e-6);
+        assert!((atrack.pan - (-15.0)).abs() < 1e-6);
+
+        let ac0 = &atrack.items[0];
+        assert!((ac0.gain_db - (-3.5)).abs() < 1e-6);
+        assert_eq!(ac0.effect("volume").unwrap().params.get("level").unwrap().value, ParamValue::Float(-6.0));
+        assert_eq!(ac0.effect("panner").unwrap().params.get("balance").unwrap().value, ParamValue::Float(-25.0));
+        assert!(vc0.link.is_some());
+        assert_eq!(vc0.link, ac0.link);
+    }
 }
+

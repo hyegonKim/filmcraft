@@ -349,7 +349,7 @@ fn project() -> (Project, filmcraft_project::ItemId) {
 
 #[test]
 fn roundtrip_all_versions() {
-    for v in [FcpxmlVersion::V1_9, FcpxmlVersion::V1_10, FcpxmlVersion::V1_11] {
+    for v in [FcpxmlVersion::V1_9, FcpxmlVersion::V1_10, FcpxmlVersion::V1_11, FcpxmlVersion::V1_12, FcpxmlVersion::V1_13] {
         let (p, s) = project();
         let o = ExportOptions { fcpxml_version: v, ..Default::default() };
         let (imp, text, rep) = roundtrip(&p, s, Format::Fcpxml, &o);
@@ -481,4 +481,218 @@ fn relative_media_urls_are_percent_decoded() {
     let p = &imp.project;
     let boats = &p.sequence(only_seq(&imp)).unwrap().video_tracks[0].items[1];
     assert_eq!(media_key(p, boats.item), "/proj/media/boats b.mov");
+}
+
+#[test]
+fn standalone_audio_elements_import_and_report_invalid_sources() {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.13">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="r2" name="Cam" start="0s" duration="10s" hasVideo="1" hasAudio="1" format="r1" audioRate="48000" audioChannels="2">
+      <media-rep kind="original-media" src="file:///m/cam.mov"/>
+    </asset>
+    <asset id="r3" name="SFX" start="0s" duration="5s" hasVideo="0" hasAudio="1" audioRate="48000" audioChannels="2">
+      <media-rep kind="original-media" src="file:///m/sfx.wav"/>
+    </asset>
+    <asset id="r4" name="SilentPic" start="0s" duration="5s" hasVideo="1" hasAudio="0" format="r1">
+      <media-rep kind="original-media" src="file:///m/pic.png"/>
+    </asset>
+  </resources>
+  <library>
+    <event name="E">
+      <project name="P">
+        <sequence format="r1" duration="6s" tcStart="0s" tcFormat="NDF">
+          <spine>
+            <video ref="r2" name="CamV" offset="0s" start="0s" duration="6s">
+              <audio ref="r2" lane="-1" name="DetachedCamA" offset="1s" start="1s" duration="5s" srcID="2">
+                <adjust-volume amount="-6dB"/>
+                <adjust-panner amount="-35"/>
+              </audio>
+              <audio ref="r3" lane="-2" name="BoomSFX" offset="2s" start="0s" duration="3s"/>
+              <audio ref="r4" lane="-3" name="NoAudioAsset" offset="0s" start="0s" duration="2s"/>
+            </video>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+    let (imp, rep) = import(xml.as_bytes(), Format::Fcpxml, None).unwrap();
+    assert!(!rep.mentions("newer than"), "1.13 should be accepted without version info: {rep}");
+    assert!(rep.mentions("NoAudioAsset"), "silent asset on <audio> should warn: {rep}");
+    let seq = imp.project.sequence(only_seq(&imp)).unwrap();
+    assert_eq!(seq.video_tracks[0].items.len(), 1);
+    assert_eq!(seq.audio_tracks[0].items.len(), 1);
+    assert_eq!(seq.audio_tracks[1].items.len(), 1);
+    let a1 = &seq.audio_tracks[0].items[0];
+    assert_eq!(a1.name, "DetachedCamA");
+    assert_eq!(a1.start, FrameRate::FPS_24.tick_of(24));
+    assert_eq!(a1.duration, FrameRate::FPS_24.tick_of(120));
+    assert_eq!(a1.effect("volume").unwrap().param("level").unwrap().value, ParamValue::Float(-6.0));
+    assert_eq!(a1.effect("panner").unwrap().param("balance").unwrap().value, ParamValue::Float(-35.0));
+    let a2 = &seq.audio_tracks[1].items[0];
+    assert_eq!(a2.name, "BoomSFX");
+    assert_eq!(a2.start, FrameRate::FPS_24.tick_of(48));
+}
+
+#[test]
+fn audition_and_sync_clip_import_cleanly() {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.12">
+  <resources>
+    <format id="r1" frameDuration="1/25s" width="1920" height="1080"/>
+    <asset id="r2" name="Take1" start="0s" duration="10s" hasVideo="1" hasAudio="1" format="r1">
+      <media-rep kind="original-media" src="file:///m/take1.mov"/>
+    </asset>
+    <asset id="r3" name="Take2" start="0s" duration="10s" hasVideo="1" hasAudio="1" format="r1">
+      <media-rep kind="original-media" src="file:///m/take2.mov"/>
+    </asset>
+    <asset id="r4" name="ExtMic" start="0s" duration="10s" hasVideo="0" hasAudio="1" audioRate="48000" audioChannels="2">
+      <media-rep kind="original-media" src="file:///m/mic.wav"/>
+    </asset>
+  </resources>
+  <library>
+    <event name="E">
+      <project name="P">
+        <sequence format="r1" duration="8s" tcStart="0s" tcFormat="NDF">
+          <spine>
+            <audition offset="0s">
+              <asset-clip ref="r2" name="ActiveTake" start="1s" duration="4s"/>
+              <asset-clip ref="r3" name="AltTake" start="2s" duration="4s"/>
+            </audition>
+            <sync-clip name="SyncedInterview" offset="4s" start="0s" duration="4s">
+              <asset-clip ref="r3" name="CamVideo" offset="0s" start="0s" duration="4s"/>
+              <asset-clip ref="r4" lane="-1" name="BoomAudio" offset="0s" start="0s" duration="4s"/>
+              <sync-source sourceID="audio">
+                <audio-role-source role="dialogue" active="0"/>
+              </sync-source>
+              <adjust-transform scale="1.25 0.8"/>
+            </sync-clip>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+    let (imp, rep) = import(xml.as_bytes(), Format::Fcpxml, None).unwrap();
+    assert!(!rep.has_warnings(), "unexpected warnings: {rep}");
+    assert!(rep.mentions("audition"), "inactive audition picks should be noted in info: {rep}");
+    let seq = imp.project.sequence(only_seq(&imp)).unwrap();
+    assert_eq!(seq.video_tracks[0].items.len(), 2);
+    assert_eq!(seq.audio_tracks[0].items.len(), 2);
+    let first_v = &seq.video_tracks[0].items[0];
+    assert_eq!(first_v.name, "ActiveTake");
+    assert_eq!(first_v.start, FrameRate::FPS_25.tick_of(0));
+    assert_eq!(first_v.duration, FrameRate::FPS_25.tick_of(100));
+    let sync_v = &seq.video_tracks[0].items[1];
+    let sync_a = &seq.audio_tracks[0].items[1];
+    assert_eq!(sync_v.name, "SyncedInterview");
+    assert_eq!(sync_a.name, "BoomAudio");
+    assert!(sync_v.link.is_some() && sync_v.link == sync_a.link, "sync-clip video and external audio should be linked");
+    assert_eq!(sync_v.effect("motion").unwrap().param("scale").unwrap().value, ParamValue::Float(80.0));
+    assert_eq!(sync_v.effect("motion").unwrap().param("scale_width").unwrap().value, ParamValue::Float(125.0));
+    assert_eq!(sync_v.effect("motion").unwrap().param("uniform_scale").unwrap().value, ParamValue::Bool(false));
+}
+
+#[test]
+fn multicam_roundtrips_angles_and_angle_switches() {
+    use filmcraft_project::{Camera, MulticamAudio, MulticamSel, MulticamSource};
+    let r = FrameRate::FPS_24;
+    let mut p = Project::new("MCProj");
+    let cam_a = media(&mut p, "/m/cam_a.mov", true, true, r);
+    let cam_b = media(&mut p, "/m/cam_b.mov", true, true, r);
+    let mc_seq = sequence(&mut p, "MultiCam", r, false);
+    clip(&mut p, mc_seq, TrackKind::Video, 0, cam_a, 0..240, 0);
+    clip(&mut p, mc_seq, TrackKind::Audio, 0, cam_a, 0..240, 0);
+    clip(&mut p, mc_seq, TrackKind::Video, 1, cam_b, 0..240, 0);
+    clip(&mut p, mc_seq, TrackKind::Audio, 1, cam_b, 0..240, 0);
+    {
+        let q = p.sequence_mut(mc_seq).unwrap();
+        let vt0 = q.video_tracks[0].id;
+        let at0 = q.audio_tracks[0].id;
+        let vt1 = q.video_tracks[1].id;
+        let at1 = q.audio_tracks[1].id;
+        q.multicam = Some(MulticamSource {
+            cameras: vec![
+                Camera { name: "Angle A".into(), video_track: Some(vt0), audio_tracks: vec![at0], enabled: true, source: Some(cam_a) },
+                Camera { name: "Angle B".into(), video_track: Some(vt1), audio_tracks: vec![at1], enabled: true, source: Some(cam_b) },
+            ],
+            audio: MulticamAudio::SwitchAudio,
+            sync: "timecode".into(),
+        });
+    }
+    let main_seq = sequence(&mut p, "Main", r, false);
+    let v1 = clip(&mut p, main_seq, TrackKind::Video, 0, mc_seq, 0..120, 0);
+    let a1 = clip(&mut p, main_seq, TrackKind::Audio, 0, mc_seq, 0..120, 0);
+    link(&mut p, main_seq, &[v1, a1]);
+    let v2 = clip(&mut p, main_seq, TrackKind::Video, 0, mc_seq, 120..240, 120);
+    let a2 = clip(&mut p, main_seq, TrackKind::Audio, 0, mc_seq, 120..240, 120);
+    link(&mut p, main_seq, &[v2, a2]);
+    {
+        let q = p.sequence_mut(main_seq).unwrap();
+        q.find_item_mut(v1).unwrap().1.multicam = Some(MulticamSel { enabled: true, angle: 0 });
+        q.find_item_mut(a1).unwrap().1.multicam = Some(MulticamSel { enabled: true, angle: 0 });
+        // Second cut switches video to Angle 1 while keeping audio on Angle 0.
+        q.find_item_mut(v2).unwrap().1.multicam = Some(MulticamSel { enabled: true, angle: 1 });
+        q.find_item_mut(a2).unwrap().1.multicam = Some(MulticamSel { enabled: true, angle: 0 });
+    }
+    let (imp, xml, rep) = roundtrip(&p, main_seq, Format::Fcpxml, &ExportOptions::default());
+    assert!(!rep.has_warnings(), "{rep}\n{xml}");
+    assert!(xml.contains("<multicam "), "{xml}");
+    assert!(xml.contains("<mc-angle "), "{xml}");
+    assert!(xml.contains("<mc-clip "), "{xml}");
+    assert!(xml.contains("<mc-source "), "{xml}");
+    let si = only_seq(&imp);
+    let qs = imp.project.sequence(si).unwrap();
+    assert_eq!(qs.video_tracks[0].items.len(), 2);
+    assert_eq!(qs.audio_tracks[0].items.len(), 2);
+    assert_eq!(qs.video_tracks[0].items[0].multicam, Some(MulticamSel { enabled: true, angle: 0 }));
+    assert_eq!(qs.audio_tracks[0].items[0].multicam, Some(MulticamSel { enabled: true, angle: 0 }));
+    assert_eq!(qs.video_tracks[0].items[1].multicam, Some(MulticamSel { enabled: true, angle: 1 }));
+    assert_eq!(qs.audio_tracks[0].items[1].multicam, Some(MulticamSel { enabled: true, angle: 0 }));
+    let imported_mc_id = qs.video_tracks[0].items[0].item;
+    let imported_mc = imp.project.sequence(imported_mc_id).unwrap();
+    assert!(imported_mc.multicam.is_some());
+    assert_eq!(imported_mc.multicam.as_ref().unwrap().cameras.len(), 2);
+}
+
+#[test]
+fn blend_modes_nonuniform_scale_and_audio_panner_roundtrip() {
+    let r = FrameRate::FPS_24;
+    let mut p = Project::new("FXProj");
+    let m = media(&mut p, "/m/a.mov", true, true, r);
+    let s = sequence(&mut p, "S", r, false);
+    let v = clip(&mut p, s, TrackKind::Video, 0, m, 0..48, 0);
+    let a = clip(&mut p, s, TrackKind::Audio, 0, m, 0..48, 0);
+    link(&mut p, s, &[v, a]);
+    {
+        let q = p.sequence_mut(s).unwrap();
+        let (_, vi) = q.find_item_mut(v).unwrap();
+        let motion = vi.effect_mut("motion").unwrap();
+        motion.params.insert("scale".into(), Param::new(ParamValue::Float(75.0)));
+        motion.params.insert("scale_width".into(), Param::new(ParamValue::Float(150.0)));
+        motion.params.insert("uniform_scale".into(), Param::new(ParamValue::Bool(false)));
+        let opacity = vi.effect_mut("opacity").unwrap();
+        opacity.params.insert("opacity".into(), Param::new(ParamValue::Float(80.0)));
+        opacity.params.insert("blend".into(), Param::new(ParamValue::Choice(8))); // Screen
+        let (_, ai) = q.find_item_mut(a).unwrap();
+        ai.effect_mut("panner").unwrap().params.insert("balance".into(), Param::new(ParamValue::Float(45.0)));
+    }
+    let (imp, xml, rep) = roundtrip(&p, s, Format::Fcpxml, &ExportOptions::default());
+    assert!(!rep.has_warnings(), "{rep}\n{xml}");
+    assert!(xml.contains("scale=\"1.5 0.75\""), "{xml}");
+    assert!(xml.contains("mode=\"screen\""), "{xml}");
+    assert!(xml.contains("<adjust-panner amount=\"45\"/>"), "{xml}");
+    let qs = imp.project.sequence(only_seq(&imp)).unwrap();
+    let qv = &qs.video_tracks[0].items[0];
+    assert_eq!(qv.effect("motion").unwrap().param("scale").unwrap().value, ParamValue::Float(75.0));
+    assert_eq!(qv.effect("motion").unwrap().param("scale_width").unwrap().value, ParamValue::Float(150.0));
+    assert_eq!(qv.effect("motion").unwrap().param("uniform_scale").unwrap().value, ParamValue::Bool(false));
+    assert_eq!(qv.effect("opacity").unwrap().param("opacity").unwrap().value, ParamValue::Float(80.0));
+    assert_eq!(qv.effect("opacity").unwrap().param("blend").unwrap().value, ParamValue::Choice(8));
+    let qa = &qs.audio_tracks[0].items[0];
+    assert_eq!(qa.effect("panner").unwrap().param("balance").unwrap().value, ParamValue::Float(45.0));
 }

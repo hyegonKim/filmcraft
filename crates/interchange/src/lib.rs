@@ -434,6 +434,8 @@ pub enum FcpxmlVersion {
     #[default]
     V1_10,
     V1_11,
+    V1_12,
+    V1_13,
 }
 
 impl FcpxmlVersion {
@@ -442,6 +444,8 @@ impl FcpxmlVersion {
             FcpxmlVersion::V1_9 => "1.9",
             FcpxmlVersion::V1_10 => "1.10",
             FcpxmlVersion::V1_11 => "1.11",
+            FcpxmlVersion::V1_12 => "1.12",
+            FcpxmlVersion::V1_13 => "1.13",
         }
     }
 }

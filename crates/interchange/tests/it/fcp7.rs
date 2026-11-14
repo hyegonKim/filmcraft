@@ -721,3 +721,44 @@ fn absurd_start_timecode_is_bounded() {
     }
     assert!(report.mentions("out-of-range start timecode"), "{report}");
 }
+
+#[test]
+fn nonuniform_scale_and_distort_aspect_roundtrip_and_import() {
+    let r = FrameRate::FPS_25;
+    let mut p = Project::new("P");
+    let m = media(&mut p, "/m/a.mov", true, false, r);
+    let s = sequence(&mut p, "S", r, false);
+    let v = clip(&mut p, s, TrackKind::Video, 0, m, 0..50, 0);
+    {
+        let q = p.sequence_mut(s).unwrap();
+        let (_, vi) = q.find_item_mut(v).unwrap();
+        let motion = vi.effect_mut("motion").unwrap();
+        motion.params.insert("scale".into(), Param::new(ParamValue::Float(80.0)));
+        motion.params.insert("scale_width".into(), Param::new(ParamValue::Float(120.0)));
+        motion.params.insert("uniform_scale".into(), Param::new(ParamValue::Bool(false)));
+        let opacity = vi.effect_mut("opacity").unwrap();
+        opacity.params.insert("blend".into(), Param::new(ParamValue::Choice(15))); // Vivid Light
+    }
+    let (imp, xml, rep) = roundtrip(&p, s, Format::Fcp7Xml, &ExportOptions::default());
+    assert!(!rep.has_warnings(), "{rep}\n{xml}");
+    let qv = &imp.project.sequence(only_seq(&imp)).unwrap().video_tracks[0].items[0];
+    assert_eq!(qv.effect("motion").unwrap().param("scale").unwrap().value, ParamValue::Float(80.0));
+    assert_eq!(qv.effect("motion").unwrap().param("scale_width").unwrap().value, ParamValue::Float(120.0));
+    assert_eq!(qv.effect("motion").unwrap().param("uniform_scale").unwrap().value, ParamValue::Bool(false));
+    assert_eq!(qv.effect("opacity").unwrap().param("blend").unwrap().value, ParamValue::Choice(15));
+
+    // Also verify FCP7 native Distort (<effectid>aspect</effectid>) import.
+    let distort_doc = r#"<?xml version="1.0"?><xmeml version="4"><sequence id="s"><name>S</name><rate><timebase>25</timebase><ntsc>FALSE</ntsc></rate>
+<media><video><track><clipitem id="c"><name>A</name><start>0</start><end>50</end><in>0</in><out>50</out>
+<file id="f"><name>a.mov</name><pathurl>file:///tmp/a.mov</pathurl><rate><timebase>25</timebase><ntsc>FALSE</ntsc></rate><media><video/></media></file>
+<compositemode>luminosity</compositemode>
+<filter><effect><name>Basic Motion</name><effectid>basic</effectid><parameter><parameterid>scale</parameterid><value>100</value></parameter></effect></filter>
+<filter><effect><name>Distort</name><effectid>aspect</effectid><parameter><parameterid>aspect</parameterid><value>-50</value></parameter></effect></filter>
+</clipitem></track></video></media></sequence></xmeml>"#;
+    let (imp2, rep2) = import(distort_doc.as_bytes(), Format::Fcp7Xml, None).unwrap();
+    assert!(!rep2.has_warnings(), "{rep2}");
+    let qv2 = &imp2.project.sequence(only_seq(&imp2)).unwrap().video_tracks[0].items[0];
+    assert_eq!(qv2.effect("motion").unwrap().param("scale_width").unwrap().value, ParamValue::Float(150.0));
+    assert_eq!(qv2.effect("motion").unwrap().param("uniform_scale").unwrap().value, ParamValue::Bool(false));
+    assert_eq!(qv2.effect("opacity").unwrap().param("blend").unwrap().value, ParamValue::Choice(26));
+}
