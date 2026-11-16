@@ -173,3 +173,41 @@ fn gpu_export_matches_cpu_and_counts() {
     assert_eq!(gpu, 2, "both frames with the adjustment layer composited on the GPU");
     assert_eq!(filmcraft_export::gpu_render_stats().fallbacks, fallbacks, "no frame with the adjustment layer fell back to the CPU");
 }
+
+#[test]
+#[ignore = "actual 8K GPU readback and CPU parity; requires a hardware adapter and substantial memory; run alone"]
+fn gpu_8k_export_matches_cpu_without_fallback() {
+    // Use the export renderer's adapter policy, and reject a software rasterizer explicitly.
+    // Exclude GL on Windows, as ExportRenderer does, to avoid the vendor's WGL teardown race.
+    let backends = if cfg!(windows) { wgpu::Backends::PRIMARY } else { wgpu::Backends::PRIMARY | wgpu::Backends::GL };
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends, ..wgpu::InstanceDescriptor::new_without_display_handle() });
+    let mut adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
+    if let Some(named) = wgpu::Backends::from_env()
+        && adapters.iter().any(|a| named.contains(a.get_info().backend.into()))
+    {
+        adapters.retain(|a| named.contains(a.get_info().backend.into()));
+    }
+    let power = wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::HighPerformance);
+    let adapter = filmcraft_gpu::adapter::pick(&adapters, None, power).expect("a hardware adapter is required");
+    let info = adapter.get_info();
+    eprintln!("8K export adapter: {} ({:?}, {:?})", info.name, info.backend, info.device_type);
+    assert!(matches!(info.device_type, wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu));
+    assert!(filmcraft_gpu::ExportRenderer::new().is_some(), "export device must initialise");
+    register_frame_renderer(|| Some(Box::new(GpuFrameRenderer(filmcraft_gpu::ExportRenderer::new().expect("export device")))));
+
+    let run = format!("8k-{}", std::process::id());
+    let cpu = format!("{run}-cpu");
+    let gpu = format!("{run}-gpu");
+    export_png(&cpu, GpuRendering::Off, (7680, 4320));
+    let before = filmcraft_gpu::export_renderer::timing::get().frames;
+    export_png(&gpu, GpuRendering::Auto, (7680, 4320));
+    // This counts actual compositor submissions, not just calls to the renderer wrapper.
+    assert_eq!(filmcraft_gpu::export_renderer::timing::get().frames - before, 2, "both 8K frames must be composited on the GPU");
+    for f in ["000", "001"] {
+        let name = format!("img{f}.png");
+        let a = png(&cpu, &name);
+        assert_eq!(image::load_from_memory(&a).unwrap().width(), 7680);
+        assert_eq!(image::load_from_memory(&a).unwrap().height(), 4320);
+        assert_parity(&a, &png(&gpu, &name), &format!("8K frame {f}"));
+    }
+}
