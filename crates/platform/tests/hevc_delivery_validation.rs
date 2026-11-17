@@ -1,7 +1,7 @@
 //! Explicit long-running delivery checks; outputs are kept outside the repository.
 //! FILMCRAFT_DELIVERY_DIR=/absolute/path cargo test --release -p filmcraft-platform
 //! --test hevc_delivery_validation -- --ignored --nocapture --test-threads=1
-//! Windows: FILMCRAFT_REQUIRE_NVENC=1 selects the strict 4K/8K SDR/PQ/HLG NVENC matrix.
+//! FILMCRAFT_REQUIRE_NVENC=1 selects the strict Windows NVENC matrix and fails on other platforms.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -157,12 +157,15 @@ fn nvenc_4k_and_8k_delivery() {
 #[test]
 #[ignore = "actual 4K/8K exports; requires explicit output directory and external oracles"]
 fn delivery_matrix_and_hardware_initialization_failure() {
-    #[cfg(target_os = "windows")]
     if std::env::var("FILMCRAFT_REQUIRE_NVENC").is_ok_and(|v| v == "1") {
-        // A fresh process is essential: the software/failure matrix below mutates the registry.
-        // Select this explicit hardware-only matrix before any other encoder is registered.
-        nvenc_4k_and_8k_delivery();
-        return;
+        #[cfg(target_os = "windows")]
+        {
+            // Select the hardware-only matrix before the software/failure matrix mutates the registry.
+            nvenc_4k_and_8k_delivery();
+            return;
+        }
+        #[cfg(not(target_os = "windows"))]
+        panic!("FILMCRAFT_REQUIRE_NVENC=1 requires Windows");
     }
     // The legacy HEVC contract tries hardware regardless of HardwareEncoding::Off.
     // Test software before registering any hardware factories in this isolated binary.
@@ -189,4 +192,18 @@ fn delivery_matrix_and_hardware_initialization_failure() {
     filmcraft_export::register_encoder(broken_hardware);
     deliver("injected-hardware-failure-pq", 1280, 720, 8, WorkingSpace::Rec2100Pq, HardwareEncoding::Auto);
     assert_eq!(ATTEMPTS.load(Ordering::SeqCst), 1);
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn requiring_nvenc_rejects_non_windows_before_export() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "delivery_matrix_and_hardware_initialization_failure", "--nocapture"])
+        .env("FILMCRAFT_REQUIRE_NVENC", "1")
+        .env_remove("FILMCRAFT_DELIVERY_DIR")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "strict NVENC validation unexpectedly passed");
+    assert!(stderr.contains("FILMCRAFT_REQUIRE_NVENC=1 requires Windows"), "unexpected failure: {stderr}");
 }

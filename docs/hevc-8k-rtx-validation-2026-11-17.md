@@ -85,8 +85,9 @@ HDR rendering path; it is not evidence that all HDR processing or all effects ru
 ## Reproduce on Windows
 
 Run from `filmcraft/` in a PowerShell session. Set the oracle paths to your own external tools and
-choose a new output directory outside the repository. Missing NVENC hardware is a failure in this
-explicit mode, not a skip. Do not set `FILMCRAFT_REQUIRE_NVENC` for the software/failure matrix.
+choose a new output directory outside the repository. This strict mode requires Windows and an NVENC
+HEVC Main 10 encoder. On other operating systems it fails before starting an export. Leave
+`FILMCRAFT_REQUIRE_NVENC` unset for the software/failure matrix.
 
 ```powershell
 $env:FILMCRAFT_FFMPEG = 'C:\tools\ffmpeg\bin\ffmpeg.exe'
