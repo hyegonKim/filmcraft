@@ -1,5 +1,8 @@
 # HEVC and 8K on RTX 4070 Ti — 2026-11-17
 
+The later [2026-11-19 E-drive validation](hevc-e-drive-validation-2026-11-19.md) tests the source
+checkout subsequently confirmed by the operator, after resolving a partial source synchronization.
+
 FilmCraft successfully exported and hardware-decoded 4K and 8K HEVC in SDR, PQ and HLG on
 Windows. All 24 pictures of every export used NVENC, with one encoder session and zero declines.
 The independent 8K GPU compositor check also passed, with both frames submitted to the GPU and
@@ -74,10 +77,11 @@ HDR rendering path; it is not evidence that all HDR processing or all effects ru
 - The new hardware delivery, hardware decode and 8K GPU tests are ignored by default because they
   require physical hardware, external tools, retained files and substantial memory. The explicit
   runs above all passed, including against the PR's committed-source baseline.
-- `cargo xtask ci` was attempted. It stopped at existing formatting differences in
+- On 2026-11-17, `cargo xtask ci` stopped at existing formatting differences in
   `crates/engine/src/export_tools.rs` and `crates/interchange/src/prproj.rs` from `db2d0aca`.
-  The unchanged baseline problem is also documented in [PR #12](https://github.com/hyegonKim/ArtCraft/pull/12).
-  The files changed by this PR pass `rustfmt --check` independently.
+  [PR #12](https://github.com/hyegonKim/ArtCraft/pull/12) subsequently reverted that baseline change.
+  The PR branch was updated with current main on 2026-11-19; the E-drive follow-up report records
+  the later verification. The files changed by this PR passed `rustfmt --check` independently.
 - This session did not operate the desktop export UI, rerun macOS VideoToolbox, test Linux,
   measure long-duration stability, or establish live 8K playback frame rate. Previous macOS UI
   results are recorded separately in [`h265-validation-2026-11-14.md`](h265-validation-2026-11-14.md).

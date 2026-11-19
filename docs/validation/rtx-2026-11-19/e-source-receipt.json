@@ -1,0 +1,15 @@
+{
+  "date": "2026-11-19",
+  "source": "operator-confirmed E-drive working copy",
+  "workspace_version": "0.20.1",
+  "git_base": "db2d0aca327d86fd425766f7b2b3ba2b4fee6f69",
+  "source_dirty": true,
+  "fingerprinted_inputs": 313,
+  "changed_inputs_during_final_validation": [],
+  "input_set_sha256": "e1204f08816e0bd59d6804807016c66b4eb2ecb3f1ddac93ac2ec27495153be1",
+  "input_set_encoding": "UTF-8 compact JSON array sorted by path, object keys sorted",
+  "workspace_files": {
+    "Cargo.toml": "c71dca9dcca2b378496bf75c0688bf576b161936fefe5235e99a13aa583dd0d6",
+    "Cargo.lock": "ec8b7cca87d30adecee6946cbd5f0ea3f115227153c6e6e0b856a32db70a3ba8"
+  }
+}
