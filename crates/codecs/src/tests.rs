@@ -17,15 +17,15 @@ fn fixture(name: &str, args: &[&str]) -> Option<Arc<[u8]>> {
         None
     })?;
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/codecs");
-    std::fs::create_dir_all(&dir).ok()?;
-    let out = dir.join(name);
-    if !out.exists() {
-        let st = Command::new(ff).args(["-y", "-v", "error"]).args(args).arg(&out).status().ok()?;
-        if !st.success() {
+    // ffmpeg writes a temporary file that is renamed into place, so a test sharing the fixture never
+    // reads it half-written, and a failed or interrupted run leaves no partial file behind
+    let out = filmcraft_testkit::fixtures::generate(&dir.join(name), |tmp| {
+        let ok = Command::new(ff).args(["-y", "-v", "error"]).args(args).arg(tmp).status().is_ok_and(|s| s.success());
+        if !ok {
             eprintln!("fixture {name} failed; skipping");
-            return None;
         }
-    }
+        ok
+    })?;
     Some(std::fs::read(out).ok()?.into())
 }
 
