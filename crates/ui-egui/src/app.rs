@@ -362,7 +362,10 @@ impl FilmcraftApp {
         self.timeline_still = if self.ui.timeline.animating() { 0 } else { self.timeline_still.saturating_add(1) };
         // This is a real UI pass: the one synthetic step offered to raw_input_hook has been fed to
         // egui now. A hidden logic tick never reaches this point and keeps it pending.
-        self.synthetic_pending_step = None;
+        if self.synthetic_pending_step.is_some() && self.synthetic_step_offered {
+            self.control_input_started = true;
+            self.synthetic_pending_step = None;
+        }
         self.synthetic_step_offered = false;
         self.synthetic_modifiers_offered = false;
         let first_pass = ctx.current_pass_index() == 0;
@@ -451,6 +454,10 @@ impl eframe::App for FilmcraftApp {
         }
         if self.control_input_only {
             drop_native_input(raw_input);
+            // Eframe attaches the previous logic-only input to this frame. Clearing native
+            // events also removes that copy of the synthetic batch, so offer it again.
+            self.synthetic_step_offered = false;
+            self.synthetic_modifiers_offered = false;
         }
         if raw_input.viewport().visible() == Some(false) {
             return;
@@ -486,7 +493,10 @@ impl eframe::App for FilmcraftApp {
                     .position(|e| pointer(e) || matches!(e, egui::Event::Key { pressed: false, .. }))
                     .map_or(self.synthetic.len(), |i| if pointer(&self.synthetic[i]) { i.max(1) } else { i + 1 })
             };
-            self.control_input_started = true;
+            if !self.control_input_only {
+                // This mode may leave an offered batch in eframe's raw input buffer.
+                self.control_input_started = true;
+            }
             let step: Vec<egui::Event> = self.synthetic.drain(..n).collect();
             for event in &step {
                 if let egui::Event::ModifiersChanged(modifiers) = event {
