@@ -7,16 +7,13 @@ use std::sync::Arc;
 use filmcraft_media::FrameRequest;
 use filmcraft_time::{TICKS_PER_SECOND, Tick};
 
-pub(crate) fn ffmpeg() -> Option<&'static str> {
-    ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"].into_iter().find(|p| std::path::Path::new(p).exists())
+pub(crate) fn ffmpeg() -> Option<PathBuf> {
+    filmcraft_testkit::ffmpeg()
 }
 
 fn fixture(name: &str, args: &[&str]) -> Option<Arc<[u8]>> {
-    let ff = ffmpeg().or_else(|| {
-        eprintln!("ffmpeg not found; skipping");
-        None
-    })?;
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/codecs");
+    let ff = filmcraft_testkit::ffmpeg_or_skip("codec fixture")?;
+    let dir = filmcraft_testkit::fixtures::fixtures_root().join("codecs");
     // ffmpeg writes a temporary file that is renamed into place, so a test sharing the fixture never
     // reads it half-written, and a failed or interrupted run leaves no partial file behind
     let out = filmcraft_testkit::fixtures::generate(&dir.join(name), |tmp| {
@@ -316,7 +313,7 @@ fn matroska_reordered_video_without_default_duration_keeps_its_rate() {
 /// (`None` when ffmpeg or the encoder is unavailable).
 pub(crate) fn fixture_path(name: &str, args: &[&str]) -> Option<PathBuf> {
     fixture(name, args)?;
-    Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/codecs").join(name))
+    Some(filmcraft_testkit::fixtures::fixtures_root().join("codecs").join(name))
 }
 
 /// ffmpeg's decode of `src` as raw planar video (the oracle).
@@ -339,7 +336,7 @@ pub(crate) fn yuv_bytes(f: &filmcraft_frame::VideoFrame) -> Vec<u8> {
 /// Random access into a VP9 file: frames requested out of order (seeks back and forth across key
 /// frames, then sequential playback) are sample-exact against ffmpeg's decode.
 fn check_vp9_seeks(name: &str, container: &str, pix_fmt: &str, extra: &[&str], frames: usize) {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/codecs");
+    let dir = filmcraft_testkit::fixtures::fixtures_root().join("codecs");
     let log = dir.join(format!("{name}.passlog")).to_string_lossy().into_owned();
     let mut args = vec!["-f", "lavfi", "-i", "testsrc2=s=352x288:r=25,noise=alls=8:allf=t", "-frames:v"];
     let n = frames.to_string();
@@ -539,7 +536,7 @@ fn vp9_webm_alpha_layer_matches_libvpx() {
 #[test]
 fn vp8_webm_random_access_matches_libvpx() {
     let frames = 150usize;
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/codecs");
+    let dir = filmcraft_testkit::fixtures::fixtures_root().join("codecs");
     let path = dir.join("vp8_hidden_altref.webm");
     if !path.exists() {
         let Some(y4m) =
@@ -718,7 +715,7 @@ fn mkv_vp9_rgb() {
 /// interleaved f32 at 48 kHz: the reference for our Opus path.
 fn opus_reference(name: &str) -> Option<Vec<f32>> {
     let ff = ffmpeg()?;
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures/codecs");
+    let dir = filmcraft_testkit::fixtures::fixtures_root().join("codecs");
     let out = dir.join(format!("{name}.ref.f32"));
     let st = Command::new(ff)
         .args(["-y", "-v", "error", "-c:a", "libopus", "-i"])
