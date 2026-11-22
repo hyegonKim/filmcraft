@@ -1170,6 +1170,124 @@ fn sequence_summary_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"summary": summary, "jobCounts": s.export_queue.job_counts()}))
 }
 
+fn hls_playlist_cmd(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "export.hlsPlaylist";
+    let seq_id = sequence_param(s, p, cmd)?;
+    let seq = s.project.sequence(seq_id).ok_or(EngineError::NoSequence)?;
+    let fps = seq.settings.frame_rate.as_f64();
+    let dur_sec = seq.duration().seconds().max(1.0);
+    let seg_dur = u64_p(p, "segmentDurationSec").unwrap_or(6).clamp(1, 30) as u32;
+    let byte_range = bool_p(p, "byteRangeSingleFile").unwrap_or(false);
+    let renditions = filmcraft_export::compressor::HlsRendition::standard_abr_ladder(fps, Some("audio-stereo"));
+    let audio_groups = vec![filmcraft_export::compressor::HlsAudioGroup {
+        group_id: "audio-stereo".into(),
+        name: "Main Audio".into(),
+        language: str_p(p, "language").unwrap_or("en").into(),
+        channels: 2,
+        uri: "audio/prog_index.m3u8".into(),
+        is_default: true,
+        autoselect: true,
+    }];
+    let master_m3u8 = filmcraft_export::compressor::build_hls_master_playlist(&renditions, &audio_groups);
+    let seg_count = (dur_sec / f64::from(seg_dur)).ceil().max(1.0) as usize;
+    let mut segments = Vec::with_capacity(seg_count);
+    for i in 0..seg_count {
+        let rem = (dur_sec - (i as f64) * f64::from(seg_dur)).clamp(0.001, f64::from(seg_dur));
+        let (uri, br) = if byte_range {
+            ("main.mp4".into(), Some((524_288, (i as u64) * 524_288)))
+        } else {
+            (format!("seg_{i:05}.ts"), None)
+        };
+        segments.push(filmcraft_export::compressor::HlsSegment {
+            duration_sec: rem,
+            uri,
+            title: format!("Segment {}", i + 1),
+            byte_range: br,
+        });
+    }
+    let media_m3u8 = filmcraft_export::compressor::build_hls_media_playlist(seg_dur, 0, &segments, true);
+    if let Some(path) = str_p(p, "path") {
+        s.services.write_file(path, master_m3u8.as_bytes()).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+        return Ok(json!({"path": path, "masterM3u8": master_m3u8, "mediaM3u8": media_m3u8, "renditions": renditions.len(), "segments": segments.len()}));
+    }
+    Ok(json!({"masterM3u8": master_m3u8, "mediaM3u8": media_m3u8, "renditions": renditions.len(), "segments": segments.len()}))
+}
+
+fn imf_package_cmd(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "export.imfPackage";
+    let seq_id = sequence_param(s, p, cmd)?;
+    let seq = s.project.sequence(seq_id).ok_or(EngineError::NoSequence)?;
+    let seq_name = s.project.item(seq_id).map(|i| i.name.clone()).unwrap_or_else(|| "Master".into());
+    let title = str_p(p, "title").unwrap_or(&seq_name).to_string();
+    let issuer = str_p(p, "issuer").unwrap_or("FilmCraft Studio").to_string();
+    let annotation = str_p(p, "annotation").unwrap_or(&title).to_string();
+    let content_kind = str_p(p, "contentKind").unwrap_or("feature").to_string();
+    let rate = seq.settings.frame_rate;
+    let edit_rate = (rate.num.max(1) as u32, rate.den.max(1) as u32);
+    let dur_sec = seq.duration().seconds().max(0.04);
+    let frames = (dur_sec * rate.as_f64()).round().max(1.0) as u64;
+    let sr = seq.settings.sample_rate.max(1);
+    let audio_samples = (dur_sec * f64::from(sr)).round().max(1.0) as u64;
+    let spec_imf = filmcraft_export::compressor::ImfPackageSpec {
+        cpl_uuid: format!("11111111-2222-4333-8444-{:012x}", seq_id.0),
+        pkl_uuid: format!("22222222-3333-4444-8555-{:012x}", seq_id.0),
+        assetmap_uuid: format!("33333333-4444-4555-8666-{:012x}", seq_id.0),
+        annotation,
+        issuer,
+        creator: "FilmCraft IMF Packager".into(),
+        content_title: title,
+        content_kind,
+        edit_rate,
+        tracks: vec![
+            filmcraft_export::compressor::ImfAssetTrack {
+                uuid: format!("aaaaaaaa-0001-4000-8000-{:012x}", seq_id.0),
+                file_path: "VIDEO_01.mxf".into(),
+                kind: filmcraft_export::compressor::ImfTrackKind::MainImage,
+                edit_rate,
+                intrinsic_duration: frames,
+                entry_point: 0,
+                source_duration: frames,
+                hash_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+                byte_size: frames * 65_536,
+            },
+            filmcraft_export::compressor::ImfAssetTrack {
+                uuid: format!("bbbbbbbb-0002-4000-8000-{:012x}", seq_id.0),
+                file_path: "AUDIO_01.mxf".into(),
+                kind: filmcraft_export::compressor::ImfTrackKind::MainAudio,
+                edit_rate: (sr, 1),
+                intrinsic_duration: audio_samples,
+                entry_point: 0,
+                source_duration: audio_samples,
+                hash_base64: "BBBBBBBBBBBBBBBBBBBBBBBBBBB=".into(),
+                byte_size: audio_samples * 6,
+            },
+        ],
+    };
+    let xmls = filmcraft_export::compressor::build_imf_package_xmls(&spec_imf);
+    if let Some(dir) = str_p(p, "dir") {
+        let base = Path::new(dir);
+        for (name, content) in [("CPL.xml", &xmls.cpl_xml), ("PKL.xml", &xmls.pkl_xml), ("ASSETMAP.xml", &xmls.assetmap_xml), ("VOLINDEX.xml", &xmls.volindex_xml)] {
+            let target = base.join(name);
+            let target_str = target.to_string_lossy();
+            s.services.write_file(&target_str, content.as_bytes()).map_err(|e| EngineError::Other(format!("{target_str}: {e}")))?;
+        }
+        return Ok(json!({
+            "dir": dir,
+            "files": ["CPL.xml", "PKL.xml", "ASSETMAP.xml", "VOLINDEX.xml"],
+            "cplXml": xmls.cpl_xml,
+            "pklXml": xmls.pkl_xml,
+            "assetmapXml": xmls.assetmap_xml,
+            "volindexXml": xmls.volindex_xml,
+        }));
+    }
+    Ok(json!({
+        "cplXml": xmls.cpl_xml,
+        "pklXml": xmls.pkl_xml,
+        "assetmapXml": xmls.assetmap_xml,
+        "volindexXml": xmls.volindex_xml,
+    }))
+}
+
 type Run = fn(&mut Session, &Value) -> Result<Value>;
 
 fn spec(
@@ -1202,6 +1320,22 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
         spec("export.formats", "List Export Formats", "{}", always, formats, false),
         spec("export.resolve", "Resolve Export Settings", "{…settings params, \"path\":str?}", has_seq, resolve, false),
         spec("export.sequenceSummary", "Summarize Sequence Contents", r#"{"sequence":id?}"#, has_seq, sequence_summary_cmd, false),
+        spec(
+            "export.hlsPlaylist",
+            "Generate HLS Adaptive Bitrate Playlists",
+            r#"{"sequence":id?,"path":str?,"segmentDurationSec":1..30=6,"byteRangeSingleFile":bool=false,"language":str="en"}"#,
+            has_seq,
+            hls_playlist_cmd,
+            false,
+        ),
+        spec(
+            "export.imfPackage",
+            "Generate SMPTE IMF Package XMLs",
+            r#"{"sequence":id?,"dir":str?,"title":str?,"issuer":str?,"annotation":str?,"contentKind":str="feature"}"#,
+            has_seq,
+            imf_package_cmd,
+            false,
+        ),
         spec(
             "export.queue.add",
             "Send to Export Queue",
@@ -1437,5 +1571,15 @@ mod summary_tests {
         for p in [json!({"sequence": "x"}), json!({"sequence": null})] {
             assert!(session.execute("export.sequenceSummary", p.clone()).is_ok(), "{p}");
         }
+
+        let hls = session.execute("export.hlsPlaylist", json!({"segmentDurationSec": 4, "byteRangeSingleFile": true})).expect("export.hlsPlaylist");
+        assert!(hls["masterM3u8"].as_str().unwrap_or_default().contains("#EXT-X-STREAM-INF"));
+        assert!(hls["mediaM3u8"].as_str().unwrap_or_default().contains("#EXT-X-BYTERANGE:"));
+
+        let imf = session.execute("export.imfPackage", json!({"title": "Netflix Master", "issuer": "ArtCraft"})).expect("export.imfPackage");
+        assert!(imf["cplXml"].as_str().unwrap_or_default().contains("<CompositionPlaylist"));
+        assert!(imf["pklXml"].as_str().unwrap_or_default().contains("<PackingList"));
+        assert!(imf["assetmapXml"].as_str().unwrap_or_default().contains("<AssetMap"));
+        assert!(imf["volindexXml"].as_str().unwrap_or_default().contains("<VolumeIndex"));
     }
 }

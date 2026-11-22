@@ -17,6 +17,7 @@ use std::io::Write;
 
 mod aac_out;
 mod audio_out;
+pub mod compressor;
 mod deflate;
 mod job;
 mod mxf_out;
@@ -28,6 +29,11 @@ mod raster;
 pub mod settings;
 pub mod still;
 pub use audio_out::LoudnessReport;
+pub use compressor::{
+    DestinationBundle, DestinationOutput, HlsAudioGroup, HlsRendition, HlsSegment, ImfAssetTrack,
+    ImfPackageSpec, ImfPackageXmls, ImfTrackKind, PostExportAction, WatchFolderRule,
+    build_hls_master_playlist, build_hls_media_playlist, build_imf_package_xmls,
+};
 pub use job::{Exporter, Step, stepped};
 pub use mxf_out::opatom_audio_paths;
 pub use pcm::{image_sequence_path, write_aiff, write_wav};
