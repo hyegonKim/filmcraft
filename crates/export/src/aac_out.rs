@@ -7,7 +7,7 @@ use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use filmcraft_isobmff::{Brand, CodecConfig, Mp4Writer, TrackConfig, WriteSample, WriterOptions};
+use filmcraft_isobmff::{Brand, CodecConfig, Edit, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use filmcraft_project::{ItemId, Project};
 use filmcraft_render::SourceProvider;
 use filmcraft_time::TimeRange;
@@ -18,6 +18,15 @@ use crate::{AudioEncoder, ExportError, ExportSettings, Format, Out, Progress, Re
 /// Whether `path` asks for a raw ADTS stream rather than an MPEG-4 file.
 pub(crate) fn is_adts_path(path: &str) -> bool {
     std::path::Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("aac"))
+}
+
+/// Give the edit duration one tick per PCM sample and keep both priming and tail padding
+/// outside the playback range. The full AAC packets are still available to the decoder.
+pub(crate) fn mp4_track(opts: &mut WriterOptions, audio: &AudioOut, entry: SampleEntry, priming: u32) -> TrackConfig {
+    opts.movie_timescale = audio.sr;
+    let mut track = TrackConfig::new(entry, audio.sr);
+    track.edits.push(Edit { segment_duration: audio.frames, media_time: i64::from(priming), media_rate: 0x10000 });
+    track
 }
 
 /// Where the encoded access units go.
@@ -117,7 +126,7 @@ pub(crate) fn export(
         .find_map(|f| f(Format::Aac, a.sr, a.channels as u32, settings))
         .ok_or_else(|| ExportError::Unsupported("AAC encoder not available".into()))??;
     let entry = enc.sample_entry();
-    let frames = a.remaining();
+    let frames = a.frames;
     // one second per chunk: memory stays flat however long the range is
     let chunk = i64::from(a.sr.max(1));
     if !settings.part_of_batch {
@@ -134,9 +143,8 @@ pub(crate) fn export(
     } else {
         let mut opts = WriterOptions::new(Brand::Mp4);
         opts.metadata = settings.metadata.udta();
+        let track = mp4_track(&mut opts, &a, entry, enc.priming());
         let mut mux = Mp4Writer::new(Out::create(settings)?, opts).map_err(|e| ExportError::Io(e.to_string()))?;
-        let mut track = TrackConfig::new(entry, a.sr);
-        track.media_start = Some(i64::from(enc.priming()));
         let track = mux.add_track(track).map_err(|e| ExportError::Io(e.to_string()))?;
         Sink::Mp4 { mux, track, frame: enc.frame_size() }
     };

@@ -75,7 +75,7 @@ use crate::pipeline::Pipeline;
 use crate::settings::{AudioCodec, BitrateMode};
 use crate::{
     AudioEncoder, ColorSignal, EncodedPacket, EncoderFactory, EncoderFrame, ExportError, ExportSettings, Format, H264Pass, Out, PrepareAhead, Progress, Report,
-    Result, Stage, VideoEncoder, audio_factories, export_range, frame_span, note_stage, timed, video_factories,
+    Result, Stage, VideoEncoder, aac_out, audio_factories, export_range, frame_span, note_stage, timed, video_factories,
 };
 
 /// Output frames per interleaved group: the video packets of these frames, then the audio up to
@@ -424,16 +424,13 @@ impl Exporter {
         let file = Out::create(&self.settings)?;
         let mut opts = WriterOptions::new(self.brand);
         opts.metadata = self.settings.metadata.udta();
-        let mut mux = Mp4Writer::new(file, opts).map_err(|e| ExportError::Io(e.to_string()))?;
-        let mut vcfg = TrackConfig::new(self.venc.sample_entry(), self.venc.timescale());
-        vcfg.media_start = self.venc.media_start();
-        self.vt = mux.add_track(vcfg).map_err(|e| ExportError::Io(e.to_string()))?;
-        self.at = match (&self.audio, &self.aenc) {
+        let audio_track = match (&self.audio, &self.aenc) {
             (None, _) => None,
+            (Some(a), Some(enc)) if self.settings.audio_codec() == AudioCodec::Aac => Some(aac_out::mp4_track(&mut opts, a, enc.sample_entry(), enc.priming())),
             (Some(a), Some(enc)) => {
                 let mut c = TrackConfig::new(enc.sample_entry(), a.sr);
                 c.media_start = Some(enc.priming() as i64);
-                Some(mux.add_track(c).map_err(|e| ExportError::Io(e.to_string()))?)
+                Some(c)
             }
             (Some(a), None) => {
                 let f = self.settings.audio.sample_format();
@@ -445,9 +442,14 @@ impl Exporter {
                     channels: a.channels as _,
                     sample_rate: a.sr as f64,
                 };
-                Some(mux.add_track(TrackConfig::new(SampleEntry::pcm(pcm), a.sr)).map_err(|e| ExportError::Io(e.to_string()))?)
+                Some(TrackConfig::new(SampleEntry::pcm(pcm), a.sr))
             }
         };
+        let mut mux = Mp4Writer::new(file, opts).map_err(|e| ExportError::Io(e.to_string()))?;
+        let mut vcfg = TrackConfig::new(self.venc.sample_entry(), self.venc.timescale());
+        vcfg.media_start = self.venc.media_start();
+        self.vt = mux.add_track(vcfg).map_err(|e| ExportError::Io(e.to_string()))?;
+        self.at = audio_track.map(|track| mux.add_track(track)).transpose().map_err(|e| ExportError::Io(e.to_string()))?;
         self.mux = Some(mux);
         Ok(())
     }

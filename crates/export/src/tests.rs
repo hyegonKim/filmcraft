@@ -76,6 +76,30 @@ fn mjpeg_mov_roundtrip() {
 }
 
 #[test]
+fn aac_export_excludes_priming_and_tail_padding() {
+    use filmcraft_isobmff::{TrackKind as Mp4TrackKind, open};
+
+    let (p, seq, m) = project();
+    let rate = FrameRate::FPS_29_97;
+    let range = TimeRange::new(rate.tick_of(1), rate.tick_of(2));
+    let samples = 3_203;
+    for (format, name) in [(Format::Aac, "aac-timing.m4a"), (Format::H264, "aac-timing.mp4")] {
+        let path = tmp(name);
+        let audio = AudioSettings { sample_rate: Some(48_000), ..Default::default() };
+        let settings = ExportSettings { format, path: path.clone(), audio, range: Some(range), ..Default::default() };
+        export(&p, seq, &settings, &m, &Progress::default()).unwrap();
+
+        let file = open(std::fs::read(&path).unwrap()).unwrap();
+        let audio = &file.tracks[file.track_of_kind(Mp4TrackKind::Audio).unwrap()];
+        let [edit] = audio.edits.as_slice() else { panic!("{name}: expected one AAC edit") };
+        assert_eq!(audio.timescale, 48_000);
+        assert_eq!(edit.media_time, 1_024, "{name}: priming");
+        assert_eq!(edit.segment_duration * u64::from(audio.timescale), samples * u64::from(file.timescale), "{name}: exact playback length");
+        assert!(audio.duration > samples + 1_024, "{name}: the stored AAC frames include encoder padding");
+    }
+}
+
+#[test]
 fn wav_png_gif() {
     let (p, seq, m) = project();
     for (fmt, name) in [(Format::Wav, "a.wav"), (Format::Gif, "a.gif"), (Format::PngSequence, "seq.png")] {

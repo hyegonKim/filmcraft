@@ -209,23 +209,16 @@ fn pcm_in_mp4_ipcm() {
 #[test]
 fn aac_priming_edit() {
     let (Some(src), Some(_)) = (fixture("aac.mp4"), ffprobe()) else { return };
-    let data = std::fs::read(&src).unwrap();
-    let f = open(data.as_slice()).unwrap();
-    let t = &f.tracks[0];
-    let mut w = Mp4Writer::new(Cursor::new(Vec::new()), WriterOptions::new(Brand::Mp4)).unwrap();
-    let mut cfg = TrackConfig::new(t.entries[0].clone(), t.timescale);
-    cfg.media_start = Some(1024);
-    let k = w.add_track(cfg).unwrap();
-    for (i, s) in t.samples.iter().enumerate() {
-        let d = f.read_sample(data.as_slice(), 0, i).unwrap();
-        w.write_sample(k, WriteSample { data: &d, duration: s.duration, composition_offset: 0, is_sync: true }).unwrap();
-    }
-    let out = out_dir().join("aac_priming.mp4");
-    std::fs::write(&out, w.finish().unwrap().into_inner()).unwrap();
+    // The source's edit sets both the skip at the start and the playback end.
+    // Its final AAC packet can include padding beyond that end.
+    let (source, out) = remux(&src, "aac_priming.mp4", Brand::Mp4, Finish::Normal, None).unwrap();
+    let muxed = open(std::fs::read(&out).unwrap()).unwrap();
+    assert_eq!(muxed.timescale, source.timescale);
+    assert_eq!(muxed.tracks[0].edits, source.tracks[0].edits);
     decode_clean(&out);
     let pk = packets(&out);
     assert_eq!(int(&pk[0]["pts"]), Some(-1024));
-    assert_eq!(int(&streams(&out)[0]["duration_ts"]), int(&streams(&src)[0]["duration_ts"]));
+    assert_eq!(int(&streams(&out)[0]["duration_ts"]), Some(96_000));
 }
 
 #[test]
