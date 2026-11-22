@@ -1,4 +1,4 @@
-//! FCPXML (1.9–1.11) import/export.
+//! FCPXML (1.9–1.13) import/export.
 //!
 //! Mapping between FilmCraft's track model and FCPXML's magnetic model:
 //! - V1 is the primary storyline (`spine`): clips, `gap`s and `transition`s.
@@ -7,10 +7,13 @@
 //!   sits on the same-numbered audio track with identical timing is written as one clip carrying
 //!   both (`srcEnable="all"`), otherwise `srcEnable="video"`/`"audio"`.
 //! - Rational times (`1001/24000s`) map exactly onto ticks.
-//! - Standalone `video` elements reference the picture of an asset (including still images),
-//!   without importing that asset's audio. Effect-backed generators are reported as unsupported.
-//! - `adjust-transform` (position in percent of frame height, FCP y-up, counter-clockwise
-//!   rotation), `adjust-blend` (opacity), `adjust-volume` (dB) and their keyframes are mapped;
+//! - Standalone `video` and `audio` elements reference the picture or sound of an asset,
+//!   without importing the other stream. `audition` elements import their active pick;
+//!   `sync-clip` and `mc-clip`/`multicam` elements map to linked clips and multi-camera sequences.
+//!   Effect-backed generators are reported as unsupported.
+//! - `adjust-transform` (position in percent of frame height, FCP y-up, uniform & non-uniform scale,
+//!   counter-clockwise rotation), `adjust-blend` (opacity and blend modes), `adjust-volume` (dB),
+//!   `adjust-panner` (stereo pan/balance) and their keyframes are mapped;
 //!   constant speed, reverse and freeze frames use a two-point `timeMap`.
 //! - Markers on primary-storyline elements become sequence markers; markers on connected clips stay
 //!   clip markers. Transitions are supported on the primary storyline (and read from secondary
@@ -115,6 +118,38 @@ fn parse_audio_rate(s: &str) -> Option<u32> {
     r.filter(|&sr| sr > 0 && sr <= 384_000)
 }
 
+const BLEND_FCPXML: &[(&str, u32)] = &[
+    ("normal", 0),
+    ("darken", 2),
+    ("multiply", 3),
+    ("color-burn", 4),
+    ("linear-burn", 5),
+    ("darker-color", 6),
+    ("lighten", 7),
+    ("screen", 8),
+    ("color-dodge", 9),
+    ("add", 10),
+    ("linear-dodge", 10),
+    ("lighter-color", 11),
+    ("overlay", 12),
+    ("soft-light", 13),
+    ("softlight", 13),
+    ("hard-light", 14),
+    ("hardlight", 14),
+    ("vivid-light", 15),
+    ("linear-light", 16),
+    ("pin-light", 17),
+    ("hard-mix", 18),
+    ("difference", 19),
+    ("exclusion", 20),
+    ("subtract", 21),
+    ("divide", 22),
+    ("hue", 23),
+    ("saturation", 24),
+    ("color", 25),
+    ("luminosity", 26),
+];
+
 // ---------------------------------------------------------------------------------------------
 // Import
 // ---------------------------------------------------------------------------------------------
@@ -137,6 +172,7 @@ struct Imp<'a, 'i, 'r> {
     media_nodes: HashMap<String, Node<'a, 'i>>,
     media_items: HashMap<String, ItemId>,
     media_active: HashSet<String>,
+    mc_angles: HashMap<(String, String), usize>,
     effects: HashMap<String, String>,
 }
 
@@ -171,8 +207,8 @@ pub(crate) fn import(text: &str, opts: &ImportOptions, report: &mut Report) -> R
     }
     if let Some(v) = root.attribute("version") {
         let minor = v.split('.').nth(1).and_then(|m| m.parse::<u32>().ok()).unwrap_or(0);
-        if !v.starts_with("1.") || minor > 11 {
-            report.info(format!("FCPXML version {v} is newer than 1.11; unknown elements were ignored"));
+        if !v.starts_with("1.") || minor > 13 {
+            report.info(format!("FCPXML version {v} is newer than 1.13; unknown elements were ignored"));
         }
     }
     let lib_name = child(root, "library").and_then(|l| child(l, "event")).and_then(|e| e.attribute("name")).unwrap_or("Imported FCPXML");
@@ -186,6 +222,7 @@ pub(crate) fn import(text: &str, opts: &ImportOptions, report: &mut Report) -> R
         media_nodes: HashMap::new(),
         media_items: HashMap::new(),
         media_active: HashSet::new(),
+        mc_angles: HashMap::new(),
         effects: HashMap::new(),
     };
     if let Some(res) = child(root, "resources") {
@@ -233,9 +270,14 @@ pub(crate) fn import(text: &str, opts: &ImportOptions, report: &mut Report) -> R
                         imp.b.top.push(id);
                     }
                 }
-                "asset-clip" | "clip" => {
+                "asset-clip" | "clip" | "video" | "audio" => {
                     if let Some(r) = c.attribute("ref") {
                         imp.asset(r, Some(bin));
+                    }
+                }
+                "mc-clip" | "ref-clip" => {
+                    if let Some(r) = c.attribute("ref") {
+                        imp.media(r);
                     }
                 }
                 _ => {}
@@ -256,6 +298,19 @@ pub(crate) fn import(text: &str, opts: &ImportOptions, report: &mut Report) -> R
 
 fn flag(n: Node, name: &str) -> Option<bool> {
     n.attribute(name).map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+struct ResolvedElementMedia<'a, 'i> {
+    item: ItemId,
+    origin: Tick,
+    has_v: bool,
+    has_a: bool,
+    inner_primary: Option<Node<'a, 'i>>,
+    merged_clip_audio_ref: Option<String>,
+    mc_v_angle: Option<u32>,
+    mc_a_angle: Option<u32>,
+    mc_v_node: Option<Node<'a, 'i>>,
+    mc_a_node: Option<Node<'a, 'i>>,
 }
 
 impl<'a, 'i> Imp<'a, 'i, '_> {
@@ -303,13 +358,17 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
         Some(a)
     }
 
-    /// Nested sequence from a `<media>` resource.
+    /// Nested sequence or multi-camera source sequence from a `<media>` resource.
     fn media(&mut self, id: &str) -> Option<ItemId> {
         if let Some(i) = self.media_items.get(id) {
             return Some(*i);
         }
         let n = *self.media_nodes.get(id)?;
-        let s = child(n, "sequence")?;
+        let seq_node = child(n, "sequence");
+        let mc_node = child(n, "multicam");
+        if seq_node.is_none() && mc_node.is_none() {
+            return None;
+        }
         if !self.media_active.insert(id.into()) {
             self.report.warn(format!("recursive FCPXML media resource {id:?} ignored"));
             return None;
@@ -317,10 +376,88 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
         // Mark the resource before descending: a compound clip can reference itself through a
         // ref-clip before a completed sequence is available to cache.
         let name = n.attribute("name").unwrap_or("Compound Clip").to_string();
-        let item = self.sequence(s, &name, None);
+        let item = if let Some(s) = seq_node {
+            self.sequence(s, &name, None)
+        } else if let Some(mc) = mc_node {
+            self.multicam(id, mc, &name, None)
+        } else {
+            self.media_active.remove(id);
+            return None;
+        };
         self.media_active.remove(id);
         self.media_items.insert(id.into(), item);
         Some(item)
+    }
+
+    fn multicam(&mut self, media_id: &str, mc: Node<'a, 'i>, name: &str, bin: Option<BinId>) -> ItemId {
+        let (rate, w, h) = mc.attribute("format").and_then(|f| self.formats.get(f)).copied().unwrap_or((FrameRate::default(), 1920, 1080));
+        let df = mc.attribute("tcFormat") == Some("DF");
+        let mut settings = settings_for(rate, w, h, df);
+        if let Some(sr) = mc.attribute("audioRate").and_then(parse_audio_rate) {
+            settings.sample_rate = sr;
+        }
+        let id = self.b.reserve_sequence(name, settings.clone(), bin);
+        let mut seq = empty_sequence(settings.clone());
+        let tc_start = attr_time(mc, "tcStart").unwrap_or(Tick::ZERO);
+        seq.start_timecode = rate.frame_at(tc_start);
+        let ctx = Ctx { seq_rate: rate, frame: (w, h) };
+        let angles: Vec<Node<'a, 'i>> = children(mc, "mc-angle").collect();
+        let num_angles = angles.len().clamp(1, MAX_IMPORTED_TRACKS);
+        self.b.ensure_tracks(&mut seq, TrackKind::Video, num_angles);
+        self.b.ensure_tracks(&mut seq, TrackKind::Audio, num_angles);
+        let mut cameras = Vec::with_capacity(angles.len());
+        for (idx, angle_el) in angles.into_iter().take(MAX_IMPORTED_TRACKS).enumerate() {
+            let angle_name = angle_el
+                .attribute("name")
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("Angle {}", idx + 1));
+            if let Some(aid) = angle_el.attribute("angleID") {
+                self.mc_angles.insert((media_id.to_string(), aid.to_string()), idx);
+            }
+            self.mc_angles.insert((media_id.to_string(), angle_name.clone()), idx);
+            let mut angle_seq = empty_sequence(settings.clone());
+            self.b.ensure_tracks(&mut angle_seq, TrackKind::Video, 1);
+            self.b.ensure_tracks(&mut angle_seq, TrackKind::Audio, 1);
+            self.storyline(&mut angle_seq, &ctx, angle_el, -tc_start, 0, false);
+            let mut v_track_id = None;
+            let mut a_track_ids = Vec::new();
+            let mut first_source = None;
+            if let (Some(src_vt), Some(dst_vt)) = (angle_seq.video_tracks.into_iter().next(), seq.video_tracks.get_mut(idx)) {
+                if let Some(first) = src_vt.items.first() {
+                    first_source = Some(first.item);
+                    v_track_id = Some(dst_vt.id);
+                }
+                dst_vt.name = angle_name.clone();
+                dst_vt.items = src_vt.items;
+                dst_vt.transitions = src_vt.transitions;
+            }
+            if let (Some(src_at), Some(dst_at)) = (angle_seq.audio_tracks.into_iter().next(), seq.audio_tracks.get_mut(idx)) {
+                if let Some(first) = src_at.items.first() {
+                    if first_source.is_none() {
+                        first_source = Some(first.item);
+                    }
+                    a_track_ids.push(dst_at.id);
+                }
+                dst_at.name = angle_name.clone();
+                dst_at.items = src_at.items;
+                dst_at.transitions = src_at.transitions;
+            }
+            cameras.push(filmcraft_project::Camera {
+                name: angle_name,
+                video_track: v_track_id,
+                audio_tracks: a_track_ids,
+                enabled: true,
+                source: first_source,
+            });
+        }
+        seq.multicam = Some(filmcraft_project::MulticamSource {
+            cameras,
+            audio: filmcraft_project::MulticamAudio::SwitchAudio,
+            sync: "timecode".into(),
+        });
+        self.b.put_sequence(id, seq);
+        id
     }
 
     fn sequence(&mut self, s: Node<'a, 'i>, name: &str, bin: Option<BinId>) -> ItemId {
@@ -358,7 +495,9 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
                 transitions.push((laid.len(), el));
                 continue;
             }
-            let offset = attr_time(el, "offset").unwrap_or(Tick::ZERO);
+            let offset = attr_time(el, "offset")
+                .or_else(|| el.has_tag_name("audition").then(|| elements(el).next().and_then(|p| attr_time(p, "offset"))).flatten())
+                .unwrap_or(Tick::ZERO);
             let t0 = origin + offset;
             let (end, clip) = self.element(seq, ctx, el, t0, lane, primary);
             laid.push((t0, end, clip));
@@ -405,17 +544,23 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
         }
     }
 
-    /// Lay out one storyline element at timeline time `t0`. Returns (timeline end, video clip).
-    fn element(&mut self, seq: &mut Sequence, ctx: &Ctx, el: Node<'a, 'i>, t0: Tick, lane: i32, primary: bool) -> (Tick, Option<filmcraft_project::ClipId>) {
+    /// Resolve the underlying media item, origin, and track capabilities for a storyline element.
+    fn resolve_element_media(&mut self, el: Node<'a, 'i>, name: &str) -> Option<ResolvedElementMedia<'a, 'i>> {
         let tag = el.tag_name().name();
-        let dur = attr_time(el, "duration").unwrap_or(Tick::ZERO);
-        let local_start = attr_time(el, "start").unwrap_or(Tick::ZERO);
-        let mut vclip = None;
-        let mut placed: Vec<(TrackKind, filmcraft_project::ClipId)> = Vec::new();
-        let name = el.attribute("name").unwrap_or("Clip").to_string();
-        // Media and source in.
-        let media: Option<(ItemId, Tick, bool, bool)> = match tag {
-            "asset-clip" => el.attribute("ref").and_then(|r| self.asset(r, None)).map(|a| (a.item, a.start, a.has_video, a.has_audio)),
+        let mut out = ResolvedElementMedia {
+            item: ItemId::default(),
+            origin: Tick::ZERO,
+            has_v: false,
+            has_a: false,
+            inner_primary: None,
+            merged_clip_audio_ref: None,
+            mc_v_angle: None,
+            mc_a_angle: None,
+            mc_v_node: None,
+            mc_a_node: None,
+        };
+        let (item, origin, has_v, has_a) = match tag {
+            "asset-clip" => el.attribute("ref").and_then(|r| self.asset(r, None)).map(|a| (a.item, a.start, a.has_video, a.has_audio))?,
             "video" => {
                 // FCPXML 1.10 DTD: video selects an asset's picture, or references a generator.
                 // Our media model does not select additional video sources within an asset.
@@ -428,46 +573,164 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
                 if asset.is_none() {
                     self.report.warn(format!("FCPXML <video> \"{name}\" has no supported video asset/source; clip was skipped"));
                 }
-                asset.map(|a| (a.item, a.start, true, false))
+                asset.map(|a| (a.item, a.start, true, false))?
             }
-            "clip" => {
-                // A clip wraps video/audio/asset-clip children that reference the asset.
-                let inner = elements(el).find(|c| matches!(c.tag_name().name(), "video" | "audio" | "asset-clip") && c.attribute("ref").is_some());
-                inner.and_then(|c| {
-                    let a = self.asset(c.attribute("ref").unwrap_or(""), None)?;
-                    // inner local time = inner.start + (t - inner.offset)
-                    let shift = attr_time(c, "start").unwrap_or(Tick::ZERO) - attr_time(c, "offset").unwrap_or(Tick::ZERO);
-                    let v = a.has_video && c.tag_name().name() != "audio";
-                    let au = a.has_audio && (c.tag_name().name() != "video" || elements(el).any(|x| x.has_tag_name("audio")));
-                    Some((a.item, a.start - shift, v, au))
-                })
+            "audio" => {
+                let asset = el
+                    .attribute("srcID")
+                    .is_none_or(|id| id == "1" || id == "2")
+                    .then(|| el.attribute("ref").and_then(|r| self.asset(r, None)))
+                    .flatten()
+                    .filter(|a| a.has_audio);
+                if asset.is_none() {
+                    self.report.warn(format!("FCPXML <audio> \"{name}\" has no supported audio asset/source; clip was skipped"));
+                }
+                asset.map(|a| (a.item, a.start, false, true))?
             }
-            "ref-clip" => el.attribute("ref").and_then(|r| {
+            "clip" | "sync-clip" => self.resolve_wrapped_clip(el, tag, &mut out)?,
+            "ref-clip" => {
+                let r = el.attribute("ref")?;
                 let item = self.media(r)?;
                 let tc = self.b.p.sequence(item).map(|s| s.settings.frame_rate.tick_of(s.start_timecode)).unwrap_or(Tick::ZERO);
-                Some((item, tc, true, self.b.p.sequence(item).is_some_and(|s| s.audio_tracks.iter().any(|t| !t.items.is_empty()))))
-            }),
-            "gap" => None,
-            "title" | "audio" | "sync-clip" | "mc-clip" | "live-drawing" => {
-                self.report.warn(format!("FCPXML <{tag}> elements are not supported and were skipped"));
-                None
+                let has_a = self.b.p.sequence(item).is_some_and(|s| s.audio_tracks.iter().any(|t| !t.items.is_empty()));
+                (item, tc, true, has_a)
             }
-            _ => None,
+            "mc-clip" => self.resolve_mc_clip(el, &mut out)?,
+            "gap" => return None,
+            "title" | "live-drawing" => {
+                self.report.warn(format!("FCPXML <{tag}> elements are not supported and were skipped"));
+                return None;
+            }
+            _ => return None,
         };
+        out.item = item;
+        out.origin = origin;
+        out.has_v = has_v;
+        out.has_a = has_a;
+        Some(out)
+    }
+
+    /// Resolve a `<clip>` or `<sync-clip>` wrapper element.
+    fn resolve_wrapped_clip(&mut self, el: Node<'a, 'i>, tag: &str, out: &mut ResolvedElementMedia<'a, 'i>) -> Option<(ItemId, Tick, bool, bool)> {
+        let inner = elements(el)
+            .find(|c| {
+                matches!(c.tag_name().name(), "video" | "audio" | "asset-clip")
+                    && c.attribute("ref").is_some()
+                    && c.attribute("lane").is_none_or(|l| l == "0")
+            })
+            .or_else(|| elements(el).find(|c| matches!(c.tag_name().name(), "video" | "audio" | "asset-clip") && c.attribute("ref").is_some()))?;
+        out.inner_primary = Some(inner);
+        let cref = inner.attribute("ref").unwrap_or("");
+        let a = self.asset(cref, None)?;
+        let shift = attr_time(inner, "start").unwrap_or(Tick::ZERO) - attr_time(inner, "offset").unwrap_or(Tick::ZERO);
+        let c_src_enable = inner.attribute("srcEnable").unwrap_or("all");
+        let v = a.has_video && inner.tag_name().name() != "audio" && c_src_enable != "audio";
+        let has_same_ref_audio = elements(el).any(|x| x.has_tag_name("audio") && x.attribute("ref") == Some(cref));
+        let has_connected_audio = elements(el).any(|x| {
+            matches!(x.tag_name().name(), "audio" | "asset-clip")
+                && x.attribute("lane").and_then(|l| l.parse::<i32>().ok()).is_some_and(|l| l < 0)
+                && x.attribute("ref") != Some(cref)
+        });
+        let sync_role_disabled =
+            children(el, "sync-source").flat_map(|s| children(s, "audio-role-source")).any(|r| flag(r, "active") == Some(false));
+        let au = if tag == "sync-clip" {
+            a.has_audio && c_src_enable != "video" && !sync_role_disabled && !has_connected_audio
+        } else {
+            let merged = inner.tag_name().name() != "video" || has_same_ref_audio;
+            if has_same_ref_audio && a.has_audio {
+                out.merged_clip_audio_ref = Some(cref.to_string());
+            }
+            a.has_audio && merged && c_src_enable != "video"
+        };
+        Some((a.item, a.start - shift, v, au))
+    }
+
+    /// Resolve an `<mc-clip>` multicam reference element and its `<mc-source>` angle switches.
+    fn resolve_mc_clip(&mut self, el: Node<'a, 'i>, out: &mut ResolvedElementMedia<'a, 'i>) -> Option<(ItemId, Tick, bool, bool)> {
+        let r = el.attribute("ref")?;
+        let item = self.media(r)?;
+        let tc = self.b.p.sequence(item).map(|s| s.settings.frame_rate.tick_of(s.start_timecode)).unwrap_or(Tick::ZERO);
+        let sources: Vec<Node<'a, 'i>> = children(el, "mc-source").collect();
+        if sources.is_empty() {
+            out.mc_v_angle = Some(0);
+            out.mc_a_angle = Some(0);
+        } else {
+            for src in sources {
+                let aid = src.attribute("angleID").unwrap_or("");
+                let idx = self.mc_angles.get(&(r.to_string(), aid.to_string())).copied().unwrap_or(0) as u32;
+                match src.attribute("srcEnable").unwrap_or("all") {
+                    "all" => {
+                        out.mc_v_angle = Some(idx);
+                        out.mc_a_angle = Some(idx);
+                        out.mc_v_node = Some(src);
+                        out.mc_a_node = Some(src);
+                    }
+                    "video" => {
+                        out.mc_v_angle = Some(idx);
+                        out.mc_v_node = Some(src);
+                    }
+                    "audio" => {
+                        out.mc_a_angle = Some(idx);
+                        out.mc_a_node = Some(src);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let has_v = out.mc_v_angle.is_some() && self.b.p.sequence(item).is_some_and(|s| s.video_tracks.iter().any(|t| !t.items.is_empty()));
+        let has_a = out.mc_a_angle.is_some() && self.b.p.sequence(item).is_some_and(|s| s.audio_tracks.iter().any(|t| !t.items.is_empty()));
+        Some((item, tc, has_v, has_a))
+    }
+
+    /// Link a video clip and an audio clip into an AV pair on `seq`.
+    fn link_av_pair(&mut self, seq: &mut Sequence, vid_id: filmcraft_project::ClipId, aud_id: filmcraft_project::ClipId) {
+        let lid = self.b.link_id();
+        for vt in &mut seq.video_tracks {
+            if let Some(it) = vt.item_mut(vid_id) {
+                it.link = Some(lid);
+            }
+        }
+        for at in &mut seq.audio_tracks {
+            if let Some(it) = at.item_mut(aud_id) {
+                it.link = Some(lid);
+            }
+        }
+    }
+
+    /// Lay out one storyline element at timeline time `t0`. Returns (timeline end, video clip).
+    fn element(&mut self, seq: &mut Sequence, ctx: &Ctx, el: Node<'a, 'i>, t0: Tick, lane: i32, primary: bool) -> (Tick, Option<filmcraft_project::ClipId>) {
+        if el.has_tag_name("audition") {
+            let mut picks = elements(el);
+            let Some(active) = picks.next() else {
+                return (t0, None);
+            };
+            if picks.next().is_some() {
+                self.report.info("FCPXML <audition> imported active pick; inactive picks were ignored");
+            }
+            return self.element(seq, ctx, active, t0, lane, primary);
+        }
+        let tag = el.tag_name().name();
+        let dur = attr_time(el, "duration").unwrap_or(Tick::ZERO);
+        let local_start = attr_time(el, "start").unwrap_or(Tick::ZERO);
+        let mut vclip = None;
+        let mut placed: Vec<(TrackKind, filmcraft_project::ClipId)> = Vec::new();
+        let name = el.attribute("name").unwrap_or("Clip").to_string();
+        let resolved = self.resolve_element_media(el, &name);
+        let merged_clip_audio_ref = resolved.as_ref().and_then(|r| r.merged_clip_audio_ref.clone());
         let (speed, reverse, hold, src_base) = time_map(el, local_start);
-        if let Some((item, origin, has_v, has_a)) = media
+        if let Some(res) = resolved
             && dur > Tick::ZERO
         {
-            let src_in = src_base - origin;
+            let src_in = src_base - res.origin;
             let src_enable = el.attribute("srcEnable").unwrap_or("all");
-            let want_v = has_v && src_enable != "audio" && lane >= 0;
-            let want_a = has_a && src_enable != "video";
+            let want_v = res.has_v && src_enable != "audio" && lane >= 0;
+            let want_a = res.has_a && src_enable != "video";
             let link = if want_v && want_a { Some(self.b.link_id()) } else { None };
             for (kind, want) in [(TrackKind::Video, want_v), (TrackKind::Audio, want_a)] {
                 if !want {
                     continue;
                 }
-                let mut ti = self.b.clip(item, kind, &name, t0, dur, src_in.max(Tick::ZERO));
+                let mut ti = self.b.clip(res.item, kind, &name, t0, dur, src_in.max(Tick::ZERO));
                 ti.speed = speed;
                 ti.reverse = reverse;
                 if hold {
@@ -478,7 +741,24 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
                 if let Some(l) = el.attribute("label").and_then(Label::from_name) {
                     ti.label = l;
                 }
-                self.adjustments(&mut ti, el, LocalTiming { local_start, src_in, speed }, ctx, kind);
+                if tag == "mc-clip" {
+                    let ang = match kind {
+                        TrackKind::Video => res.mc_v_angle,
+                        TrackKind::Audio => res.mc_a_angle,
+                    };
+                    ti.multicam = ang.map(|angle| filmcraft_project::MulticamSel { enabled: true, angle });
+                }
+                let timing = LocalTiming { local_start, src_in, speed };
+                if let Some(inner_el) = res.inner_primary {
+                    self.adjustments(&mut ti, inner_el, timing, ctx, kind);
+                }
+                if let Some(mc_src) = match kind {
+                    TrackKind::Video => res.mc_v_node,
+                    TrackKind::Audio => res.mc_a_node,
+                } {
+                    self.adjustments(&mut ti, mc_src, timing, ctx, kind);
+                }
+                self.adjustments(&mut ti, el, timing, ctx, kind);
                 if !primary || kind == TrackKind::Audio {
                     ti.markers = self.markers(el, local_start, src_in, speed, ctx.seq_rate);
                 }
@@ -510,8 +790,16 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
             }
         }
         // Connected clips and secondary storylines.
+        let mut connected_audio_clips: Vec<filmcraft_project::ClipId> = Vec::new();
         for c in elements(el) {
             let Some(l) = c.attribute("lane").and_then(|l| l.parse::<i32>().ok()) else { continue };
+            if c.has_tag_name("audio")
+                && l < 0
+                && merged_clip_audio_ref.as_deref().is_some_and(|r| c.attribute("ref") == Some(r))
+            {
+                // Audio half of a <clip> already created above.
+                continue;
+            }
             let off = attr_time(c, "offset").unwrap_or(Tick::ZERO);
             let ct0 = t0 + (off - local_start);
             let clane = if lane > 0 && l > 0 { lane.saturating_add(l) } else { l };
@@ -520,10 +808,30 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
                 let first = elements(c).filter(|x| !x.has_tag_name("transition")).find_map(|x| attr_time(x, "offset")).unwrap_or(Tick::ZERO);
                 self.storyline(seq, ctx, c, ct0 - first, clane, false);
             } else {
+                let before_a_count: usize = seq.audio_tracks.iter().map(|t| t.items.len()).sum();
                 self.element(seq, ctx, c, ct0, clane, false);
+                if tag == "sync-clip" && clane < 0 {
+                    let after_a_count: usize = seq.audio_tracks.iter().map(|t| t.items.len()).sum();
+                    if after_a_count == before_a_count + 1
+                        && let Some(aid) = seq
+                            .audio_tracks
+                            .get(clane.unsigned_abs() as usize - 1)
+                            .and_then(|t| t.items.iter().find(|it| it.start == ct0).map(|it| it.id))
+                    {
+                        connected_audio_clips.push(aid);
+                    }
+                }
             }
         }
-        let _ = placed;
+        // In a <sync-clip> where the primary clip supplied video and a single connected clip supplied
+        // the synchronized external audio, link them into an AV pair.
+        if tag == "sync-clip"
+            && placed.len() == 1
+            && placed[0].0 == TrackKind::Video
+            && connected_audio_clips.len() == 1
+        {
+            self.link_av_pair(seq, placed[0].1, connected_audio_clips[0]);
+        }
         (t0 + dur, vclip)
     }
 
@@ -570,15 +878,21 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
                         set_param(ti, "motion", "position", p);
                     }
                     let mut nonuniform = false;
-                    if let Some(p) = self.kparam(a, "scale", &kt, |v| {
+                    if let Some(p_y) = self.kparam(a, "scale", &kt, |v| {
                         let (x, y) = pair(v);
-                        nonuniform |= (x - y).abs() > 1e-9;
-                        ParamValue::Float(x * 100.0)
+                        nonuniform |= (x - y).abs() > 1e-6;
+                        ParamValue::Float(y * 100.0)
                     }) {
-                        set_param(ti, "motion", "scale", p);
+                        set_param(ti, "motion", "scale", p_y);
                     }
                     if nonuniform {
-                        self.report.warn("non-uniform scale was imported as uniform scale");
+                        if let Some(p_x) = self.kparam(a, "scale", &kt, |v| {
+                            let (x, _) = pair(v);
+                            ParamValue::Float(x * 100.0)
+                        }) {
+                            set_param(ti, "motion", "scale_width", p_x);
+                        }
+                        set_param(ti, "motion", "uniform_scale", Param::new(ParamValue::Bool(false)));
                     }
                     if let Some(p) = self.kparam(a, "rotation", &kt, |v| ParamValue::Float(-v.trim().parse::<f64>().unwrap_or(0.0))) {
                         set_param(ti, "motion", "rotation", p);
@@ -593,10 +907,23 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
                     if let Some(p) = self.kparam(a, "amount", &kt, |v| ParamValue::Float(v.trim().parse::<f64>().unwrap_or(1.0) * 100.0)) {
                         set_param(ti, "opacity", "opacity", p);
                     }
+                    if let Some(mode) = a.attribute("mode") {
+                        match BLEND_FCPXML.iter().find(|&&(m, _)| m.eq_ignore_ascii_case(mode)).map(|&(_, i)| i) {
+                            Some(idx) => set_param(ti, "opacity", "blend", Param::new(ParamValue::Choice(idx))),
+                            None => self.report.warn(format!("FCPXML blend mode \"{mode}\" is not supported")),
+                        }
+                    }
                 }
                 ("adjust-volume", TrackKind::Audio) => {
                     if let Some(p) = self.kparam(a, "amount", &kt, |v| ParamValue::Float(parse_db(v))) {
                         set_param(ti, "volume", "level", p);
+                    }
+                }
+                ("adjust-panner", TrackKind::Audio) => {
+                    if let Some(p) = self.kparam(a, "amount", &kt, |v| {
+                        ParamValue::Float(v.trim().parse::<f64>().unwrap_or(0.0).clamp(-100.0, 100.0))
+                    }) {
+                        set_param(ti, "panner", "balance", p);
                     }
                 }
                 ("filter-video", TrackKind::Video) | ("filter-audio", TrackKind::Audio) => {
@@ -813,15 +1140,99 @@ impl Exp<'_, '_> {
             self.report.warn("missing nested sequence skipped");
             return String::new();
         };
+        let is_mc = s.multicam.is_some();
         let fmt = self.format(s.settings.frame_rate, s.settings.width, s.settings.height);
         let id = self.rid();
         self.medias.insert(item, Res { id: id.clone() });
         self.building.push(item);
-        let body = self.sequence_xml(item, &fmt, 3);
+        let body = if is_mc { self.multicam_xml(item, &fmt, 3) } else { self.sequence_xml(item, &fmt, 3) };
         self.building.pop();
         let name = self.p.item(item).map(|i| i.name.clone()).unwrap_or_default();
         self.res_out.push(format!("    <media id=\"{id}\" name=\"{}\">\n{body}    </media>\n", crate::xml::escape_attr(&name)));
         id
+    }
+
+    fn multicam_xml(&mut self, seq_id: ItemId, fmt: &str, indent: usize) -> String {
+        let Some(seq) = self.p.sequence(seq_id) else { return String::new() };
+        let rate = seq.settings.frame_rate;
+        let df = seq.settings.drop_frame && rate.supports_drop_frame();
+        let tc0 = rate.tick_of(seq.start_timecode);
+        let pad = "  ".repeat(indent);
+        let mut o = format!(
+            "{pad}<multicam format=\"{fmt}\" tcStart=\"{}\" tcFormat=\"{}\">\n",
+            fmt_time(tc0, rate),
+            if df { "DF" } else { "NDF" },
+        );
+        let mc = seq.cameras();
+        for (i, cam) in mc.cameras.iter().enumerate() {
+            let angle_id = format!("angle_{i}");
+            o.push_str(&format!(
+                "{pad}  <mc-angle name=\"{}\" angleID=\"{angle_id}\">\n",
+                crate::xml::escape_attr(&cam.name)
+            ));
+            let mut single = empty_sequence(seq.settings.clone());
+            single.start_timecode = seq.start_timecode;
+            if let Some(vt) = seq.video_tracks.get(i) {
+                single.video_tracks.push(vt.clone());
+            }
+            if let Some(at) = seq.audio_tracks.get(i) {
+                single.audio_tracks.push(at.clone());
+            }
+            let has_v = single.video_tracks.first().is_some_and(|t| !t.items.is_empty());
+            let mut t = Tick::ZERO;
+            let make_gap = |a: Tick, b: Tick| El {
+                start: a,
+                end: b,
+                local: tc0 + a,
+                xml_open: format!(
+                    "<gap name=\"Gap\" offset=\"{}\" start=\"{}\" duration=\"{}\"",
+                    fmt_time(tc0 + a, rate),
+                    fmt_time(tc0 + a, rate),
+                    fmt_time(b - a, rate)
+                ),
+                children: vec![],
+                close: "gap".into(),
+            };
+            if has_v {
+                if let Some(v1) = single.video_tracks.first() {
+                    let a1 = single.audio_tracks.first();
+                    for it in &v1.items {
+                        if it.start > t {
+                            let gap = make_gap(t, it.start);
+                            o.push_str(&self.render_el(&gap, indent + 2));
+                        }
+                        let audio = a1.and_then(|at| {
+                            at.items.iter().find(|a| {
+                                a.item == it.item
+                                    && a.start == it.start
+                                    && a.duration == it.duration
+                                    && a.source_in == it.source_in
+                                    && a.speed == it.speed
+                                    && a.reverse == it.reverse
+                                    && a.frame_hold == it.frame_hold
+                                    && a.enabled == it.enabled
+                            })
+                        });
+                        let el = self.clip_el(it, audio, TrackKind::Video, ClipPlacement { offset: tc0 + it.start, lane: None, primary: true }, &single);
+                        o.push_str(&self.render_el(&el, indent + 2));
+                        t = it.end();
+                    }
+                }
+            } else if let Some(a1) = single.audio_tracks.first() {
+                for it in &a1.items {
+                    if it.start > t {
+                        let gap = make_gap(t, it.start);
+                        o.push_str(&self.render_el(&gap, indent + 2));
+                    }
+                    let el = self.clip_el(it, None, TrackKind::Audio, ClipPlacement { offset: tc0 + it.start, lane: None, primary: true }, &single);
+                    o.push_str(&self.render_el(&el, indent + 2));
+                    t = it.end();
+                }
+            }
+            o.push_str(&format!("{pad}  </mc-angle>\n"));
+        }
+        o.push_str(&format!("{pad}</multicam>\n"));
+        o
     }
 
     fn effect(&mut self, name: &str, id_hint: &str) -> String {
@@ -1012,12 +1423,95 @@ impl Exp<'_, '_> {
         crate::common::uncarried_clip(self.p, it, rate).map(|clip| format!("{clip} is not supported in FCPXML"))
     }
 
+    /// Append `<mc-source>` angle-selection elements for a multicam clip.
+    fn mc_source_children(it: &TrackItem, audio: Option<&TrackItem>, kind: TrackKind, children: &mut Vec<String>) {
+        match (kind, audio) {
+            (TrackKind::Video, Some(ac)) => {
+                let v_ang = it.multicam.filter(|m| m.enabled).map(|m| m.angle).unwrap_or(0);
+                let a_ang = ac.multicam.filter(|m| m.enabled).map(|m| m.angle).unwrap_or(v_ang);
+                if v_ang == a_ang {
+                    children.push(format!("<mc-source angleID=\"angle_{v_ang}\" srcEnable=\"all\"/>"));
+                } else {
+                    children.push(format!("<mc-source angleID=\"angle_{v_ang}\" srcEnable=\"video\"/>"));
+                    children.push(format!("<mc-source angleID=\"angle_{a_ang}\" srcEnable=\"audio\"/>"));
+                }
+            }
+            (TrackKind::Video, None) => {
+                let v_ang = it.multicam.filter(|m| m.enabled).map(|m| m.angle).unwrap_or(0);
+                children.push(format!("<mc-source angleID=\"angle_{v_ang}\" srcEnable=\"video\"/>"));
+            }
+            (TrackKind::Audio, _) => {
+                let a_ang = it.multicam.filter(|m| m.enabled).map(|m| m.angle).unwrap_or(0);
+                children.push(format!("<mc-source angleID=\"angle_{a_ang}\" srcEnable=\"audio\"/>"));
+            }
+        }
+    }
+
+    /// Append `<adjust-volume>` and `<adjust-panner>` elements for an audio-carrying clip.
+    fn audio_adjustments(&mut self, a: &TrackItem, rate: FrameRate, to_local: &dyn Fn(Tick) -> Tick, children: &mut Vec<String>) {
+        if param_modified(a, "volume", "level") || a.gain_db != 0.0 {
+            let g = a.gain_db;
+            children.push(kparam_xml(
+                "adjust-volume",
+                "amount",
+                param(a, "volume", "level"),
+                rate,
+                to_local,
+                |v| format!("{}dB", num(v.as_f64().unwrap_or(0.0) + g)),
+                "0dB",
+            ));
+        }
+        if param_modified(a, "panner", "balance") {
+            children.push(kparam_xml(
+                "adjust-panner",
+                "amount",
+                param(a, "panner", "balance"),
+                rate,
+                to_local,
+                |v| num(v.as_f64().unwrap_or(0.0)),
+                "0",
+            ));
+        }
+        if param_modified(a, "channel_volume", "left") || param_modified(a, "channel_volume", "right") {
+            self.report.warn("channel volume is not exported to FCPXML");
+        }
+    }
+
+    /// Append `<filter-video>` / `<filter-audio>` elements for standard effects on `it`.
+    fn effects_children(&mut self, it: &TrackItem, kind: TrackKind, children: &mut Vec<String>) {
+        for e in standard_effects(it) {
+            let n = e.def().map(|d| d.name).unwrap_or(&e.effect).to_string();
+            let r = self.effect(&n, &e.effect);
+            let tag = if kind == TrackKind::Video { "filter-video" } else { "filter-audio" };
+            let mut s = format!("<{tag} ref=\"{r}\" name=\"{}\"", crate::xml::escape_attr(&n));
+            if !e.enabled {
+                s.push_str(" enabled=\"0\"");
+            }
+            let floats: Vec<_> =
+                e.params.iter().filter_map(|(k, p)| p.value.as_f64().filter(|_| matches!(p.value, ParamValue::Float(_))).map(|v| (k, v))).collect();
+            if floats.is_empty() {
+                s.push_str("/>");
+            } else {
+                s.push_str(">\n");
+                for (k, v) in floats {
+                    s.push_str(&format!("  <param name=\"{k}\" key=\"{k}\" value=\"{}\"/>\n", num(v)));
+                }
+                s.push_str(&format!("</{tag}>"));
+            }
+            self.report.info(format!("effect \"{n}\" written as an FCPXML filter reference (FilmCraft-specific)"));
+            children.push(s);
+        }
+    }
+
     /// A clip element at `offset` (in its parent's local time).
     fn clip_el(&mut self, it: &TrackItem, audio: Option<&TrackItem>, kind: TrackKind, at: ClipPlacement, seq: &Sequence) -> El {
         let ClipPlacement { offset, lane, primary } = at;
         let rate = seq.settings.frame_rate;
         let base = base_item(self.p, it.item);
         let is_seq = matches!(self.p.item(base).map(|i| &i.kind), Some(ItemKind::Sequence(_)));
+        let is_mc = is_seq
+            && self.p.sequence(base).is_some_and(|s| s.multicam.is_some())
+            && (it.multicam.is_some_and(|m| m.enabled) || audio.and_then(|a| a.multicam).is_some_and(|m| m.enabled));
         let lane_attr = lane.map(|l| format!(" lane=\"{l}\"")).unwrap_or_default();
         let name = crate::xml::escape_attr(&it.name);
         // In the primary storyline, a clip FCPXML cannot carry becomes a gap that keeps the timing
@@ -1035,7 +1529,7 @@ impl Exp<'_, '_> {
                 self.media(base)
             };
             let origin = self.p.sequence(base).map(|s| s.settings.frame_rate.tick_of(s.start_timecode)).unwrap_or(Tick::ZERO);
-            ("ref-clip", r, origin)
+            (if is_mc { "mc-clip" } else { "ref-clip" }, r, origin)
         } else {
             let r = self.asset(base, rate);
             let m = item_media(self.p, base);
@@ -1047,14 +1541,21 @@ impl Exp<'_, '_> {
         let local = origin + it.source_in;
         let has_audio = item_media(self.p, base).is_some_and(|m| m.info.has_audio()) || (is_seq && audio.is_some());
         let has_video = item_media(self.p, base).is_none_or(|m| m.info.video.is_some());
-        let src_enable = match (kind, audio.is_some()) {
-            (TrackKind::Video, true) => "",
-            (TrackKind::Video, false) if has_audio => " srcEnable=\"video\"",
-            (TrackKind::Audio, _) if has_video => " srcEnable=\"audio\"",
-            _ => "",
+        let src_enable = if is_mc {
+            ""
+        } else {
+            match (kind, audio.is_some()) {
+                (TrackKind::Video, true) => "",
+                (TrackKind::Video, false) if has_audio => " srcEnable=\"video\"",
+                (TrackKind::Audio, _) if has_video => " srcEnable=\"audio\"",
+                _ => "",
+            }
         };
         let enabled = if it.enabled { "" } else { " enabled=\"0\"" };
         let mut children = Vec::new();
+        if is_mc {
+            Self::mc_source_children(it, audio, kind, &mut children);
+        }
         if retimed {
             let v0 = origin + it.frame_hold.unwrap_or(it.source_in);
             let (a, b) = if let Some(h) = it.frame_hold {
@@ -1080,44 +1581,9 @@ impl Exp<'_, '_> {
             self.transform(it, seq, &to_local, &mut children);
         }
         if let Some(a) = audio.or((kind == TrackKind::Audio).then_some(it)) {
-            if param_modified(a, "volume", "level") || a.gain_db != 0.0 {
-                let g = a.gain_db;
-                children.push(kparam_xml(
-                    "adjust-volume",
-                    "amount",
-                    param(a, "volume", "level"),
-                    rate,
-                    &to_local,
-                    |v| format!("{}dB", num(v.as_f64().unwrap_or(0.0) + g)),
-                    "0dB",
-                ));
-            }
-            if param_modified(a, "panner", "balance") || param_modified(a, "channel_volume", "left") || param_modified(a, "channel_volume", "right") {
-                self.report.warn("pan and channel volume are not exported to FCPXML");
-            }
+            self.audio_adjustments(a, rate, &to_local, &mut children);
         }
-        for e in standard_effects(it) {
-            let n = e.def().map(|d| d.name).unwrap_or(&e.effect).to_string();
-            let r = self.effect(&n, &e.effect);
-            let tag = if kind == TrackKind::Video { "filter-video" } else { "filter-audio" };
-            let mut s = format!("<{tag} ref=\"{r}\" name=\"{}\"", crate::xml::escape_attr(&n));
-            if !e.enabled {
-                s.push_str(" enabled=\"0\"");
-            }
-            let floats: Vec<_> =
-                e.params.iter().filter_map(|(k, p)| p.value.as_f64().filter(|_| matches!(p.value, ParamValue::Float(_))).map(|v| (k, v))).collect();
-            if floats.is_empty() {
-                s.push_str("/>");
-            } else {
-                s.push_str(">\n");
-                for (k, v) in floats {
-                    s.push_str(&format!("  <param name=\"{k}\" key=\"{k}\" value=\"{}\"/>\n", num(v)));
-                }
-                s.push_str(&format!("</{tag}>"));
-            }
-            self.report.info(format!("effect \"{n}\" written as an FCPXML filter reference (FilmCraft-specific)"));
-            children.push(s);
-        }
+        self.effects_children(it, kind, &mut children);
         if !primary || kind == TrackKind::Audio {
             for m in &it.markers {
                 children.push(marker_xml(m, to_local(m.start), rate));
@@ -1152,27 +1618,15 @@ impl Exp<'_, '_> {
             let y = if p.y.is_nan() { 0.0 } else { -(p.y - fh / 2.0) / fh * 100.0 };
             format!("{} {}", num(x), num(y))
         };
-        let changed = ["position", "scale", "rotation", "anchor"].iter().any(|p| param_modified(it, "motion", p));
+        let uniform = param(it, "motion", "uniform_scale").and_then(|p| p.value.as_bool()).unwrap_or(true);
+        let scale_changed = param_modified(it, "motion", "scale")
+            || (!uniform && param_modified(it, "motion", "scale_width"))
+            || !uniform;
+        let changed = scale_changed || ["position", "rotation", "anchor"].iter().any(|p| param_modified(it, "motion", p));
         if changed {
-            if param_modified(it, "motion", "scale_width") || param(it, "motion", "uniform_scale").and_then(|p| p.value.as_bool()) == Some(false) {
-                self.report.warn("non-uniform scale is not exported to FCPXML");
-            }
             let mut attrs = Vec::new();
             let mut params = Vec::new();
-            for (id, attr, f) in [
-                ("position", "position", &pos as &dyn Fn(&ParamValue) -> String),
-                ("scale", "scale", &|v: &ParamValue| {
-                    let s = v.as_f64().unwrap_or(100.0) / 100.0;
-                    format!("{} {}", num(s), num(s))
-                }),
-                ("rotation", "rotation", &|v: &ParamValue| num(-v.as_f64().unwrap_or(0.0))),
-                ("anchor", "anchor", &pos),
-            ] {
-                let Some(p) = param(it, "motion", id) else { continue };
-                if !param_modified(it, "motion", id) {
-                    continue;
-                }
-                attrs.push(format!(" {attr}=\"{}\"", f(&p.value)));
+            let push_anim = |attr: &str, p: &Param, f: &dyn Fn(&ParamValue) -> String, params: &mut Vec<String>| {
                 if p.is_animated() {
                     let mut s = format!("  <param name=\"{attr}\">\n    <keyframeAnimation>\n");
                     for k in &p.keyframes {
@@ -1182,14 +1636,88 @@ impl Exp<'_, '_> {
                     s.push_str("    </keyframeAnimation>\n  </param>");
                     params.push(s);
                 }
+            };
+            if let Some(p) = param(it, "motion", "position").filter(|_| param_modified(it, "motion", "position")) {
+                attrs.push(format!(" position=\"{}\"", pos(&p.value)));
+                push_anim("position", p, &pos, &mut params);
+            }
+            if scale_changed {
+                let sh_p = param(it, "motion", "scale");
+                let sw_p = param(it, "motion", "scale_width");
+                let sh = sh_p.and_then(|p| p.value.as_f64()).unwrap_or(100.0) / 100.0;
+                let sw = if uniform { sh } else { sw_p.and_then(|p| p.value.as_f64()).unwrap_or(100.0) / 100.0 };
+                attrs.push(format!(" scale=\"{} {}\"", num(sw), num(sh)));
+                if let Some(p) = sh_p.filter(|p| p.is_animated()) {
+                    push_anim(
+                        "scale",
+                        p,
+                        &|v: &ParamValue| {
+                            let sy = v.as_f64().unwrap_or(100.0) / 100.0;
+                            let sx = if uniform { sy } else { sw };
+                            format!("{} {}", num(sx), num(sy))
+                        },
+                        &mut params,
+                    );
+                } else if let Some(p) = sw_p.filter(|p| !uniform && p.is_animated()) {
+                    push_anim(
+                        "scale",
+                        p,
+                        &|v: &ParamValue| {
+                            let sx = v.as_f64().unwrap_or(100.0) / 100.0;
+                            format!("{} {}", num(sx), num(sh))
+                        },
+                        &mut params,
+                    );
+                }
+            }
+            if let Some(p) = param(it, "motion", "rotation").filter(|_| param_modified(it, "motion", "rotation")) {
+                let rot = |v: &ParamValue| num(-v.as_f64().unwrap_or(0.0));
+                attrs.push(format!(" rotation=\"{}\"", rot(&p.value)));
+                push_anim("rotation", p, &rot, &mut params);
+            }
+            if let Some(p) = param(it, "motion", "anchor").filter(|_| param_modified(it, "motion", "anchor")) {
+                attrs.push(format!(" anchor=\"{}\"", pos(&p.value)));
+                push_anim("anchor", p, &pos, &mut params);
             }
             out.push(wrap("adjust-transform", &attrs.concat(), &params));
         }
-        if param_modified(it, "opacity", "opacity") {
-            out.push(kparam_xml("adjust-blend", "amount", param(it, "opacity", "opacity"), rate, to_local, |v| num(v.as_f64().unwrap_or(100.0) / 100.0), "1"));
-        }
-        if param(it, "opacity", "blend").and_then(|p| p.value.as_f64()).is_some_and(|b| b != 0.0) {
-            self.report.warn("blend modes are not exported to FCPXML");
+        let blend = param(it, "opacity", "blend")
+            .and_then(|p| match p.value {
+                ParamValue::Choice(c) => Some(c),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let blend_mode = if blend == 0 {
+            None
+        } else if let Some(&(m, _)) = BLEND_FCPXML.iter().find(|&&(_, i)| i == blend) {
+            Some(m)
+        } else {
+            self.report.warn("blend mode not representable in FCPXML; Normal used");
+            None
+        };
+        let op_changed = param_modified(it, "opacity", "opacity");
+        if op_changed || blend_mode.is_some() {
+            let mut attrs = String::new();
+            let mut params = Vec::new();
+            if op_changed
+                && let Some(p) = param(it, "opacity", "opacity")
+            {
+                let f = |v: &ParamValue| num(v.as_f64().unwrap_or(100.0) / 100.0);
+                attrs.push_str(&format!(" amount=\"{}\"", f(&p.value)));
+                if p.is_animated() {
+                    let mut s = "  <param name=\"amount\">\n    <keyframeAnimation>\n".to_string();
+                    for k in &p.keyframes {
+                        let interp = if k.interp == filmcraft_project::Interpolation::Hold { " interp=\"hold\"" } else { "" };
+                        s.push_str(&format!("      <keyframe time=\"{}\" value=\"{}\"{interp}/>\n", fmt_time(to_local(k.time), rate), f(&k.value)));
+                    }
+                    s.push_str("    </keyframeAnimation>\n  </param>");
+                    params.push(s);
+                }
+            }
+            if let Some(m) = blend_mode {
+                attrs.push_str(&format!(" mode=\"{m}\""));
+            }
+            out.push(wrap("adjust-blend", &attrs, &params));
         }
         let _ = (db_to_gain(0.0), gain_to_db(1.0));
     }

@@ -509,7 +509,10 @@ fn sao_edge_ctb<S: Sample>(
                 return false;
             }
         }
-        pic.pps.loop_filter_across_tiles || pic.layout.tile_id[pic.layout.rs_to_ts[nrs] as usize] == pic.layout.tile_id[cur_ts as usize]
+        if !pic.pps.loop_filter_across_tiles && pic.layout.tile_id[pic.layout.rs_to_ts[nrs] as usize] != pic.layout.tile_id[cur_ts as usize] {
+            return false;
+        }
+        true
     };
     // avail[dy][dx]: the CTB at (rx + dx - 1, ry + dy - 1) may be used.
     let (rx, ry) = (rs % pic.wctb, rs / pic.wctb);

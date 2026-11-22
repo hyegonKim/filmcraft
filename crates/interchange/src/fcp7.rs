@@ -55,14 +55,42 @@ const BLEND_XML: &[(&str, u32)] = &[
     ("normal", 0),
     ("darken", 2),
     ("multiply", 3),
+    ("colorburn", 4),
+    ("color-burn", 4),
+    ("linearburn", 5),
+    ("linear-burn", 5),
+    ("darkercolor", 6),
+    ("darker-color", 6),
     ("lighten", 7),
     ("screen", 8),
+    ("colordodge", 9),
+    ("color-dodge", 9),
     ("add", 10),
+    ("lineardodge", 10),
+    ("linear-dodge", 10),
+    ("lightercolor", 11),
+    ("lighter-color", 11),
     ("overlay", 12),
     ("softlight", 13),
+    ("soft-light", 13),
     ("hardlight", 14),
+    ("hard-light", 14),
+    ("vividlight", 15),
+    ("vivid-light", 15),
+    ("linearlight", 16),
+    ("linear-light", 16),
+    ("pinlight", 17),
+    ("pin-light", 17),
+    ("hardmix", 18),
+    ("hard-mix", 18),
     ("difference", 19),
+    ("exclusion", 20),
     ("subtract", 21),
+    ("divide", 22),
+    ("hue", 23),
+    ("saturation", 24),
+    ("color", 25),
+    ("luminosity", 26),
 ];
 
 fn generator_from(name: &str, id: &str, report: &mut Report) -> Generator {
@@ -597,6 +625,15 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
                 if let Some(p) = find("scale") {
                     set_param(ti, "motion", "scale", read_param(p, rate, |v| v));
                 }
+                if let Some(p) = find("scale_width").or_else(|| find("scaleWidth")) {
+                    set_param(ti, "motion", "scale_width", read_param(p, rate, |v| v));
+                    let uniform = find("uniform_scale").and_then(|u| child_bool(u, "value")).unwrap_or(false);
+                    set_param(ti, "motion", "uniform_scale", Param::new(ParamValue::Bool(uniform)));
+                } else if let Some(u) = find("uniform_scale").and_then(|u| child_bool(u, "value"))
+                    && !u
+                {
+                    set_param(ti, "motion", "uniform_scale", Param::new(ParamValue::Bool(false)));
+                }
                 if let Some(p) = find("rotation") {
                     set_param(ti, "motion", "rotation", read_param(p, rate, |v| v));
                 }
@@ -617,6 +654,16 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
                 }
                 if let Some(m) = ti.effect_mut("motion") {
                     m.enabled = enabled;
+                }
+            }
+            "aspect" => {
+                if let Some(p) = find("aspect") {
+                    let base_s = param(ti, "motion", "scale").and_then(|s| s.value.as_f64()).unwrap_or(100.0);
+                    let pr = read_param(p, rate, |a| base_s * (1.0 - a / 100.0));
+                    if pr.is_animated() || pr.value.as_f64().is_some_and(|w| (w - base_s).abs() > 1e-6) {
+                        set_param(ti, "motion", "scale_width", pr);
+                        set_param(ti, "motion", "uniform_scale", Param::new(ParamValue::Bool(false)));
+                    }
                 }
             }
             "opacity" => {
@@ -1211,14 +1258,21 @@ impl Exp<'_, '_> {
             _ => (fw, fh),
         };
         if kind == TrackKind::Video {
-            let motion_changed = ["position", "scale", "scale_width", "rotation", "anchor", "anti_flicker"].iter().any(|p| param_modified(c, "motion", p));
+            let non_uniform = param_modified(c, "motion", "scale_width") || param(c, "motion", "uniform_scale").and_then(|p| p.value.as_bool()) == Some(false);
+            let motion_changed = non_uniform || ["position", "scale", "scale_width", "rotation", "anchor", "anti_flicker"].iter().any(|p| param_modified(c, "motion", p));
             if motion_changed {
-                if param_modified(c, "motion", "scale_width") || param(c, "motion", "uniform_scale").and_then(|p| p.value.as_bool()) == Some(false) {
-                    self.report.warn("non-uniform scale is not supported by FCP7 Basic Motion; uniform scale written");
-                }
                 let enabled = c.effect("motion").is_none_or(|e| e.enabled);
                 self.open_effect("Basic Motion", "basic", "motion", "motion", "video", enabled);
                 self.float_param(c, FloatParam { effect: "motion", pid: "scale", label: "Scale", min: 0.0, max: 1000.0, xml_id: "scale" }, rate, |v| v);
+                if non_uniform {
+                    self.float_param(
+                        c,
+                        FloatParam { effect: "motion", pid: "scale_width", label: "Scale Width", min: 0.0, max: 1000.0, xml_id: "scale_width" },
+                        rate,
+                        |v| v,
+                    );
+                    self.simple_param("uniform_scale", "Uniform Scale", "FALSE");
+                }
                 self.float_param(
                     c,
                     FloatParam { effect: "motion", pid: "rotation", label: "Rotation", min: -8640.0, max: 8640.0, xml_id: "rotation" },
