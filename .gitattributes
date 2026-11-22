@@ -1,2 +1,7 @@
 # POSIX packaging scripts require LF when checked out on macOS/Linux.
 *.sh text eol=lf
+# shellcheck and desktop-file-validate both report a CR before the line feed as an error.
+.shellcheckrc text eol=lf
+*.desktop text eol=lf
+# The macOS installer runs these scripts directly, and "#!/bin/sh" followed by a CR names no program.
+packaging/macos/installer-scripts/* text eol=lf
