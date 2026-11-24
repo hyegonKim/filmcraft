@@ -100,6 +100,21 @@ mod pending_ui_request_tests {
 #[cfg(test)]
 mod hidden_control_input_tests {
     use super::*;
+
+    fn prepare_ui(app: &mut FilmcraftApp, ctx: &egui::Context) {
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.logic_theme(ui.ctx()));
+            output.textures_delta.clear();
+        }
+        assert!(app.fonts_ready);
+    }
+
+    fn draw_ui(app: &mut FilmcraftApp, ctx: &egui::Context, raw: egui::RawInput) {
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut output = ctx.run_ui(raw, |ui| app.ui_inner(ui, &mut frame));
+        output.textures_delta.clear();
+    }
+
     #[test]
     fn a_started_control_gesture_is_not_discarded_during_occlusion() {
         let ctx = egui::Context::default();
@@ -109,9 +124,12 @@ mod hidden_control_input_tests {
         tx.send(request).unwrap();
         app.control_time = 10.0;
         app.drain_control(&ctx);
+        prepare_ui(&mut app, &ctx);
         let mut visible = egui::RawInput { time: Some(10.1), ..Default::default() };
         visible.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(false);
         eframe::App::raw_input_hook(&mut app, &ctx, &mut visible);
+        assert!(!app.control_input_started, "preparing raw input is not delivery");
+        draw_ui(&mut app, &ctx, visible);
         assert!(app.control_input_started);
         let queued = app.synthetic.len();
         assert!(queued > 0);
@@ -130,21 +148,32 @@ mod hidden_control_input_tests {
         let before = serde_json::to_value(&app.session.project).unwrap();
         let (request, reply) = ControlRequest::new("ui.click", json!({"x":10.0,"y":10.0}));
         tx.send(request).unwrap();
-        for seconds in [10.0, 14.0] {
-            let mut raw = egui::RawInput { time: Some(seconds), ..Default::default() };
-            raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(true);
-            eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
-            let _ = ctx.run_logic(&raw, |ctx| app.drain_control(ctx));
-        }
+        let mut raw = egui::RawInput { time: Some(10.0), ..Default::default() };
+        raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(true);
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        let _ = ctx.run_logic(&raw, |ctx| app.drain_control(ctx));
+
+        // A raw-input callback can offer the first step without running a UI pass.
+        raw.time = Some(10.5);
+        raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(false);
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        assert!(app.synthetic_pending_step.is_some());
+        assert!(!app.control_input_started);
+
+        // The buffered step must also be cancelled when the window stays undrawn.
+        raw.time = Some(14.0);
+        raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(true);
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
         let response = reply.try_recv().expect("input acknowledgements need a deadline even without UI passes");
         assert_eq!(response["ok"], false);
         assert!(response["error"].as_str().unwrap().contains("input"));
         assert!(app.synthetic.is_empty(), "timed-out input must not click later");
+        assert!(app.synthetic_pending_step.is_none());
         assert!(app.input_waiters.is_empty());
-        let mut resumed = egui::RawInput { time: Some(15.0), ..Default::default() };
-        resumed.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(false);
-        eframe::App::raw_input_hook(&mut app, &ctx, &mut resumed);
-        assert!(!resumed.events.iter().any(|e| matches!(e, egui::Event::PointerButton { .. } | egui::Event::Key { .. })));
+        raw.time = Some(15.0);
+        raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(false);
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        assert!(!raw.events.iter().any(|e| matches!(e, egui::Event::PointerMoved(_) | egui::Event::PointerButton { .. } | egui::Event::Key { .. })));
         assert_eq!(serde_json::to_value(&app.session.project).unwrap(), before);
     }
 
@@ -192,6 +221,7 @@ mod hidden_control_input_tests {
         let ctx = egui::Context::default();
         let mut app = FilmcraftApp::new(Session::default());
         app.control_input_only = true;
+        prepare_ui(&mut app, &ctx);
         let (request, _) = ControlRequest::new("ui.click", json!({"x":10.0,"y":10.0}));
         assert!(matches!(control::handle(&mut app, &ctx, &request), control::Outcome::AfterInput));
         let queued = app.synthetic.len();
@@ -217,9 +247,44 @@ mod hidden_control_input_tests {
                 .collect();
             assert!(buttons.len() <= 1, "the click edges must be on different visible frames");
             edges.extend(buttons);
+            draw_ui(&mut app, &ctx, raw);
         }
         assert!(app.synthetic.is_empty());
         assert_eq!(edges, [true, false]);
+    }
+
+    #[test]
+    fn input_only_replays_buffered_korean_text_once_after_occlusion() {
+        let ctx = egui::Context::default();
+        let mut app = FilmcraftApp::new(Session::default()).with_control_input_only(std::sync::mpsc::channel().1);
+        prepare_ui(&mut app, &ctx);
+        let (request, _) = ControlRequest::new("ui.type", json!({"text":"한국어 입력"}));
+        assert!(matches!(control::handle(&mut app, &ctx, &request), control::Outcome::AfterInput));
+        let mut raw = egui::RawInput::default();
+        let korean_events = |raw: &egui::RawInput| raw.events.iter().filter(|e| matches!(e, egui::Event::Text(text) if text == "한국어 입력")).count();
+        // A logic-only frame may prepare input while the backend still reports visibility.
+        raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(false);
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        assert_eq!(korean_events(&raw), 1);
+
+        // Eframe hands the same unconsumed raw input back to the hook, with new native events.
+        raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(true);
+        raw.events.push(egui::Event::Text("native text".into()));
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        assert!(raw.events.is_empty());
+        assert!(app.synthetic_pending_step.is_some());
+
+        raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().occluded = Some(false);
+        raw.events.push(egui::Event::Text("native text".into()));
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        assert_eq!(korean_events(&raw), 1);
+        assert!(!raw.events.iter().any(|e| matches!(e, egui::Event::Text(text) if text == "native text")));
+        draw_ui(&mut app, &ctx, raw);
+        assert!(app.synthetic_pending_step.is_none());
+
+        let mut next = egui::RawInput::default();
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut next);
+        assert_eq!(korean_events(&next), 0);
     }
 }
 

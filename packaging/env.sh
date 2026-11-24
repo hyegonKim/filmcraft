@@ -15,8 +15,11 @@ export ROOT
 
 # The version lives in exactly one place: `[workspace.package] version` in the root Cargo.toml.
 # (`cargo xtask version` prints the same thing; awk avoids compiling xtask here.)
+# Cargo.toml may have CRLF line endings, so each line's trailing CR is dropped first; otherwise
+# the section header never matches and the version comes back empty.
 workspace_version() {
   awk '
+    { sub(/\r$/, "") }
     /^\[/ { in_pkg = ($0 == "[workspace.package]") ; next }
     in_pkg && $1 == "version" { gsub(/[" ]/, "", $3); print $3; exit }
   ' "$ROOT/Cargo.toml"
