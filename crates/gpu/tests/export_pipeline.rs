@@ -195,19 +195,24 @@ fn gpu_8k_export_matches_cpu_without_fallback() {
     assert!(filmcraft_gpu::ExportRenderer::new().is_some(), "export device must initialise");
     register_frame_renderer(|| Some(Box::new(GpuFrameRenderer(filmcraft_gpu::ExportRenderer::new().expect("export device")))));
 
-    let run = format!("8k-{}", std::process::id());
-    let cpu = format!("{run}-cpu");
-    let gpu = format!("{run}-gpu");
-    export_png(&cpu, GpuRendering::Off, (7680, 4320));
+    // A fresh private folder, as in the small-size parity test; removed when the test ends.
+    let mut b = tempfile::Builder::new();
+    b.prefix("fc-gpu-export-8k-");
+    #[cfg(unix)]
+    b.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
+    let tmp = b.tempdir().unwrap();
+    let base = tmp.path();
+    let (cpu, gpu) = ("cpu", "gpu");
+    export_png(base, cpu, GpuRendering::Off, (7680, 4320));
     let before = filmcraft_gpu::export_renderer::timing::get().frames;
-    export_png(&gpu, GpuRendering::Auto, (7680, 4320));
+    export_png(base, gpu, GpuRendering::Auto, (7680, 4320));
     // This counts actual compositor submissions, not just calls to the renderer wrapper.
     assert_eq!(filmcraft_gpu::export_renderer::timing::get().frames - before, 2, "both 8K frames must be composited on the GPU");
     for f in ["000", "001"] {
         let name = format!("img{f}.png");
-        let a = png(&cpu, &name);
+        let a = png(base, cpu, &name);
         assert_eq!(image::load_from_memory(&a).unwrap().width(), 7680);
         assert_eq!(image::load_from_memory(&a).unwrap().height(), 4320);
-        assert_parity(&a, &png(&gpu, &name), &format!("8K frame {f}"));
+        assert_parity(&a, &png(base, gpu, &name), &format!("8K frame {f}"));
     }
 }
