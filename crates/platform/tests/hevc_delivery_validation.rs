@@ -2,6 +2,8 @@
 //! FILMCRAFT_DELIVERY_DIR=/absolute/path cargo test --release -p filmcraft-platform
 //! --test hevc_delivery_validation -- --ignored --nocapture --test-threads=1
 //! FILMCRAFT_REQUIRE_NVENC=1 selects the strict Windows NVENC matrix and fails on other platforms.
+//! `auto-` exports fall back to the built-in encoder where the hardware one declines; on a machine
+//! that has one, set `FILMCRAFT_REQUIRE_HW_ENCODE=1` so that a fallback fails instead of passing.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -15,6 +17,12 @@ use filmcraft_render::SourceMap;
 use filmcraft_time::{FrameRate, Tick, TimeRange};
 
 static ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether `FILMCRAFT_REQUIRE_HW_ENCODE` is set to a true value: every `auto-` export must then run
+/// all its frames in one hardware session.
+fn hardware_required() -> bool {
+    std::env::var("FILMCRAFT_REQUIRE_HW_ENCODE").is_ok_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+}
 
 fn broken_hardware(format: Format, _: u32, _: u32, _: FrameRate, _: &ExportSettings) -> Option<filmcraft_export::Result<Box<dyn VideoEncoder>>> {
     if format != Format::Hevc {
@@ -59,10 +67,22 @@ fn project(w: u32, h: u32, frames: i64, working: WorkingSpace) -> (Arc<Project>,
     (Arc::new(p), seq, sources)
 }
 
+/// The evidence (`.probe.txt`, `.csv`) is written only after every check passes: drop an earlier
+/// run's, so that a failed rerun in the same directory cannot leave it beside the new picture file.
+fn clear_evidence(dir: &std::path::Path, name: &str) {
+    for evidence in [format!("{name}.probe.txt"), format!("{name}.csv")] {
+        match std::fs::remove_file(dir.join(evidence)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => panic!("{name}: {e}"),
+            _ => {}
+        }
+    }
+}
+
 fn deliver(name: &str, w: u32, h: u32, frames: i64, working: WorkingSpace, hardware: HardwareEncoding) {
     let dir = std::path::PathBuf::from(std::env::var_os("FILMCRAFT_DELIVERY_DIR").expect("set FILMCRAFT_DELIVERY_DIR"));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(format!("{name}.mp4"));
+    clear_evidence(&dir, name);
     let (p, seq, sources) = project(w, h, frames, working);
     let before = hw_encode_stats();
     let start = Instant::now();
@@ -86,8 +106,15 @@ fn deliver(name: &str, w: u32, h: u32, frames: i64, working: WorkingSpace, hardw
     let after = hw_encode_stats();
     assert_eq!(report.frames, frames as u64);
     let hw_frames = after.frames - before.frames;
+    let hw_sessions = after.sessions - before.sessions;
     if hardware == HardwareEncoding::Off || name.starts_with("injected-") {
         assert_eq!(hw_frames, 0);
+    } else if hardware_required() {
+        assert_eq!(
+            (hw_frames, hw_sessions),
+            (frames as u64, 1),
+            "{name}: FILMCRAFT_REQUIRE_HW_ENCODE is set, but the hardware encoder did not take every frame"
+        );
     }
     if name.starts_with("nvenc-") {
         // A valid file alone could hide a software fallback. This explicit hardware check must
@@ -123,18 +150,17 @@ fn deliver(name: &str, w: u32, h: u32, frames: i64, working: WorkingSpace, hardw
             _ => "bt709",
         }
     );
-    if hdr {
-        assert_eq!(stream("color_primaries"), "bt2020");
-    }
+    let (primaries, matrix) = if hdr { ("bt2020", "bt2020nc") } else { ("bt709", "bt709") };
+    assert_eq!(stream("color_primaries"), primaries);
+    assert_eq!(stream("color_space"), matrix);
     let ff = filmcraft_testkit::ffmpeg_or_skip("HEVC delivery").expect("ffmpeg required");
     let decoded = std::process::Command::new(ff).args(["-v", "error", "-xerror", "-i"]).arg(&path).args(["-f", "null", "-"]).output().unwrap();
     assert!(decoded.status.success() && decoded.stderr.is_empty(), "{}", String::from_utf8_lossy(&decoded.stderr));
     std::fs::write(dir.join(format!("{name}.probe.txt")), &metadata).unwrap();
     let evidence = format!(
-        "name,width,height,frames,seconds,fps,bytes,hardware_frames,hardware_sessions,hardware_declined\n{name},{w},{h},{frames},{seconds},{},{},{hw_frames},{},{}\n",
+        "name,width,height,frames,seconds,fps,bytes,hardware_frames,hardware_sessions,hardware_declined\n{name},{w},{h},{frames},{seconds},{},{},{hw_frames},{hw_sessions},{}\n",
         frames as f64 / seconds,
         std::fs::metadata(&path).unwrap().len(),
-        after.sessions - before.sessions,
         after.declined - before.declined
     );
     std::fs::write(dir.join(format!("{name}.csv")), evidence).unwrap();
