@@ -23,3 +23,11 @@ threads-required = "num-test-threads"
 [[profile.default.overrides]]
 filter = "package(filmcraft-ui-egui) and binary(play_ahead)"
 threads-required = "num-test-threads"
+
+# Playback during a value drag (#1673) is a timing test: a frame counts only if it finishes
+# within 64 revisions, and the drag makes one per UI pass. With other tests beside it on a 4-core
+# runner the picture barely moved (2 of 3 mirror CI runs, 2026-11-25); alone it passed every time,
+# even held to four M1 efficiency cores.
+[[profile.default.overrides]]
+filter = "package(filmcraft-ui-egui) and binary(it) and test(=perf_ui::program_monitor_plays_on_while_a_value_is_dragged)"
+threads-required = "num-test-threads"
