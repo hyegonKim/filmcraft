@@ -76,9 +76,11 @@ pub fn config_for(w: u32, h: u32, rate: FrameRate, s: &ExportSettings) -> Result
     if !hevc && s.h264_intra_only {
         return Err("all-intra H.264".into());
     }
-    if s.signal.is_hdr() {
-        return Err("HDR".into());
-    }
+    let hdr = match (s.signal.is_hdr(), hevc) {
+        (false, _) => None,
+        (true, false) => return Err("HDR (H.264 hardware encoding is 8-bit; the built-in encoder carries HDR)".into()),
+        (true, true) => Some(vt_hdr(&s.signal)?),
+    };
     if !w.is_multiple_of(2) || !h.is_multiple_of(2) {
         return Err("odd picture size".into());
     }
