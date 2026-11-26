@@ -43,7 +43,7 @@ Windows RTX 4070 Ti 재시험은 macOS VideoToolbox를 다시 돌리지 않았�
 
 ## 하지 않은 것
 
-- Windows 시험의 6개 24프레임 묶음(4K·8K × SDR·PQ·HLG)과 같은 구성은 아니다. 이 Mac에서 VideoToolbox로 간 출력은 PQ 4K 4프레임과 PQ 8K 2프레임, 그리고 720p PQ·HLG뿐이다. VideoToolbox의 4K·8K SDR·HLG 출력은 이번에 만들지 않았다.
+- Windows 시험의 6개 24프레임 묶음(4K·8K × SDR·PQ·HLG)과 같은 구성은 아니다. 이 Mac에서 VideoToolbox로 간 출력은 PQ 4K 4프레임과 PQ 8K 2프레임, 그리고 720p PQ·HLG뿐이다. VideoToolbox의 4K·8K SDR·HLG 출력은 이번에 만들지 않았다. 2026-11-26에 시나리오를 더해 따로 확인했다([`h265-m1-videotoolbox-sdr-hlg-2026-11-26.md`](h265-m1-videotoolbox-sdr-hlg-2026-11-26.md)).
 - 데스크톱 앱의 내보내기 화면, 긴 영상의 메모리·안정성, 8K 재생 프레임 속도는 시험하지 않았다.
 - `delivery_quality`, `perf`, `fuzz_hostile`은 다시 돌리지 않았다.
 - Linux는 시험하지 않았다. Windows의 NVENC 개별 테스트(`it nvenc`, `nvenc_hevc_hdr_export`, `nvenc_hevc_warm`)는 PC에서만 돌릴 수 있다.

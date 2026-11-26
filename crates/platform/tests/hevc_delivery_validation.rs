@@ -143,8 +143,13 @@ fn delivery_matrix_and_hardware_initialization_failure() {
         ("software-4k-hlg", 3840, 2160, 4, WorkingSpace::Rec2100Hlg, HardwareEncoding::Off),
         ("software-8k-sdr", 7680, 4320, 2, WorkingSpace::Rec709, HardwareEncoding::Off),
         ("software-8k-pq", 7680, 4320, 2, WorkingSpace::Rec2100Pq, HardwareEncoding::Off),
+        ("software-8k-hlg", 7680, 4320, 2, WorkingSpace::Rec2100Hlg, HardwareEncoding::Off),
+        ("auto-4k-sdr", 3840, 2160, 4, WorkingSpace::Rec709, HardwareEncoding::Auto),
         ("auto-4k-pq", 3840, 2160, 4, WorkingSpace::Rec2100Pq, HardwareEncoding::Auto),
+        ("auto-4k-hlg", 3840, 2160, 4, WorkingSpace::Rec2100Hlg, HardwareEncoding::Auto),
+        ("auto-8k-sdr", 7680, 4320, 2, WorkingSpace::Rec709, HardwareEncoding::Auto),
         ("auto-8k-pq", 7680, 4320, 2, WorkingSpace::Rec2100Pq, HardwareEncoding::Auto),
+        ("auto-8k-hlg", 7680, 4320, 2, WorkingSpace::Rec2100Hlg, HardwareEncoding::Auto),
     ] {
         if name.starts_with("auto-") {
             filmcraft_platform::register();
