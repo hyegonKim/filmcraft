@@ -339,6 +339,9 @@ fn compose(p: [f64; 4]) -> Affine {
     Affine { a: s * cs, b: s * sn, c: -s * sn, d: s * cs, e: p[0], f: p[1] }
 }
 
+/// Widest smoothing kernel (Gaussian sigma, in frames) Warp Stabilizer applies: 50 s at 60 fps.
+const MAX_SMOOTH_SIGMA: f64 = 3_000.0;
+
 /// Per-frame correction transforms (current frame px → stabilised px, analysis pixels).
 pub(crate) fn corrections(path: &StabilizerPath, smooth_frames: f64, no_motion: bool, preserve_scale: bool) -> Vec<Affine> {
     let n = path.steps.len() + 1;
@@ -362,7 +365,9 @@ pub(crate) fn corrections(path: &StabilizerPath, smooth_frames: f64, no_motion: 
         let mean = params.iter().fold([0.0; 4], |a, p| [a[0] + p[0], a[1] + p[1], a[2] + p[2], a[3] + p[3]]).map(|v| v / n as f64);
         vec![mean; n]
     } else {
-        let sigma = smooth_frames.max(0.01);
+        // the loop below runs 6 sigma + 1 times per frame: a project-supplied radius must not size it
+        // a NaN smoothness falls back to the minimum (`clamp` would pass the NaN on)
+        let sigma = if smooth_frames.is_nan() { 0.01 } else { smooth_frames.clamp(0.01, MAX_SMOOTH_SIGMA) };
         let r = (sigma * 3.0).ceil() as isize;
         (0..n as isize)
             .map(|k| {
@@ -482,7 +487,11 @@ pub(crate) fn cover_scale(corr: &Affine, w: f64, h: f64, max: f64) -> f64 {
 /// Warp Stabilizer: see the module docs.
 pub fn warp_stabilizer(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
     let Some(env) = cx.env else { return };
-    let method = if chv(e, "method") == 0 { TrackMethod::Position } else { TrackMethod::PositionScaleRotation };
+    let method_idx = chv(e, "method");
+    if method_idx >= 3 && subspace_warp_stabilizer(img, e, cx, env, method_idx == 4) {
+        return;
+    }
+    let method = if method_idx == 0 { TrackMethod::Position } else { TrackMethod::PositionScaleRotation };
     let Some(path) = stabilizer_path(env, cx.seconds, method, bv(e, "detailed")) else { return };
     let n = path.steps.len() + 1;
     let k = ((cx.seconds * path.fps).round().max(0.0) as usize).min(n - 1);
@@ -534,5 +543,501 @@ pub fn warp_stabilizer(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
             }
         }
         _ => {}
+    }
+}
+
+// ------------------------------------------------------------------ 3D Subspace Warp Stabilizer
+
+const SUB_GRID: usize = 4;
+const SUB_TILES: usize = SUB_GRID * SUB_GRID;
+
+#[derive(Clone, Debug)]
+struct SubspacePath {
+    w: usize,
+    h: usize,
+    steps: Vec<[[f64; 2]; SUB_TILES]>,
+    fps: f64,
+}
+
+type SubPathCache = Mutex<HashMap<u64, Arc<SubspacePath>>>;
+fn subpath_cache() -> &'static SubPathCache {
+    static C: OnceLock<SubPathCache> = OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+fn tile_steps(a: &Prepared, b: &Prepared, (w, h): (usize, usize)) -> [[f64; 2]; SUB_TILES] {
+    let mut out = [[0.0f64; 2]; SUB_TILES];
+    let global = track_step(
+        a,
+        b,
+        &[Vec2::new(6.0, 6.0), Vec2::new(w as f64 - 6.0, 6.0), Vec2::new(w as f64 - 6.0, h as f64 - 6.0), Vec2::new(6.0, h as f64 - 6.0)],
+        TrackMethod::PositionScaleRotation,
+    )
+    .map(|s| s.transform)
+    .unwrap_or(Affine::IDENTITY);
+    let (tw, th) = (w as f64 / SUB_GRID as f64, h as f64 / SUB_GRID as f64);
+    let pad_x = tw * 0.25;
+    let pad_y = th * 0.25;
+    for ty in 0..SUB_GRID {
+        for tx in 0..SUB_GRID {
+            let idx = ty * SUB_GRID + tx;
+            let x0 = (tx as f64 * tw - pad_x).max(4.0);
+            let y0 = (ty as f64 * th - pad_y).max(4.0);
+            let x1 = ((tx + 1) as f64 * tw + pad_x).min(w as f64 - 4.0);
+            let y1 = ((ty + 1) as f64 * th + pad_y).min(h as f64 - 4.0);
+            let cx_t = (x0 + x1) * 0.5;
+            let cy_t = (y0 + y1) * 0.5;
+            let fallback = global.apply(Vec2::new(cx_t, cy_t)) - Vec2::new(cx_t, cy_t);
+            let poly = [Vec2::new(x0, y0), Vec2::new(x1, y0), Vec2::new(x1, y1), Vec2::new(x0, y1)];
+            let d = track_step(a, b, &poly, TrackMethod::Position).map(|s| Vec2::new(s.transform.e, s.transform.f)).unwrap_or(fallback);
+            out[idx] = [d.x * 0.7 + fallback.x * 0.3, d.y * 0.7 + fallback.y * 0.3];
+        }
+    }
+    out
+}
+
+fn subspace_path(env: &dyn FxEnv, now: f64, detailed: bool) -> Option<Arc<SubspacePath>> {
+    let key = env.clip_key() ^ 0x3D5B_50AC_u64 ^ (detailed as u64).wrapping_mul(0x9E37_79B9);
+    if let Some(p) = subpath_cache().lock().ok().and_then(|c| c.get(&key).cloned()) {
+        return Some(p);
+    }
+    let fps = env.frame_rate().max(1.0);
+    let n = ((env.clip_seconds() * fps).round() as usize).clamp(1, 20_000);
+    let src_w = env.source_size().0.max(1) as f32;
+    let scale = ((if detailed { 720.0 } else { 400.0 }) / src_w).min(1.0);
+    let mut steps = Vec::with_capacity(n.saturating_sub(1));
+    let mut dims = None;
+    let mut carried: Option<Option<Prepared>> = None;
+    let mut next = 0;
+    while next < n {
+        if filmcraft_media::cancel::cancelled() {
+            return None;
+        }
+        let end = (next + ANALYSIS_BLOCK).min(n);
+        let fresh: Vec<Option<Prepared>> =
+            (next..end).into_par_iter().map(|k| env.source_frame(k as f64 / fps - now, scale).map(|f| Prepared::new(gray_of(&f)))).collect();
+        let mut frames = Vec::with_capacity(fresh.len() + 1);
+        frames.extend(carried.take());
+        frames.extend(fresh);
+        if dims.is_none() {
+            dims = frames.iter().flatten().next().map(|p| (p.base().w, p.base().h));
+        }
+        let pair_steps: Vec<[[f64; 2]; SUB_TILES]> = (0..frames.len().saturating_sub(1))
+            .into_par_iter()
+            .map(|i| match (&frames[i], &frames[i + 1], dims) {
+                (Some(a), Some(b), Some(d)) if a.base().w == b.base().w => tile_steps(a, b, d),
+                _ => [[0.0; 2]; SUB_TILES],
+            })
+            .collect();
+        steps.extend(pair_steps);
+        carried = frames.pop();
+        next = end;
+    }
+    let (w, h) = dims?;
+    let path = Arc::new(SubspacePath { w, h, steps, fps });
+    if let Ok(mut c) = subpath_cache().lock() {
+        if c.len() > 32 {
+            c.clear();
+        }
+        c.insert(key, path.clone());
+    }
+    Some(path)
+}
+
+/// Project cumulative `2 * SUB_TILES` trajectories onto a rank-`rank` 3D motion subspace via
+/// power iteration, smooth temporal basis coefficients, and return the frame `k` grid offsets.
+fn subspace_frame_offsets(path: &SubspacePath, k: usize, smooth_frames: f64, no_motion: bool, rank: usize) -> [[f64; 2]; SUB_TILES] {
+    let n = path.steps.len() + 1;
+    if n <= 1 {
+        return [[0.0; 2]; SUB_TILES];
+    }
+    let rows = SUB_TILES * 2;
+    let mut mat = vec![vec![0.0f64; n]; rows];
+    for t in 1..n {
+        let s = &path.steps[t - 1];
+        for tile in 0..SUB_TILES {
+            mat[tile * 2][t] = mat[tile * 2][t - 1] + s[tile][0];
+            mat[tile * 2 + 1][t] = mat[tile * 2 + 1][t - 1] + s[tile][1];
+        }
+    }
+    let mut means = vec![0.0f64; rows];
+    for r in 0..rows {
+        means[r] = mat[r].iter().sum::<f64>() / n as f64;
+        for v in &mut mat[r] {
+            *v -= means[r];
+        }
+    }
+    let mut residual = mat.clone();
+    let mut recon_raw = vec![0.0f64; rows];
+    let mut recon_smooth = vec![0.0f64; rows];
+    let sigma = if smooth_frames.is_nan() { 0.5 } else { smooth_frames.clamp(0.1, MAX_SMOOTH_SIGMA) };
+    let rad = (sigma * 3.0).ceil() as isize;
+
+    for mode in 0..rank.min(rows).min(n) {
+        let mut u = vec![0.0f64; rows];
+        for (r, uv) in u.iter_mut().enumerate() {
+            *uv = if r % (mode + 2) == 0 { 1.0 } else { 0.35 };
+        }
+        let mut v = vec![0.0f64; n];
+        for _ in 0..12 {
+            for (t, vt) in v.iter_mut().enumerate() {
+                *vt = (0..rows).map(|r| residual[r][t] * u[r]).sum();
+            }
+            let vn = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+            if vn <= 1e-12 {
+                break;
+            }
+            for vt in &mut v {
+                *vt /= vn;
+            }
+            for (r, ur) in u.iter_mut().enumerate() {
+                *ur = (0..n).map(|t| residual[r][t] * v[t]).sum();
+            }
+        }
+        let un = u.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if un <= 1e-12 {
+            break;
+        }
+        let v_sm_k = if no_motion {
+            0.0
+        } else {
+            let mut acc = 0.0;
+            let mut ws = 0.0;
+            for j in -rad..=rad {
+                let ti = (k as isize + j).clamp(0, n as isize - 1) as usize;
+                let w = (-(j as f64).powi(2) / (2.0 * sigma * sigma)).exp();
+                acc += v[ti] * w;
+                ws += w;
+            }
+            acc / ws.max(1e-12)
+        };
+        for r in 0..rows {
+            recon_raw[r] += u[r] * v[k];
+            recon_smooth[r] += u[r] * v_sm_k;
+            for t in 0..n {
+                residual[r][t] -= u[r] * v[t];
+            }
+        }
+    }
+
+    let mut raw_grid = [[0.0f64; 2]; SUB_TILES];
+    for tile in 0..SUB_TILES {
+        raw_grid[tile] = [recon_smooth[tile * 2] - recon_raw[tile * 2], recon_smooth[tile * 2 + 1] - recon_raw[tile * 2 + 1]];
+    }
+    // Spatial Laplacian regularization so adjacent tiles deform smoothly without folding.
+    let mut reg = raw_grid;
+    for ty in 0..SUB_GRID {
+        for tx in 0..SUB_GRID {
+            let mut sx = raw_grid[ty * SUB_GRID + tx][0] * 2.0;
+            let mut sy = raw_grid[ty * SUB_GRID + tx][1] * 2.0;
+            let mut wt = 2.0;
+            for (dx, dy) in [(-1isize, 0), (1, 0), (0, -1isize), (0, 1)] {
+                let nx = tx as isize + dx;
+                let ny = ty as isize + dy;
+                if nx >= 0 && nx < SUB_GRID as isize && ny >= 0 && ny < SUB_GRID as isize {
+                    let nb = raw_grid[ny as usize * SUB_GRID + nx as usize];
+                    sx += nb[0];
+                    sy += nb[1];
+                    wt += 1.0;
+                }
+            }
+            reg[ty * SUB_GRID + tx] = [sx / wt, sy / wt];
+        }
+    }
+    reg
+}
+
+fn sample_subspace_grid(offsets: &[[f64; 2]; SUB_TILES], u: f64, v: f64) -> [f64; 2] {
+    let gx = (u * SUB_GRID as f64 - 0.5).clamp(0.0, (SUB_GRID - 1) as f64);
+    let gy = (v * SUB_GRID as f64 - 0.5).clamp(0.0, (SUB_GRID - 1) as f64);
+    let x0 = (gx.floor() as usize).min(SUB_GRID - 1);
+    let y0 = (gy.floor() as usize).min(SUB_GRID - 1);
+    let x1 = (x0 + 1).min(SUB_GRID - 1);
+    let y1 = (y0 + 1).min(SUB_GRID - 1);
+    let (fx, fy) = (gx - x0 as f64, gy - y0 as f64);
+    let a = offsets[y0 * SUB_GRID + x0];
+    let b = offsets[y0 * SUB_GRID + x1];
+    let c = offsets[y1 * SUB_GRID + x0];
+    let d = offsets[y1 * SUB_GRID + x1];
+    [(a[0] + (b[0] - a[0]) * fx) * (1.0 - fy) + (c[0] + (d[0] - c[0]) * fx) * fy, (a[1] + (b[1] - a[1]) * fx) * (1.0 - fy) + (c[1] + (d[1] - c[1]) * fx) * fy]
+}
+
+fn subspace_warp_stabilizer(img: &mut Image, e: &EffectInstance, cx: &FxCtx, env: &dyn FxEnv, rank3: bool) -> bool {
+    let Some(path) = subspace_path(env, cx.seconds, bv(e, "detailed")) else { return false };
+    let n = path.steps.len() + 1;
+    let k = ((cx.seconds * path.fps).round().max(0.0) as usize).min(n - 1);
+    let smooth = fv(e, "smoothness", cx) as f64 / 100.0 * path.fps;
+    let crop_less = fv(e, "crop_less", cx) as f64 / 100.0;
+    let offsets = subspace_frame_offsets(&path, k, smooth * (0.5 + crop_less), chv(e, "result") == 1, if rank3 { 3 } else { 2 });
+    let s_x = img.w as f64 / path.w.max(1) as f64;
+    let s_y = img.h as f64 / path.h.max(1) as f64;
+    let max_disp = offsets.iter().fold(0.0f64, |m, o| m.max((o[0] * s_x).abs() / img.w.max(1) as f64).max((o[1] * s_y).abs() / img.h.max(1) as f64));
+    let framing = chv(e, "framing");
+    let max_scale = (fv(e, "max_scale", cx) as f64 / 100.0).max(1.0);
+    let safe = 1.0 + fv(e, "action_safe", cx) as f64 / 100.0;
+    let extra = fv(e, "additional_scale", cx) as f64 / 100.0;
+    let auto_zoom = if framing == 2 { (1.0 / (1.0 - 2.0 * max_disp.min(0.35))).clamp(1.0, max_scale) * safe } else { 1.0 } * extra;
+
+    let src = img.clone();
+    let (w, h) = (img.w, img.h);
+    let (cxp, cyp) = (w as f64 * 0.5, h as f64 * 0.5);
+    let clamp_edges = framing == 3;
+    img.px.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
+        let v = (y as f64 + 0.5) / h.max(1) as f64;
+        for x in 0..w {
+            let u = (x as f64 + 0.5) / w.max(1) as f64;
+            let zx = cxp + (x as f64 + 0.5 - cxp) / auto_zoom.max(0.05);
+            let zy = cyp + (y as f64 + 0.5 - cyp) / auto_zoom.max(0.05);
+            let off = sample_subspace_grid(&offsets, u, v);
+            // Inverse map: destination (zx, zy) samples source at (zx - off.x, zy - off.y)
+            let sx = (zx - off[0] * s_x) as f32;
+            let sy = (zy - off[1] * s_y) as f32;
+            let p = if clamp_edges { src.sample_bilinear_clamped(sx, sy) } else { src.sample_bilinear(sx, sy) };
+            row[x * 4..x * 4 + 4].copy_from_slice(&p);
+        }
+    });
+    if framing == 1 && max_disp > 1e-4 {
+        let m = max_disp.min(0.35) as f32;
+        crate::effects::crop(img, m, m, m, m, 0.0);
+    }
+    true
+}
+
+// ------------------------------------------------------------------ Generative Object Removal
+
+fn dilate_binary(mask: &[bool], w: usize, h: usize, radius: usize) -> Vec<bool> {
+    if radius == 0 || w == 0 || h == 0 {
+        return mask.to_vec();
+    }
+    let r = radius.min(32) as isize;
+    let mut h_pass = vec![false; w * h];
+    h_pass.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (x, out) in row.iter_mut().enumerate() {
+            let x0 = (x as isize - r).max(0) as usize;
+            let x1 = (x as isize + r).min(w as isize - 1) as usize;
+            *out = mask[y * w + x0..=y * w + x1].iter().any(|&b| b);
+        }
+    });
+    let mut out = vec![false; w * h];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let y0 = (y as isize - r).max(0) as usize;
+        let y1 = (y as isize + r).min(h as isize - 1) as usize;
+        for (x, dst) in row.iter_mut().enumerate() {
+            *dst = (y0..=y1).any(|yy| h_pass[yy * w + x]);
+        }
+    });
+    out
+}
+
+fn hole_mask_for(img: &Image, e: &EffectInstance, t: filmcraft_time::Tick, mask_scale: f32, expand_px: usize) -> Option<Vec<bool>> {
+    let (w, h) = (img.w, img.h);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let raw: Vec<bool> = if let Some(cov) = crate::mask::effect_coverage(&e.masks, t, mask_scale, w, h) {
+        cov.into_iter().map(|c| c > 0.02).collect()
+    } else {
+        let has_alpha_hole = img.px.as_chunks::<4>().0.iter().any(|p| p[3] < 0.98) && img.px.as_chunks::<4>().0.iter().any(|p| p[3] >= 0.98);
+        if !has_alpha_hole {
+            return None;
+        }
+        img.px.as_chunks::<4>().0.iter().map(|p| p[3] < 0.5).collect()
+    };
+    if !raw.iter().any(|&b| b) || raw.iter().all(|&b| b) {
+        return None;
+    }
+    let dilated = dilate_binary(&raw, w, h, expand_px);
+    (!dilated.iter().all(|&b| b)).then_some(dilated)
+}
+
+fn bg_poly(w: usize, h: usize) -> [Vec2; 4] {
+    let m = 4.0;
+    [Vec2::new(m, m), Vec2::new(w as f64 - m, m), Vec2::new(w as f64 - m, h as f64 - m), Vec2::new(m, h as f64 - m)]
+}
+
+fn boundary_mean_luma(img: &Image, hole: &[bool], ring: &[bool]) -> f32 {
+    let mut sum = 0.0f32;
+    let mut cnt = 0u32;
+    for (i, (&is_ring, &is_hole)) in ring.iter().zip(hole.iter()).enumerate() {
+        if is_ring && !is_hole {
+            let p = &img.px[i * 4..i * 4 + 4];
+            if p[3] > 0.1 {
+                sum += luma([p[0], p[1], p[2]]);
+                cnt += 1;
+            }
+        }
+    }
+    if cnt > 0 { (sum / cnt as f32).max(1e-4) } else { 0.25 }
+}
+
+/// Generative Object Removal: multi-frame motion-compensated background disocclusion +
+/// coarse-to-fine exemplar patch & harmonic diffusion inpainting inside masked regions.
+pub fn generative_object_removal(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
+    let expand = (fv(e, "expand", cx) * cx.px_scale).clamp(0.0, 48.0).round() as usize;
+    let Some(mut filled_hole) = hole_mask_for(img, e, cx.t, cx.mask_scale, expand) else { return };
+    let (w, h) = (img.w, img.h);
+    let ring = dilate_binary(&filled_hole, w, h, 4);
+    let target_luma = boundary_mean_luma(img, &filled_hole, &ring);
+    let light_adapt = (fv(e, "lighting_adapt", cx) / 100.0).clamp(0.0, 1.0);
+
+    // 1. Temporal optical-flow / background-aligned disocclusion from neighboring frames.
+    if chv(e, "mode") == 0
+        && let Some(env) = cx.env
+    {
+        let fps = env.frame_rate().max(1.0);
+        let radius = fv(e, "temporal_radius", cx).clamp(1.0, 12.0).round() as i32;
+        let mut cur_bg = gray_of(img);
+        for (px, &is_h) in cur_bg.px.iter_mut().zip(&filled_hole) {
+            if is_h {
+                *px = 0.0;
+            }
+        }
+        let prep_cur = Prepared::new(cur_bg);
+        let mut acc = vec![[0.0f32; 4]; w * h];
+        let mut wgt = vec![0.0f32; w * h];
+        let poly = bg_poly(w, h);
+
+        for step in 1..=radius {
+            for sign in [-1.0f64, 1.0] {
+                let dt = sign * step as f64 / fps;
+                let Some(cand) = env.frame(dt, e) else { continue };
+                if cand.w != w || cand.h != h {
+                    continue;
+                }
+                let t_cand = cx.t + filmcraft_time::Tick::from_seconds_f64(dt);
+                let cand_hole = hole_mask_for(&cand, e, t_cand, cx.mask_scale, expand + 2).unwrap_or_else(|| vec![false; w * h]);
+                let mut cand_bg = gray_of(&cand);
+                for (px, &is_h) in cand_bg.px.iter_mut().zip(&cand_hole) {
+                    if is_h {
+                        *px = 0.0;
+                    }
+                }
+                let prep_cand = Prepared::new(cand_bg);
+                let m = track_step(&prep_cur, &prep_cand, &poly, TrackMethod::PositionScaleRotation).map(|s| s.transform).unwrap_or(Affine::IDENTITY);
+                let cand_luma = boundary_mean_luma(&cand, &cand_hole, &dilate_binary(&cand_hole, w, h, 4));
+                let gain = 1.0 + ((target_luma / cand_luma).clamp(0.5, 2.0) - 1.0) * light_adapt;
+                let temporal_w = 1.0 / step as f32;
+
+                for y in 0..h {
+                    for x in 0..w {
+                        let i = y * w + x;
+                        if !filled_hole[i] {
+                            continue;
+                        }
+                        let q = m.apply(Vec2::new(x as f64 + 0.5, y as f64 + 0.5));
+                        let (qx, qy) = (q.x.round() as isize, q.y.round() as isize);
+                        if qx < 0 || qy < 0 || qx >= w as isize || qy >= h as isize {
+                            continue;
+                        }
+                        if cand_hole[qy as usize * w + qx as usize] {
+                            continue;
+                        }
+                        let s = cand.sample_bilinear_clamped(q.x as f32, q.y as f32);
+                        acc[i][0] += s[0] * gain * temporal_w;
+                        acc[i][1] += s[1] * gain * temporal_w;
+                        acc[i][2] += s[2] * gain * temporal_w;
+                        acc[i][3] += s[3] * temporal_w;
+                        wgt[i] += temporal_w;
+                    }
+                }
+            }
+        }
+        for i in 0..w * h {
+            if filled_hole[i] && wgt[i] > 0.0 {
+                let inv = 1.0 / wgt[i];
+                img.px[i * 4..i * 4 + 4].copy_from_slice(&[acc[i][0] * inv, acc[i][1] * inv, acc[i][2] * inv, (acc[i][3] * inv).clamp(0.0, 1.0)]);
+                filled_hole[i] = false;
+            }
+        }
+    }
+
+    // 2. Spatial exemplar ring + iterative harmonic diffusion for any remaining occluded pixels.
+    spatial_patch_diffusion_inpaint(img, &filled_hole);
+}
+
+fn spatial_patch_diffusion_inpaint(img: &mut Image, hole: &[bool]) {
+    if !hole.iter().any(|&b| b) {
+        return;
+    }
+    let (w, h) = (img.w, img.h);
+    // Collect donor pixels along the outer boundary ring so holes initialize with realistic colors & texture.
+    let outer = dilate_binary(hole, w, h, 3);
+    let donors: Vec<(usize, usize, [f32; 4])> = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .filter(|&(x, y)| outer[y * w + x] && !hole[y * w + x])
+        .step_by(2)
+        .map(|(x, y)| {
+            let i = (y * w + x) * 4;
+            (x, y, [img.px[i], img.px[i + 1], img.px[i + 2], img.px[i + 3]])
+        })
+        .collect();
+    if donors.is_empty() {
+        return;
+    }
+
+    // Distance-weighted Shepard boundary initialization + subtle donor micro-texture.
+    img.px.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
+        for x in 0..w {
+            if !hole[y * w + x] {
+                continue;
+            }
+            let mut sum = [0.0f32; 4];
+            let mut ws = 0.0f32;
+            let mut nearest_d2 = f32::INFINITY;
+            let mut nearest_col = [0.0f32; 4];
+            for &(dx, dy, col) in &donors {
+                let d2 = ((x as f32 - dx as f32).powi(2) + (y as f32 - dy as f32).powi(2)).max(1.0);
+                let wgt = 1.0 / (d2 * d2);
+                for k in 0..4 {
+                    sum[k] += col[k] * wgt;
+                }
+                ws += wgt;
+                if d2 < nearest_d2 {
+                    nearest_d2 = d2;
+                    nearest_col = col;
+                }
+            }
+            let inv = 1.0 / ws.max(1e-12);
+            let smooth_c = [sum[0] * inv, sum[1] * inv, sum[2] * inv, (sum[3] * inv).clamp(0.0, 1.0)];
+            // Preserve subtle local grain from mirrored donor outside the hole.
+            let donor_pick = &donors[(x.wrapping_mul(73) ^ y.wrapping_mul(179)) % donors.len()].2;
+            let tex_mix = 0.12f32;
+            let dst = &mut row[x * 4..x * 4 + 4];
+            for k in 0..3 {
+                let detail = (donor_pick[k] - nearest_col[k]).clamp(-0.08, 0.08);
+                dst[k] = (smooth_c[k] + detail * tex_mix).max(0.0);
+            }
+            dst[3] = smooth_c[3];
+        }
+    });
+
+    // Multi-pass harmonic Gauss-Seidel / Jacobi relaxation for C1-smooth gradients across boundary.
+    let mut buf = img.px.clone();
+    for _ in 0..24 {
+        buf.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
+            for x in 0..w {
+                let idx = y * w + x;
+                if !hole[idx] {
+                    row[x * 4..x * 4 + 4].copy_from_slice(&img.px[idx * 4..idx * 4 + 4]);
+                    continue;
+                }
+                let mut acc = [0.0f32; 4];
+                let mut cnt = 0.0f32;
+                for (ox, oy, wgt) in [(-1isize, 0isize, 1.0f32), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0), (0, 0, 0.5)] {
+                    let nx = (x as isize + ox).clamp(0, w as isize - 1) as usize;
+                    let ny = (y as isize + oy).clamp(0, h as isize - 1) as usize;
+                    let ni = (ny * w + nx) * 4;
+                    for k in 0..4 {
+                        acc[k] += img.px[ni + k] * wgt;
+                    }
+                    cnt += wgt;
+                }
+                for k in 0..4 {
+                    row[x * 4 + k] = (acc[k] / cnt).max(0.0);
+                }
+                row[x * 4 + 3] = row[x * 4 + 3].min(1.0);
+            }
+        });
+        std::mem::swap(&mut img.px, &mut buf);
     }
 }

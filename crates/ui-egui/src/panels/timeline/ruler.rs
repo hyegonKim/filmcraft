@@ -1,7 +1,7 @@
 use super::layout::Layout;
 use super::{
-    Align2, Color32, Drag, EDGE_PX, FilmcraftApp, Icon, ItemId, Rect, Sense, Sequence, Stroke, ThumbnailMode, Tick, TimeDisplay, TimeRange, Tokens, Value,
-    format_time, icons, json, marker_range_rect, marker_rect, pos2, vec2, work_area_rect,
+    Align2, Color32, Drag, EDGE_PX, FilmcraftApp, Icon, ItemId, Rect, Sense, Sequence, Stroke, ThumbnailMode, Tick, TimeRange, Tokens, Value, format_time,
+    icons, json, marker_range_rect, marker_rect, pos2, vec2, work_area_rect,
 };
 use crate::panels::timeline_hit::marker_end_rect;
 
@@ -27,13 +27,25 @@ pub(super) fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, se
     let rate = seq.settings.frame_rate;
     let hw = app.ui.timeline.header_w;
     let ruler = layout.ruler;
+    let top_y = ruler.max.y - super::TOP_H;
     // background of the whole top block
-    p.rect_filled(Rect::from_min_max(rect.min, pos2(rect.max.x, ruler.max.y)), 0.0, t.panel_bg);
+    p.rect_filled(Rect::from_min_max(pos2(rect.min.x, top_y), pos2(rect.max.x, ruler.max.y)), 0.0, t.panel_bg);
     // current timecode: Premiere's big blue timecode
-    let tc = format_time(app.session.playhead(), rate, seq.settings.drop_frame, TimeDisplay::Timecode, seq.settings.sample_rate as i64);
-    let tc_rect = Rect::from_min_size(pos2(rect.min.x + 14.0, rect.min.y + 4.0), vec2(hw - 20.0, 20.0));
+    let tc = format_time(app.session.playhead(), rate, seq.settings.drop_frame, seq.settings.display, seq.settings.sample_rate as i64);
+    let tc_rect = Rect::from_min_size(pos2(rect.min.x + 14.0, top_y + 4.0), vec2(hw - 20.0, 20.0));
     let tc_id = egui::Id::unique(("timeline-tc", seq_id));
-    match crate::widgets::timecode_field(ui, tc_id, tc_rect, &tc, app.session.playhead(), Tick::ZERO, rate, seq.settings.drop_frame, t.timecode) {
+    match crate::widgets::timecode_field(
+        ui,
+        tc_id,
+        tc_rect,
+        &tc,
+        app.session.playhead(),
+        Tick::ZERO,
+        rate,
+        seq.settings.drop_frame,
+        seq.settings.display,
+        t.timecode,
+    ) {
         Some(Ok(time)) => {
             if let Err(e) = app.session.execute("playhead.set", json!({"time": time.0})) {
                 app.ui.status = e.to_string();
@@ -45,7 +57,7 @@ pub(super) fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, se
     app.auto.add("timeline.timecode", tc_rect, &tc);
     // toolbar: 30 × 30 buttons, "on" = #4b4b4b fill
     let mut x = rect.min.x + 12.0;
-    let y = rect.min.y + 26.0;
+    let y = top_y + 26.0;
     let toggles: [(Icon, &str, bool, bool, &str); 6] = [
         (Icon::Nest, "nest", !app.session.state.sequences_as_clips, true, tl!("Insert and overwrite sequences as nests or individual clips")),
         (Icon::Magnet, "snap", app.session.state.snapping, true, tl!("Snap in Timeline (S)")),
@@ -134,7 +146,7 @@ pub(super) fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, se
         let h = if major { 10.0 } else { 4.0 };
         clip.line_segment([pos2(x, tick_base - h), pos2(x, tick_base)], Stroke::new(1.0, t.tl_ruler_tick));
         if major {
-            let label = format_time(rate.tick_of(f), rate, seq.settings.drop_frame, TimeDisplay::Timecode, 48000);
+            let label = format_time(rate.tick_of(f), rate, seq.settings.drop_frame, seq.settings.display, 48000);
             clip.text(pos2(x + 1.0, label_y), Align2::CENTER_CENTER, label, Tokens::ui(11.0), t.tl_ruler_text);
         }
         f += minor;
@@ -177,7 +189,7 @@ pub(super) fn draw_top(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, se
             clip.rect_filled(Rect::from_center_size(pos2(x, r.center().y), vec2(3.0, r.height() + 2.0)), 1.0, t.text);
         }
         app.auto.add("timeline.workArea", r.intersect(ruler), "Work Area Bar");
-        let fmt = |tick: Tick| format_time(tick, rate, seq.settings.drop_frame, TimeDisplay::Timecode, 48000);
+        let fmt = |tick: Tick| format_time(tick, rate, seq.settings.drop_frame, seq.settings.display, 48000);
         if ui.rect_contains_pointer(r.expand2(vec2(EDGE_PX, 1.0)).intersect(ruler)) {
             egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::unique("work-area-tip"), egui::PopupAnchor::Pointer).show(|ui| {
                 ui.label(tlf!("Start: {tc}", tc = fmt(area.start)));
@@ -249,6 +261,8 @@ fn timeline_settings(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
     app.auto.add("timeline.settings.showVideoNames", c.rect, "Show Video Names");
     let c = ui.checkbox(&mut app.ui.timeline.show_audio_names, tl!("Show Audio Names"));
     app.auto.add("timeline.settings.showAudioNames", c.rect, "Show Audio Names");
+    let co = ui.checkbox(&mut app.ui.timeline.cut_overview, tl!("Show Cut Overview Strip (Dual Timeline)"));
+    app.auto.add("timeline.settings.cutOverview", co.rect, "Show Cut Overview Strip (Dual Timeline)");
     ui.separator();
     let mut te = app.session.state.show_through_edits;
     let c = ui.checkbox(&mut te, tl!("Show Through Edits"));

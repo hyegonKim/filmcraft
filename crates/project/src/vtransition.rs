@@ -9,8 +9,17 @@
 
 use crate::effect::{EffectDef, EffectKind, ParamDef, ang, b, ch, col, fs, pt};
 
-/// Top-level Effects panel folders, in Premiere's order.
-pub const EFFECT_TOP_FOLDERS: &[&str] = &["Presets", "Lumetri Presets", "Audio Effects", "Audio Transitions", "Video Effects", "Video Transitions", "Legacy"];
+/// Stable key used in saved Effects-panel state and automation paths.
+pub const COLOR_PRESETS_FOLDER_KEY: &str = "Lumetri Presets";
+
+/// Presentation is separate from folder identity so saved expansion state keeps working.
+pub fn effect_folder_label(key: &str) -> &str {
+    if key == COLOR_PRESETS_FOLDER_KEY { "Color Grading Presets" } else { key }
+}
+
+/// Top-level Effects panel keys, in their established order.
+pub const EFFECT_TOP_FOLDERS: &[&str] =
+    &["Presets", COLOR_PRESETS_FOLDER_KEY, "Audio Effects", "Audio Transitions", "Video Effects", "Video Transitions", "Legacy"];
 
 /// The ten `Video Transitions` sub-folders, in panel order.
 pub const VIDEO_TRANSITION_FOLDERS: &[&str] =
@@ -18,6 +27,8 @@ pub const VIDEO_TRANSITION_FOLDERS: &[&str] =
 
 /// Category of the legacy transitions (`Legacy > Video Transitions`).
 pub const LEGACY_VIDEO_TRANSITIONS: &[&str] = &["Legacy", "Video Transitions"];
+/// Category of DaVinci Resolve / DCTL programmable video transitions (`Video Transitions > ResolveFX`).
+pub const RESOLVE_VIDEO_TRANSITIONS: &[&str] = &["Video Transitions", "ResolveFX"];
 /// Category of transitions Premiere no longer lists (kept so old projects still render; not shown
 /// in the Effects panel).
 pub const OBSOLETE_VIDEO_TRANSITIONS: &[&str] = &["Obsolete", "Video Transitions"];
@@ -379,6 +390,20 @@ pub(crate) fn video_transition_defs() -> Vec<EffectDef> {
         tr("gradient_wipe", "Gradient Wipe", OBSOLETE_VIDEO_TRANSITIONS, A, vec![fixed(crate::effect::f("softness", "Softness", 10.0, 0.0, 100.0, ""))]),
         tr("page_turn", "Page Turn", OBSOLETE_VIDEO_TRANSITIONS, A, vec![]),
         tr("venetian_blinds", "Venetian Blinds", OBSOLETE_VIDEO_TRANSITIONS, A, vec![]),
+        // ---- ResolveFX / DCTL ----
+        tr(
+            "dctl_transition",
+            "DCTL Transition",
+            RESOLVE_VIDEO_TRANSITIONS,
+            m,
+            vec![
+                ch("preset", "Preset", &["Custom / Linked", "Dissolve Glow", "Luma Film Burn", "Chromatic Whip"], 1),
+                fixed(crate::effect::txt("plugin_ref", "DCTL Source")),
+                fixed(crate::effect::txt("custom_code", "Inline DCTL")),
+                fixed(fs("p1", "Parameter 1", 0.5, (0.0, 1.0), (0.0, 1.0), "", 2)),
+                fixed(fs("p2", "Parameter 2", 0.5, (0.0, 1.0), (0.0, 1.0), "", 2)),
+            ],
+        ),
     ]
 }
 
@@ -420,6 +445,7 @@ mod tests {
         for d in crate::effect::effect_defs().iter().filter(|d| d.kind == EffectKind::VideoTransition) {
             assert!(names.insert(d.name), "duplicate transition name {}", d.name);
             let ok = (d.category.len() == 2 && d.category[0] == "Video Transitions" && VIDEO_TRANSITION_FOLDERS.contains(&d.category[1]))
+                || d.category == RESOLVE_VIDEO_TRANSITIONS
                 || d.category == LEGACY_VIDEO_TRANSITIONS
                 || d.category == OBSOLETE_VIDEO_TRANSITIONS;
             assert!(ok, "{} in {:?}", d.id, d.category);

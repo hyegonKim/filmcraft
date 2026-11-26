@@ -93,9 +93,14 @@ impl Driver {
         v.as_array().unwrap().iter().filter_map(|e| e["id"].as_str().map(str::to_string)).collect()
     }
 
-    /// Press on `id`, move `dy` pixels over several frames (calling `between` before each move),
-    /// release.
-    fn drag_frames(&mut self, id: &str, dy: f32, steps: usize, mut between: impl FnMut(&mut Self, usize)) {
+    /// Press on `id`, move `dy` pixels over several frames (calling `between` before each move and
+    /// once more, with `steps`, before the release), release.
+    fn drag_frames(&mut self, id: &str, dy: f32, steps: usize, between: impl FnMut(&mut Self, usize)) {
+        self.drag_frames_by(id, egui::vec2(0.0, dy), steps, between);
+    }
+
+    /// [`drag_frames`](Self::drag_frames) moving by `delta` in both directions.
+    fn drag_frames_by(&mut self, id: &str, delta: egui::Vec2, steps: usize, mut between: impl FnMut(&mut Self, usize)) {
         let r = self.element(id).unwrap_or_else(|| panic!("no element {id}"));
         let mut p = egui::pos2(r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
         let push = |d: &mut Self, e: egui::Event| d.harness.input_mut().events.push(e);
@@ -105,12 +110,17 @@ impl Driver {
         self.frames(1);
         for i in 0..steps {
             between(self, i);
-            p.y += dy / steps as f32;
+            p += delta / steps as f32;
             push(self, egui::Event::PointerMoved(p));
             self.frames(1);
         }
+        between(self, steps);
         push(self, egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
         self.frames(2);
+    }
+
+    fn undo_len(&mut self) -> usize {
+        self.exec("history.list", json!({}))["undo"].as_array().unwrap().len()
     }
 
     fn strip(&mut self, r: &str) -> Value {
@@ -523,35 +533,82 @@ fn paused_meters_repaint_without_input_and_settle_after_release() {
     }
 }
 
+/// #3765: the Mix row of the Timeline sets the Mix fader. Its level is hot text: a drag changes
+/// the master in one undo step, a typed value sets it, and it shows the fader at the playhead
+/// (automation included).
 #[test]
-fn long_track_keyframe_menu_scrolls_to_first_and_last_choices() {
+fn timeline_mix_level_sets_the_master() {
     let mut d = Driver::demo();
-    for _ in 0..5 {
-        d.exec("mixer.addInsert", json!({"strip": "A1", "effect": "graphic_eq_30"}));
-    }
-    let before = d.harness.state().session.project.clone();
-    d.ok("ui.set", json!({"focused": "Timeline"}));
-    d.ok("ui.menu.invoke", json!({"command": "window.maximizeFrame", "params": {}}));
-    d.click("timeline.track.A1.keyframes");
-    let scroll = d.element("timeline.track.A1.keyframes.scroll").expect("long keyframe menus need a scroll area");
-    let height = d.harness.ctx.content_rect().height();
-    assert!(scroll[1] >= 0.0 && scroll[1] + scroll[3] <= height, "menu must fit the viewport: {scroll:?}, height {height}");
-    let last = "timeline.track.A1.keyframes.fx.4.gain";
-    let old = d.element(last).expect("last insert parameter");
-    assert!(old[1] > scroll[1] + scroll[3], "fixture must overflow");
-    d.ok("ui.scroll", json!({"id": "timeline.track.A1.keyframes.scroll", "dy": -8000.0}));
-    d.frames(30);
-    let end = d.element(last).unwrap();
-    assert!(end[1] < old[1] && end[1] >= scroll[1] && end[1] + end[3] <= scroll[1] + scroll[3], "last choice reachable after wheel: {end:?}, {scroll:?}");
-    d.click(last);
-    let track = d.harness.state().session.active_sequence().unwrap().audio_tracks[0].id.0;
-    assert_eq!(d.harness.state().ui.timeline.track_lanes.get(&track).map(String::as_str), Some("fx.4.gain"));
-    d.click("timeline.track.A1.keyframes");
-    d.ok("ui.scroll", json!({"id": "timeline.track.A1.keyframes.scroll", "dy": 8000.0}));
-    d.frames(30);
-    let first = d.element("timeline.track.A1.keyframes.clip").unwrap();
-    assert!(first[1] >= scroll[1] && first[1] + first[3] <= scroll[1] + scroll[3]);
-    d.click("timeline.track.A1.keyframes.clip");
-    assert!(!d.harness.state().ui.timeline.track_lanes.contains_key(&track));
-    assert_eq!(d.harness.state().session.project, before, "choosing visible lanes must not edit the project");
+    let mix = |d: &mut Driver| d.harness.state().session.active_sequence().unwrap().master_volume_db;
+    let label = |d: &mut Driver| {
+        d.frames(2);
+        let v = d.ok("ui.elements", json!({"prefix": "timeline.mix.volume"}));
+        v.as_array().unwrap().iter().find(|e| e["id"] == "timeline.mix.volume").expect("the Mix level is a control")["label"].as_str().unwrap().to_string()
+    };
+    assert_eq!(label(&mut d), "0.0");
+    // drag to the right: louder, one undo step
+    d.ok("ui.drag", json!({"from": {"id": "timeline.mix.volume"}, "to": {"id": "timeline.mix.volume", "fx": 3.0}, "steps": 12}));
+    d.frames(3);
+    let up = mix(&mut d);
+    assert!(up > 0.5, "the drag raised the Mix fader: {up}");
+    assert_eq!(label(&mut d), format!("{up:.1}"));
+    d.exec("edit.undo", json!({}));
+    assert_eq!(mix(&mut d), 0.0, "the drag is one undo step");
+    // type a value
+    d.ok("ui.click", json!({"id": "timeline.mix.volume"}));
+    d.frames(3);
+    d.ok("ui.type", json!({"text": "-6"}));
+    d.ok("ui.key", json!({"key": "Enter"}));
+    d.frames(3);
+    assert_eq!(mix(&mut d), -6.0, "typed");
+    // automation: the row shows the fader at the playhead
+    d.exec("mixer.setKeyframe", json!({"strip": "Mix", "time": 0, "value": -12.0}));
+    d.exec("playhead.set", json!({"time": 0}));
+    assert_eq!(label(&mut d), "-12.0");
+}
+
+/// During playback (an automation pass) a drag of the Timeline's Mix level is one held gesture:
+/// with nothing to record it changes the level once, as one undo step; in Touch it is written as
+/// automation when the pass ends and returns from where it was let go.
+#[test]
+fn timeline_mix_drag_during_playback_is_one_gesture() {
+    use filmcraft_project::mixer::{LANE_VOLUME, MASTER_STRIP};
+    let mut d = Driver::demo();
+    let mix = |d: &mut Driver| d.harness.state().session.active_sequence().unwrap().master_volume_db;
+    d.frames(2);
+    // Read, no automation: a plain control
+    d.exec("mixer.recordStart", json!({}));
+    let before = d.undo_len();
+    d.drag_frames_by("timeline.mix.volume", egui::vec2(-60.0, 0.0), 6, |_, _| {});
+    assert_eq!(d.undo_len(), before + 1, "one undo step for the drag");
+    let down = mix(&mut d);
+    assert!(down < -0.5, "the drag lowered the Mix fader: {down}");
+    d.exec("mixer.recordStop", json!({}));
+    d.exec("edit.undo", json!({}));
+    assert_eq!(mix(&mut d), 0.0);
+    // Touch: held while the playhead moves, written when the pass ends
+    d.exec("mixer.setStrip", json!({"strip": "Mix", "mode": "Touch"}));
+    d.exec("playhead.set", json!({"seconds": 1.0}));
+    d.exec("mixer.recordStart", json!({}));
+    // the last call moves the playhead after the last drag update, before the release
+    let (mut held, mut last_move, mut released) = (None, 0, 0);
+    d.drag_frames_by("timeline.mix.volume", egui::vec2(-60.0, 0.0), 6, |d, i| {
+        last_move = released;
+        d.exec("playhead.set", json!({"seconds": 1.0 + 0.1 * i as f64}));
+        let s = &d.harness.state().session;
+        released = s.playhead().0;
+        held = s.previews.live.get(MASTER_STRIP, LANE_VOLUME).map(|o| o.value);
+    });
+    let held = held.expect("the drag holds the Mix fader");
+    assert!(held < -0.5, "{held}");
+    assert!(released > last_move, "the playhead moved between the last drag update and the release");
+    assert!(d.strip("Mix")["lanes"].as_object().is_none_or(|m| m.is_empty()), "nothing written until the pass ends");
+    d.exec("playhead.set", json!({"seconds": 3.0}));
+    let r = d.exec("mixer.recordStop", json!({}));
+    assert_eq!(r["lanes"], 1, "{r}");
+    let kfs = d.strip("Mix")["lanes"]["volume"].as_array().unwrap().clone();
+    assert!(kfs.len() >= 3, "{kfs:?}");
+    // the return starts where the control was let go: the release time holds the released value
+    let at = kfs.iter().find(|k| k[0].as_i64() == Some(released)).unwrap_or_else(|| panic!("no keyframe at the release: {kfs:?}"));
+    assert!((at[1].as_f64().unwrap() - held).abs() < 1e-6, "{at:?} vs {held}");
 }

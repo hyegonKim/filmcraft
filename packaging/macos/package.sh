@@ -83,10 +83,9 @@ echo "==> FilmCraft $VERSION for macOS ($ARCH), identity: $IDENTITY, notarize: $
 # ---- build -------------------------------------------------------------------------------------
 if [[ "$SKIP_BUILD" = 0 ]]; then
   args=()
-  if [ "$NATIVE" = 0 ]; then
-    for t in "${TARGETS[@]}"; do args+=(--target "$t"); done
-  fi
-  (cd "$ROOT" && cargo build --release --locked -j1 -p filmcraft -p filmcraft-cli --features whisper,macos-voices ${args[@]+"${args[@]}"})
+  for t in "${TARGETS[@]}"; do args+=(--target "$t"); done
+  # Official packages include Kokoro natural voices (downloaded on first use). #2318 #3773
+  (cd "$ROOT" && cargo build --release --locked -p filmcraft -p filmcraft-cli --features filmcraft/neural-voices "${args[@]}")
 fi
 
 rm -rf "$WORK"

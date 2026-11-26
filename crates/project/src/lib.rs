@@ -25,6 +25,8 @@ pub mod mask;
 pub mod mixer;
 pub mod multicam;
 pub mod narration;
+pub mod plugin;
+pub mod substance3d;
 pub mod transcript;
 pub mod vtransition;
 
@@ -36,15 +38,23 @@ use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick, TimeRange};
 use serde::{Deserialize, Serialize};
 
 pub use caption::{Caption, CaptionAlign, CaptionAnchor, CaptionFormat, CaptionStyle, CaptionTrack, plain_text};
-pub use effect::{EffectDef, EffectInstance, EffectKind, ParamDef, ParamKind, effect_defs, find_effect};
+pub use effect::{EffectDef, EffectInstance, EffectKind, ParamDef, ParamKind, effect_defs, find_effect, interchange_name, search_aliases};
 pub use essential::{AudioType, EssentialSound};
 pub use find::{FindOp, FindQuery, FindRow, SearchBin};
 pub use graphic_design::{CharStyle, GraphicMeta, LayerExtra, Pin, PinTarget, Roll, RollMode, SourceGraphic, StyleRun};
 pub use keyframe::{Interpolation, Keyframe, Param, ParamValue};
-pub use mask::{Mask, MaskMode, MaskPath, MaskVertex, TrackMethod};
+pub use mask::{Mask, MaskMode, MaskPath, MaskVertex, TrackMethod, TrackerQuality};
 pub use mixer::{AutomationMode, InputMap, MixerStrip, TrackSend};
 pub use multicam::{Camera, MergedClip, MulticamAudio, MulticamSel, MulticamSource};
 pub use narration::{Narration, VocalPitch};
+pub use plugin::{
+    DctlCubeLut, DctlLutInterp, DctlParamKind, DctlPixelCtx, DctlProgram, DctlUiParam, MAX_PLUGIN_TEXT_BYTES, PluginKind, PowerGradeStill, ProjectPlugin,
+    builtin_dctls, builtin_transition_dctls, parse_dctl,
+};
+pub use substance3d::{
+    MAX_OBJ_BYTES, MAX_OBJ_TRIANGLES, MAX_OBJ_VERTICES, ObjMesh, PROCEDURAL_PBR_PATTERNS, RELIGHT_OUTPUT_MODES, STAGE_MATERIAL_SPECS, STAGE_MATERIALS,
+    STAGE_SHAPES, SUBSTANCE_PRESETS, StageMaterialSpec, SubstancePreset, find_substance_preset, parse_obj, stage_material_spec,
+};
 pub use transcript::{Speaker, Transcript, Word};
 
 macro_rules! id_type {
@@ -67,8 +77,8 @@ pub use item::{AudioChannelMap, Bin, BinEntry, Interpretation, ItemKind, MediaCl
 pub use label::Label;
 pub(crate) use sequence::bounded_time_range;
 pub use sequence::{
-    MAX_FRAME_PIXELS, MAX_FRAME_SIDE, MAX_PIXEL_ASPECT, Sequence, SequenceSettings, SplitMarks, checked_par, conformed_size, par_ratio, sane_par,
-    validate_frame_size,
+    ColorCompoundGroup, MAX_FRAME_PIXELS, MAX_FRAME_SIDE, MAX_PIXEL_ASPECT, Sequence, SequenceSettings, SplitMarks, checked_par, conformed_size, par_ratio,
+    sane_par, validate_frame_size,
 };
 pub use settings::{IngestAction, IngestSettings, ProjectSettings, ScratchDisks};
 pub use source::resolve_auto_points;
@@ -96,7 +106,7 @@ pub struct Project {
     pub items: BTreeMap<ItemId, ProjectItem>,
     /// Monotonic id source for all id types.
     pub next_id: u64,
-    /// The project's LUT library (Lumetri Input LUT / Creative Look "Browse…"). LUT files are
+    /// The project's LUT library (Color Grading Input LUT / Creative Look "Browse…"). LUT files are
     /// embedded, so projects render without the original files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub luts: Vec<ProjectLut>,
@@ -120,6 +130,12 @@ pub struct Project {
     /// instructions for whoever opens it next, frame numbers and the like. Schema v15.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    /// Portable DCTL / plugin shaders imported into the project (`plugins.importDctl`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugins: Vec<ProjectPlugin>,
+    /// Color-page Gallery Stills / PowerGrades (`color.grabStill` / `color.applyStill`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub power_grades: Vec<PowerGradeStill>,
 }
 
 impl Default for Project {
@@ -149,6 +165,8 @@ impl Project {
             source_graphics: BTreeMap::new(),
             narrations: BTreeMap::new(),
             notes: String::new(),
+            plugins: Vec::new(),
+            power_grades: Vec::new(),
         }
     }
 
@@ -178,8 +196,10 @@ impl Project {
         self.search_bins.iter().for_each(|b| see(b.id.0));
         // deleting an item leaves these entries behind: a new item taking that id would inherit them
         self.transcripts.keys().chain(self.source_graphics.keys()).chain(self.narrations.keys()).for_each(|i| see(i.0));
-        // `lut.import` names LUTs `lut<id>`
+        // `lut.import` names LUTs `lut<id>`; `plugins.importDctl` names plugins `dctl<id>`
         self.luts.iter().filter_map(|l| l.id.strip_prefix("lut")?.parse().ok()).for_each(&mut see);
+        self.plugins.iter().filter_map(|p| p.id.strip_prefix("dctl")?.parse().ok()).for_each(&mut see);
+        self.power_grades.iter().for_each(|pg| see(pg.id));
         fn mixer(m: &MixerStrip) -> impl Iterator<Item = u64> + '_ {
             m.sends.iter().map(|s| s.target.0).chain(m.output.map(|t| t.0))
         }
@@ -216,6 +236,10 @@ impl Project {
                     }
                     if let Some(m) = &s.merged {
                         m.video.iter().chain(&m.audio).for_each(|i| see(i.0));
+                    }
+                    for cg in &s.color_groups {
+                        see(cg.id);
+                        cg.clips.iter().for_each(|c| see(c.0));
                     }
                 }
                 _ => {}
@@ -387,6 +411,8 @@ impl Project {
             multicam: None,
             merged: None,
             split: SplitMarks::default(),
+            color_groups: Vec::new(),
+            mute_color_contrast: false,
         };
         for i in 0..v {
             let id = TrackId(self.alloc_id());
@@ -489,11 +515,15 @@ impl Project {
             essential: None,
             multicam,
             time_interpolation: TimeInterpolation::default(),
+            maintain_pitch: false,
             hold_filters: false,
             field_options: None,
             source_channels,
             audio_stream: 0,
             graphic: source_graphic.and_then(|sg| sg.meta.map(Box::new)),
+            pitch_semitones: 0.0,
+            generative_extend_head: Tick::ZERO,
+            generative_extend_tail: Tick::ZERO,
         })
     }
 

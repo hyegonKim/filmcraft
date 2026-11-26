@@ -1250,7 +1250,7 @@ struct CommandDefinition {
 
 fn spec(definition: CommandDefinition) -> CommandSpec {
     let CommandDefinition { id, label, menu, shortcut, params, enabled, run, journal } = definition;
-    CommandSpec { id, label, menu, shortcut, params, enabled, run, journal }
+    CommandSpec { id, label, menu, shortcut, params, enabled, run, journal, named: crate::commands::NamedKeys::NONE }
 }
 
 pub fn commands() -> Vec<CommandSpec> {

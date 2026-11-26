@@ -200,6 +200,102 @@ pub(super) fn apply(id: &str, t: &Tx) -> Option<Image> {
                 }
             })
         }
+        // ---------------- ResolveFX / DCTL ----------------
+        "dctl_transition" => render_dctl_transition(t),
         _ => return None,
+    })
+}
+
+fn resolve_transition_dctl_code(t: &Tx) -> &'static str {
+    let presets = filmcraft_project::builtin_transition_dctls();
+    let preset = t.choice("preset");
+    match preset {
+        1 => presets.first().map_or("", |(_, _, c)| *c),
+        2 => presets.get(1).map_or("", |(_, _, c)| *c),
+        3 => presets.get(2).map_or("", |(_, _, c)| *c),
+        _ => concat!(
+            "DEFINE_UI_PARAMS(p1, Curve Bias, DCTLUI_SLIDER_FLOAT, 0.5, 0.0, 1.0, 0.01)\n",
+            "DEFINE_UI_PARAMS(p2, Vignette Mix, DCTLUI_SLIDER_FLOAT, 0.5, 0.0, 1.0, 0.01)\n",
+            "__DEVICE__ float4 transition(int p_Width, int p_Height, int p_X, int p_Y, ",
+            "__TEXTURE__ p_FromTexR, __TEXTURE__ p_FromTexG, __TEXTURE__ p_FromTexB, __TEXTURE__ p_FromTexA, ",
+            "__TEXTURE__ p_ToTexR, __TEXTURE__ p_ToTexG, __TEXTURE__ p_ToTexB, __TEXTURE__ p_ToTexA, float p_Transition) {\n",
+            "    float ux = (p_X / _fmaxf(p_Width, 1.0f)) - 0.5f;\n",
+            "    float uy = (p_Y / _fmaxf(p_Height, 1.0f)) - 0.5f;\n",
+            "    float rad = _hypotf(ux, uy) * (0.3f + p2);\n",
+            "    float k = _saturatef(p_Transition + (p1 - 0.5f) * 0.45f * 4.0f * p_Transition * (1.0f - p_Transition) - rad * 0.2f * 4.0f * p_Transition * (1.0f - p_Transition));\n",
+            "    return make_float4(_mix(p_FromR, p_ToR, k), _mix(p_FromG, p_ToG, k), _mix(p_FromB, p_ToB, k), _saturatef(_mix(p_FromA, p_ToA, k)));\n",
+            "}\n"
+        ),
+    }
+}
+
+fn render_dctl_transition(t: &Tx) -> Image {
+    let text_param = |id: &str| -> String {
+        match t.e.param(id).map(|p| &p.value) {
+            Some(filmcraft_project::ParamValue::Text(s)) => s.trim().to_string(),
+            _ => String::new(),
+        }
+    };
+    let custom = text_param("custom_code");
+    let pref = text_param("plugin_ref");
+    let code_cow: std::borrow::Cow<'_, str> = if !custom.is_empty() {
+        std::borrow::Cow::Owned(custom)
+    } else if let Some(bid) = pref.strip_prefix("builtin:") {
+        let found = filmcraft_project::builtin_transition_dctls()
+            .iter()
+            .chain(filmcraft_project::builtin_dctls().iter())
+            .find(|(id, _, _)| *id == bid)
+            .map(|(_, _, c)| *c)
+            .unwrap_or_else(|| resolve_transition_dctl_code(t));
+        std::borrow::Cow::Borrowed(found)
+    } else {
+        std::borrow::Cow::Borrowed(resolve_transition_dctl_code(t))
+    };
+
+    let p = t.p;
+    let Ok(prog) = filmcraft_project::parse_dctl(&code_cow) else {
+        return paint(t.w, t.h, |x, y| mix(t.pa(x, y), t.pb(x, y), p));
+    };
+    let p1 = t.num("p1").clamp(0.0, 1.0);
+    let p2 = t.num("p2").clamp(0.0, 1.0);
+    let mut bindings: Vec<(&str, f32)> = vec![("p1", p1), ("p2", p2)];
+    for (idx, up) in prog.ui_params.iter().take(2).enumerate() {
+        bindings.push((up.name.as_str(), [p1, p2][idx]));
+    }
+
+    let (w, h) = (t.w, t.h);
+    let end_in = smoothstep(0.0, 0.08, p);
+    let end_out = smoothstep(0.92, 1.0, p);
+    let sample_from = |sx: isize, sy: isize| t.a.get_clamped(sx, sy);
+    let sample_to = |sx: isize, sy: isize| t.b.get_clamped(sx, sy);
+
+    paint(w, h, |fx, fy| {
+        let xi = (fx.floor() as usize).min(w.saturating_sub(1));
+        let yi = (fy.floor() as usize).min(h.saturating_sub(1));
+        let pa = t.a.get(xi, yi);
+        let pb = t.b.get(xi, yi);
+        let pctx = filmcraft_project::DctlPixelCtx {
+            width: w,
+            height: h,
+            x: xi,
+            y: yi,
+            rgba: pa,
+            to_rgba: pb,
+            frame_index: (p * 100.0).round() as i64,
+            transition_progress: p,
+            params: &bindings,
+            luts: &[],
+            sample_from: prog.uses_tex2d.then_some(&sample_from),
+            sample_to: prog.uses_tex2d.then_some(&sample_to),
+        };
+        let raw = prog.eval_pixel(&pctx).into_rgba(pa[3] + (pb[3] - pa[3]) * p);
+        let clamped = [
+            raw[0].clamp(-0.25, 48.0),
+            raw[1].clamp(-0.25, 48.0),
+            raw[2].clamp(-0.25, 48.0),
+            raw[3].clamp(0.0, 1.0),
+        ];
+        let c1 = mix(pa, clamped, end_in);
+        mix(c1, pb, end_out)
     })
 }

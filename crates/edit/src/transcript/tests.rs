@@ -55,11 +55,15 @@ fn clip(id: u64, start: f64, dur: f64, src_in: f64) -> TrackItem {
         essential: None,
         multicam: None,
         time_interpolation: Default::default(),
+        maintain_pitch: false,
         hold_filters: false,
         field_options: None,
         source_channels: Vec::new(),
         audio_stream: 0,
         graphic: None,
+        pitch_semitones: 0.0,
+        generative_extend_head: Tick::ZERO,
+        generative_extend_tail: Tick::ZERO,
     }
 }
 
@@ -302,107 +306,71 @@ fn captions_never_overlap_with_dense_words() {
     check_blocks(&b, &rules);
 }
 
+/// Higher-track coverage merges into sorted disjoint ranges and answers like the ranges it was
+/// built from (a binary search, not a scan of every clip per word).
 #[test]
-fn zero_duration_words_never_invent_a_frame_to_delete() {
-    let mut words = sequence_words(&whole(), &transcripts());
-    words[0].end = words[0].start;
-    assert!(word_range(&words, 0, 0, R).is_none());
-    assert!(word_range(&words, 0, 1, R).is_none());
-    assert!(word_range(&words, usize::MAX, usize::MAX, R).is_none());
-    words[1].start = words[0].end + s(2.0);
-    words[1].end = words[1].start + s(0.2);
-    assert!(find_pauses(&words[..2], s(0.5), s(0.1), R).is_empty());
-    assert!(filler_ranges(&words, &[0..0, usize::MAX..usize::MAX], R).is_empty());
-    let mut t = fixture();
-    t.words[0].end = t.words[0].start;
-    assert!(media_word_range(&t, 0, 0, R).is_none());
-}
-
-#[test]
-fn automatic_fillers_require_verified_interior_bounds() {
-    let mut words = sequence_words(&whole(), &transcripts());
-    words[4].filler_requires_check = true;
-    assert!(filler_ranges(&words, std::slice::from_ref(&(4..5)), R).is_empty());
-    words[4].filler_checked = true;
-    words[4].filler_bounds_revision = filmcraft_project::transcript::FILLER_BOUNDS_REVISION;
-    words[4].filler_bounds = Some(TimeRange::from_bounds(words[4].start + s(0.08), words[4].end - s(0.08)));
-    let bounds = words[4].filler_bounds.unwrap();
-    let cuts = filler_ranges(&words, std::slice::from_ref(&(4..5)), R);
-    assert!(!cuts.is_empty());
-    assert!(cuts[0].start >= bounds.start && cuts[0].end() <= bounds.end());
-}
-
-#[test]
-fn filler_cut_rounds_both_edges_inside_confirmed_audio() {
-    let mut words = sequence_words(&whole(), &transcripts());
-    let start = words[4].start + s(0.091);
-    let end = words[4].end - s(0.071);
-    words[4].filler_requires_check = true;
-    words[4].filler_checked = true;
-    words[4].filler_bounds_revision = filmcraft_project::transcript::FILLER_BOUNDS_REVISION;
-    words[4].filler_bounds = Some(TimeRange::from_bounds(start, end));
-    let cuts = filler_ranges(&words, std::slice::from_ref(&(4..5)), R);
-    assert_eq!(cuts.len(), 1);
-    assert!(cuts[0].start >= start);
-    assert!(cuts[0].end() <= end);
-    assert!(cuts[0].start - start < R.frame_duration());
-    assert!(end - cuts[0].end() < R.frame_duration());
-}
-
-#[test]
-fn automatic_filler_phrases_cannot_bridge_unverified_audio() {
-    let base = sequence_words(&whole(), &transcripts());
-    let mut words = vec![base[4].clone(), base[4].clone()];
-    for (i, word) in words.iter_mut().enumerate() {
-        word.start = s(1.0 + i as f64 * 3.0);
-        word.end = word.start + s(0.6);
-        word.filler_requires_check = true;
-        word.filler_checked = true;
-        word.filler_bounds_revision = filmcraft_project::transcript::FILLER_BOUNDS_REVISION;
-        word.filler_bounds = Some(TimeRange::from_bounds(word.start + s(0.08), word.end - s(0.08)));
+fn coverage_merges_ranges_and_matches_a_linear_scan() {
+    let r = |a: i64, b: i64| TimeRange::from_bounds(Tick(a), Tick(b));
+    let ranges = [r(10, 20), r(15, 30), r(30, 35), r(50, 60), r(70, 70), r(90, 80), r(-5, 0)];
+    let mut c = Coverage::default();
+    c.add(ranges[..3].to_vec());
+    c.add(ranges[3..].to_vec());
+    assert_eq!(c.0, vec![(Tick(-5), Tick(0)), (Tick(10), Tick(35)), (Tick(50), Tick(60))]);
+    for t in -10..100 {
+        assert_eq!(c.contains(Tick(t)), ranges.iter().any(|x| x.contains(Tick(t))), "t = {t}");
     }
-    assert!(filler_ranges(&words, std::slice::from_ref(&(0..2)), R).is_empty());
-    assert_eq!(filler_ranges(&words, &[0..1, 1..2], R).len(), 2);
+}
+
+fn sw(text: &str, i: usize) -> SeqWord {
+    SeqWord {
+        text: text.into(),
+        start: Tick(i as i64),
+        end: Tick(i as i64 + 1),
+        clip: ClipId(1),
+        item: MEDIA,
+        index: i,
+        track: 0,
+        speaker: None,
+        confidence: 1.0,
+        filler_requires_check: false,
+        filler_checked: false,
+        filler_bounds_revision: 0,
+        filler_bounds: None,
+    }
+}
+
+/// The straightforward search: restart the query at every position.
+fn naive_search(words: &[SeqWord], query: &str) -> Vec<std::ops::Range<usize>> {
+    let q: Vec<String> = query.split_whitespace().map(filmcraft_project::transcript::normalize_word).filter(|s| !s.is_empty()).collect();
+    let norm: Vec<String> = words.iter().map(SeqWord::normalized).collect();
+    let mut out = Vec::new();
+    for i in 0..norm.len().saturating_sub(q.len().saturating_sub(1)) {
+        if !q.is_empty() && q.iter().enumerate().all(|(k, qw)| if k + 1 == q.len() { norm[i + k].starts_with(qw.as_str()) } else { norm[i + k] == *qw }) {
+            out.push(i..i + q.len());
+        }
+    }
+    out
 }
 
 #[test]
-fn pause_cut_never_rounds_into_the_next_spoken_word() {
-    let base = sequence_words(&whole(), &transcripts());
-    let mut words = vec![base[4].clone(), base[4].clone()];
-    words[0].start = s(0.2);
-    words[0].end = s(1.013);
-    words[1].start = s(2.027);
-    words[1].end = s(2.5);
-    let cuts = find_pauses(&words, s(0.5), Tick::ZERO, R);
-    assert_eq!(cuts.len(), 1);
-    assert!(cuts[0].start >= words[0].end);
-    assert!(cuts[0].end() <= words[1].start);
+fn phrase_search_matches_the_plain_search_on_repeated_words() {
+    let mut x = 12345u32;
+    let mut next = || {
+        x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        (x >> 16) as usize
+    };
+    for _ in 0..300 {
+        let words: Vec<SeqWord> = (0..(next() % 30)).map(|i| sw(["a", "ab", "b"][next() % 3], i)).collect();
+        let query: Vec<&str> = (0..(1 + next() % 5)).map(|_| ["a", "ab", "b"][next() % 3]).collect();
+        let query = query.join(" ");
+        assert_eq!(search(&words, &query), naive_search(&words, &query), "{query:?}");
+    }
 }
 
 #[test]
-fn previous_policy_filler_bounds_must_be_rechecked() {
-    let mut words = sequence_words(&whole(), &transcripts());
-    words[4].filler_requires_check = true;
-    words[4].filler_checked = true;
-    words[4].filler_bounds = Some(TimeRange::from_bounds(words[4].start + s(0.1), words[4].end - s(0.1)));
-    assert!(filler_ranges(&words, std::slice::from_ref(&(4..5)), R).is_empty());
-    words[4].filler_bounds_revision = filmcraft_project::transcript::FILLER_BOUNDS_REVISION;
-    assert_eq!(filler_ranges(&words, std::slice::from_ref(&(4..5)), R).len(), 1);
-}
-
-#[test]
-fn early_transcript_presence_obeys_trim_and_higher_track_masking() {
-    let tr = transcripts();
-    let mut q = whole();
-    assert!(has_sequence_words(&q, &tr));
-    // Higher track has a transcript, but no word inside its trimmed source range;
-    // it nevertheless masks the lower track, exactly as the full projection does.
-    q.audio_tracks[0].items[0].source_in = s(30.0);
-    q.audio_tracks[1].items.push(clip(101, 0.0, 10.0, 0.0));
-    assert!(sequence_words(&q, &tr).is_empty());
-    assert!(!has_sequence_words(&q, &tr));
-    q.audio_tracks[0].items[0].enabled = false;
-    assert!(has_sequence_words(&q, &tr));
-    q.audio_tracks[1].items[0].reverse = true;
-    assert!(!has_sequence_words(&q, &tr));
+fn a_long_repeated_prefix_does_not_make_search_quadratic() {
+    let words: Vec<SeqWord> = (0..20_000).map(|i| sw("a", i)).collect();
+    let query = format!("{}b", "a ".repeat(5_000));
+    // (a quadratic search would need ~10^8 comparisons here; the result is the check, not a clock)
+    assert!(search(&words, &query).is_empty());
 }

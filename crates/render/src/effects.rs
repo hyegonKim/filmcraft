@@ -19,19 +19,22 @@ pub struct FxCtx<'a> {
     pub t: Tick,
     /// Working-image pixels per full-resolution clip pixel.
     pub px_scale: f32,
+    /// [`px_scale`](Self::px_scale) without the cap on effect sizes: mask outlines are placed in the
+    /// working image by the true ratio, however far the stored width is off the decoded one.
+    pub mask_scale: f32,
     /// Seconds since the clip start (for animated generators such as Noise/Strobe).
     pub seconds: f64,
     /// Formatted sequence timecode (for the Timecode effect).
     pub timecode: &'a str,
     pub clip_name: &'a str,
-    /// The project (LUT library for Lumetri); `None` in isolated effect tests.
+    /// The project (LUT library for Color Grading); `None` in isolated effect tests.
     pub project: Option<&'a filmcraft_project::Project>,
     /// The clip's surroundings (other frames, other tracks, sequence geometry) for temporal,
     /// track-reading and reframing effects; `None` in isolated tests and adjustment layers.
     pub env: Option<&'a dyn crate::vfx::FxEnv>,
     /// Sequence frame rate (shutter-angle motion blur); also known where `env` is `None`.
     pub frame_rate: f64,
-    /// The sequence's working colour space: Lumetri grades HDR (PQ / HLG) working spaces in their
+    /// The sequence's working colour space: Color Grading grades HDR (PQ / HLG) working spaces in their
     /// own signal, normalised to HDR White ([`filmcraft_color::GradeSpace`]).
     pub working: filmcraft_color::WorkingSpace,
 }
@@ -116,7 +119,7 @@ pub fn apply(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
     if !e.enabled || img.w == 0 || img.h == 0 {
         return;
     }
-    if crate::vfx::apply(img, e, cx) {
+    if crate::vfx::apply(img, e, cx) || crate::resolve_fx::apply(img, e, cx) || crate::stage3d::apply(img, e, cx) {
         return;
     }
     // effects with a GPU implementation: evaluated parameters + CPU reference (`gpufx`)
@@ -355,11 +358,14 @@ pub fn apply(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
         "luma_key" => {
             let th = f(e, "threshold", cx) / 100.0;
             let cut = f(e, "cutoff", cx) / 100.0;
+            let invert = b(e, "invert");
             img.px.par_chunks_mut(4).for_each(|p| {
                 if p[3] <= 0.0 {
                     return;
                 }
                 let l = linear_to_srgb(luma709(p[0] / p[3], p[1] / p[3], p[2] / p[3]).max(0.0));
+                // keying out brights measures Cutoff / Threshold from white: the same ramp, mirrored
+                let l = if invert { 1.0 - l } else { l };
                 let a = if l <= cut {
                     0.0
                 } else if l >= th.max(cut + 1e-3) {
@@ -376,7 +382,13 @@ pub fn apply(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
             let cs = [color(e, "c1", cx), color(e, "c2", cx), color(e, "c3", cx), color(e, "c4", cx)];
             let op = f(e, "opacity", cx) / 100.0;
             let (w, h) = (img.w as f32, img.h as f32);
-            let pts = [(0.25 * w, 0.25 * h), (0.75 * w, 0.25 * h), (0.25 * w, 0.75 * h), (0.75 * w, 0.75 * h)];
+            // a point left at its NaN default sits a quarter in from its corner of the frame
+            let at = |id: &str, fx: f32, fy: f32| {
+                let v = e.param(id).map(|p| p.vec2_at(cx.t)).unwrap_or(Vec2::new(f64::NAN, f64::NAN));
+                let px = |v: f64, frac: f32, size: f32| if v.is_finite() { v as f32 * cx.px_scale } else { frac * size };
+                (px(v.x, fx, w), px(v.y, fy, h))
+            };
+            let pts = [at("p1", 0.25, 0.25), at("p2", 0.75, 0.25), at("p3", 0.25, 0.75), at("p4", 0.75, 0.75)];
             let blend_exp = 1.0 + f(e, "blend", cx) / 100.0;
             fill_over(img, op, |x, y| {
                 let mut acc = [0.0f32; 3];
@@ -621,7 +633,7 @@ fn within_unit(v: [f32; 3], hdr: bool, f: impl Fn([f32; 3]) -> [f32; 3]) -> [f32
     o.map(|q| q * m)
 }
 
-/// The luma (encoded, 0..1) down to which the Lumetri highlight / shadow lift scales a pixel by
+/// The luma (encoded, 0..1) down to which the Color Grading highlight / shadow lift scales a pixel by
 /// `new luma / luma`, preserving its hue exactly as it always has; below it the scale is held at
 /// this luma's and the rest of the lift is added equally to the channels, so a trace of chroma in
 /// a near-black pixel is not multiplied into a speck (#2094). About 5/255 in sRGB. Mirrored in
@@ -635,6 +647,153 @@ pub(crate) const LIFT_LUMA_FLOOR: f32 = 0.02;
 pub(crate) fn lift_scale(l: f32, nl: f32) -> (f32, f32) {
     let k = if l > 1e-5 { (nl / l).min(1.0 + (nl - l).max(0.0) / LIFT_LUMA_FLOOR) } else { 1.0 };
     (k, nl - l.max(0.0) * k)
+}
+
+/// ACES-style Luminance and Saturation Preserving gamut compression on grade-encoded RGB `v`.
+/// Softly pulls negative wide-gamut excursions and out-of-range SDR highlights back toward the
+/// achromatic axis while preserving Rec.709 luminance and perceived chroma balance.
+fn gamut_compress_luma_sat(v: [f32; 3], hdr: bool, amt: f32) -> [f32; 3] {
+    let amt = amt.clamp(0.0, 1.0);
+    if amt <= 1e-5 {
+        return v;
+    }
+    let y = (0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]).max(0.0);
+    let mut c = v;
+    // Lower gamut boundary: compress negative/near-negative chroma relative to luminance `y`
+    if y > 1e-5 {
+        let thr = 0.80f32;
+        let max_d = ((y - c[0]).max(y - c[1]).max(y - c[2])) / y;
+        if max_d > thr {
+            let compressed = thr + (1.0 - thr) * (max_d - thr) / ((1.0 - thr) + (max_d - thr));
+            let scale = compressed / max_d;
+            for ch in &mut c {
+                *ch = y + (*ch - y) * scale;
+            }
+        }
+    } else {
+        for ch in &mut c {
+            *ch = ch.max(0.0);
+        }
+    }
+    // Upper gamut boundary in SDR: soft-roll saturated channels exceeding 1.0 at constant luminance
+    if !hdr && y < 0.999 {
+        let head = (1.0 - y).max(1e-4);
+        let thr = 0.82f32;
+        let max_u = ((c[0] - y).max(c[1] - y).max(c[2] - y)) / head;
+        if max_u > thr {
+            let compressed = thr + (1.0 - thr) * (max_u - thr) / ((1.0 - thr) + (max_u - thr));
+            let scale = compressed / max_u;
+            for ch in &mut c {
+                *ch = y + (*ch - y) * scale;
+            }
+        }
+    }
+    [v[0] + (c[0] - v[0]) * amt, v[1] + (c[1] - v[1]) * amt, v[2] + (c[2] - v[2]) * amt]
+}
+
+fn vignette_aberration_pass(img: &mut Image, vmid: f32, vround: f32, vfeather: f32, vaberr: f32, px_scale: f32) {
+    if vaberr <= 1e-4 || img.w < 2 || img.h < 2 {
+        return;
+    }
+    let src = img.clone();
+    let (w, h) = (img.w as f32, img.h as f32);
+    let aspect = crate::gpufx::lumetri_vignette_aspect(w / h, vround);
+    let max_shift = vaberr * 8.0 * px_scale.max(0.5);
+    let stride = img.w * 4;
+    img.px.par_chunks_mut(stride).enumerate().for_each(|(y, row)| {
+        let ny = (y as f32 / h - 0.5) * 2.0;
+        for x in 0..src.w {
+            let nx = (x as f32 / w - 0.5) * 2.0 * aspect;
+            let d = (nx * nx + ny * ny).sqrt() / std::f32::consts::SQRT_2;
+            let edge = ((d - vmid * 0.9) / (vfeather.max(0.01) * 0.9)).clamp(0.0, 1.0);
+            let e2 = edge * edge * (3.0 - 2.0 * edge);
+            if e2 > 1e-4 {
+                let (rx, ry) = (x as f32 - w * 0.5, y as f32 - h * 0.5);
+                let len = (rx * rx + ry * ry).sqrt().max(1.0);
+                let s = max_shift * e2 / len;
+                let pr = src.sample_bilinear_clamped(x as f32 + 0.5 - rx * s, y as f32 + 0.5 - ry * s);
+                let pb = src.sample_bilinear_clamped(x as f32 + 0.5 + rx * s, y as f32 + 0.5 + ry * s);
+                row[x * 4] = pr[0];
+                row[x * 4 + 2] = pb[2];
+            }
+        }
+    });
+}
+
+/// Solved Basic Correction parameters for Premiere Pro 27.0's Auto Exposure & Color Balance.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AutoColorParams {
+    pub exposure: f32,
+    pub contrast: f32,
+    pub highlights: f32,
+    pub shadows: f32,
+    pub whites: f32,
+    pub blacks: f32,
+    pub temperature: f32,
+    pub tint: f32,
+}
+
+/// Analyse an ungraded linear-RGB frame and solve Exposure, Contrast, Highlights/Shadows,
+/// Whites/Blacks, and Temperature/Tint white balance (`자동 노출 및 색상 균형`).
+pub fn auto_exposure_and_balance(img: &Image) -> AutoColorParams {
+    if img.px.is_empty() {
+        return AutoColorParams::default();
+    }
+    let step = (img.w * img.h / 16_384).max(1);
+    let mut lumas = Vec::with_capacity((img.w * img.h) / step + 1);
+    let mut wb_sum = [0.0f64; 3];
+    let mut wb_weight = 0.0f64;
+    for p in img.px.as_chunks::<4>().0.iter().step_by(step) {
+        if p[3] < 0.1 {
+            continue;
+        }
+        let inv_a = 1.0 / p[3];
+        let (r, g, b) = ((p[0] * inv_a).max(0.0), (p[1] * inv_a).max(0.0), (p[2] * inv_a).max(0.0));
+        let y_lin = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        // Perceptual luma (~gamma 2.2) for histogram percentiles
+        let y_enc = y_lin.clamp(0.0, 4.0).powf(1.0 / 2.2);
+        lumas.push(y_enc);
+        // Weight midtone low-to-moderate-saturation pixels for gray-world illuminant estimation
+        if (0.015..0.85).contains(&y_lin) {
+            let mx = r.max(g).max(b);
+            let mn = r.min(g).min(b);
+            let sat = if mx > 1e-4 { (mx - mn) / mx } else { 0.0 };
+            let w = (1.0 - sat * 0.75).max(0.1) as f64;
+            wb_sum[0] += r as f64 * w;
+            wb_sum[1] += g as f64 * w;
+            wb_sum[2] += b as f64 * w;
+            wb_weight += w;
+        }
+    }
+    if lumas.is_empty() {
+        return AutoColorParams::default();
+    }
+    lumas.sort_unstable_by(|a, b| a.total_cmp(b));
+    let pct = |q: f32| lumas[((q * (lumas.len() - 1) as f32).round() as usize).min(lumas.len() - 1)];
+    let (p02, p25, p50, p75, p98) = (pct(0.02), pct(0.25), pct(0.50), pct(0.75), pct(0.98));
+    // Target perceptual midtone ~ 0.46 (linear ~ 0.18)
+    let mid_lin = p50.max(0.02).powf(2.2);
+    let exposure = (0.18f32 / mid_lin).log2().clamp(-2.5, 2.5) * 0.75;
+    let exp_gain = 2.0f32.powf(exposure);
+    let p02_after = (p02.powf(2.2) * exp_gain).powf(1.0 / 2.2);
+    let p98_after = (p98.powf(2.2) * exp_gain).powf(1.0 / 2.2);
+    let spread = (p75 - p25).max(0.05);
+    let contrast = ((0.32 - spread) * 90.0).clamp(-25.0, 35.0);
+    let blacks = ((0.03 - p02_after) * 140.0).clamp(-40.0, 25.0);
+    let whites = ((0.95 - p98_after) * 120.0).clamp(-35.0, 35.0);
+    let shadows = if p25 < 0.22 { ((0.22 - p25) * 140.0).clamp(0.0, 45.0) } else { 0.0 };
+    let highlights = if p98_after > 0.96 { ((0.96 - p98_after) * 180.0).clamp(-55.0, 0.0) } else { 0.0 };
+    let (mut temperature, mut tint) = (0.0f32, 0.0f32);
+    if wb_weight > 1e-3 {
+        let (mr, mg, mb) = ((wb_sum[0] / wb_weight) as f32, (wb_sum[1] / wb_weight) as f32, (wb_sum[2] / wb_weight) as f32);
+        let avg = ((mr + mg + mb) / 3.0).max(1e-4);
+        // Gains in lumetri: R *= 1 + 0.35*temp, G *= 1 - 0.30*tint, B *= 1 - 0.35*temp
+        let rb_skew = (mb - mr) / avg;
+        temperature = (rb_skew / 0.70 * 100.0 * 0.75).clamp(-65.0, 65.0);
+        let g_skew = (mg - 0.5 * (mr + mb)) / avg;
+        tint = (g_skew / 0.30 * 100.0 * 0.75).clamp(-65.0, 65.0);
+    }
+    AutoColorParams { exposure, contrast, highlights, shadows, whites, blacks, temperature, tint }
 }
 
 fn lumetri(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
@@ -662,6 +821,8 @@ fn lumetri(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
     let vmid = f(e, "vignette_midpoint", cx) / 100.0;
     let vround = f(e, "vignette_roundness", cx) / 100.0;
     let vfeather = f(e, "vignette_feather", cx) / 100.0;
+    let vaberr = if vignette_on { f(e, "vignette_aberration", cx) / 100.0 } else { 0.0 };
+    let gamut_comp = if basic_on && choice(e, "gamut_compression") == 1 { f(e, "gamut_compression_amount", cx) / 100.0 } else { 0.0 };
     let sharpen = if creative_on { f(e, "sharpen", cx) / 100.0 } else { 0.0 };
     let gains = [1.0 + 0.35 * temp, 1.0 - 0.3 * tint, 1.0 - 0.35 * temp];
     let (w, h) = (img.w as f32, img.h as f32);
@@ -721,6 +882,9 @@ fn lumetri(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
         let cur_sat = v[0].max(v[1]).max(v[2]) - v[0].min(v[1]).min(v[2]);
         let s = sat * (1.0 + vib * (1.0 - cur_sat.clamp(0.0, 1.0)));
         v = v.map(|q| l3 + (q - l3) * s);
+        if gamut_comp > 1e-5 {
+            v = gamut_compress_luma_sat(v, hdr, gamut_comp);
+        }
         // vignette
         if va.abs() > 1e-4 {
             let nx = (x as f32 / w - 0.5) * 2.0 * crate::gpufx::lumetri_vignette_aspect(aspect, vround);
@@ -735,6 +899,7 @@ fn lumetri(img: &mut Image, e: &EffectInstance, cx: &FxCtx) {
     });
     lumetri_advanced(img, e, cx);
     hsl_secondary(img, e, cx);
+    vignette_aberration_pass(img, vmid, vround, vfeather, vaberr, cx.px_scale);
     if sharpen.abs() > 1e-3 {
         unsharp(img, 1.2 * cx.px_scale.max(0.35), sharpen.max(-1.0), 0.0);
     }
@@ -949,6 +1114,7 @@ mod tests {
         FxCtx {
             t: Tick::ZERO,
             px_scale: 1.0,
+            mask_scale: 1.0,
             seconds: 0.0,
             timecode: "00:00:01:00",
             clip_name: "x",
@@ -994,6 +1160,54 @@ mod tests {
         let sum1: f32 = img.px.iter().sum();
         assert!((sum0 - sum1).abs() / sum0 < 0.02, "{sum0} {sum1}");
         assert!(img.get(32, 32)[0] < 0.9 && img.get(24, 32)[0] > 0.01);
+    }
+
+    /// Key Out Brights measures the thresholds from white: a 75 % grey with Cutoff 60 / Threshold 80
+    /// is 25 % from white, below the Cutoff, so it is keyed out (alpha 0), not left at 0.25.
+    #[test]
+    fn luma_key_inverted_thresholds_are_measured_from_white() {
+        let alpha_at = |srgb: f32, invert: bool| {
+            let l = srgb_to_linear(srgb);
+            let mut img = Image::filled(1, 1, [l, l, l, 1.0]);
+            let mut e = find_effect("luma_key").unwrap().instance();
+            e.params.get_mut("threshold").unwrap().value = ParamValue::Float(80.0);
+            e.params.get_mut("cutoff").unwrap().value = ParamValue::Float(60.0);
+            e.params.get_mut("invert").unwrap().value = ParamValue::Bool(invert);
+            apply(&mut img, &e, &cx());
+            img.get(0, 0)[3]
+        };
+        assert!(alpha_at(0.75, true).abs() < 1e-4, "75 % is 25 % from white: keyed out, got {}", alpha_at(0.75, true));
+        // the ramp mirrored: opaque up to 20 %, transparent from 40 %, half way at 30 %
+        assert!(alpha_at(0.15, true) > 0.99, "darks stay");
+        assert!((alpha_at(0.30, true) - 0.5).abs() < 1e-3, "mid ramp: {}", alpha_at(0.30, true));
+        assert!(alpha_at(0.40, true).abs() < 1e-4);
+        // the normal ramp is unchanged (transparent to 60 %, half way at 70 %)
+        assert!((alpha_at(0.70, false) - 0.5).abs() < 1e-3);
+    }
+
+    /// Luma Key keys out darks by default; "Key Out Brights" keys out the light side instead, and a
+    /// project saved before the option existed keeps the old behaviour.
+    #[test]
+    fn luma_key_can_key_out_brights() {
+        let run = |invert: Option<bool>| {
+            let mut img = Image::new(2, 1);
+            img.px[0..4].copy_from_slice(&[1.0, 1.0, 1.0, 1.0]);
+            img.px[4..8].copy_from_slice(&[0.01, 0.01, 0.01, 1.0]);
+            let mut e = find_effect("luma_key").unwrap().instance();
+            e.params.get_mut("threshold").unwrap().value = ParamValue::Float(40.0);
+            e.params.get_mut("cutoff").unwrap().value = ParamValue::Float(20.0);
+            match invert {
+                Some(v) => e.params.get_mut("invert").unwrap().value = ParamValue::Bool(v),
+                None => {
+                    e.params.remove("invert");
+                }
+            }
+            apply(&mut img, &e, &cx());
+            (img.get(0, 0)[3], img.get(1, 0)[3])
+        };
+        assert_eq!(run(Some(false)), (1.0, 0.0), "default keys out the dark grey");
+        assert_eq!(run(None), (1.0, 0.0), "a project without the param renders as before");
+        assert_eq!(run(Some(true)), (0.0, 1.0), "inverted keys out the white, keeps the grey");
     }
 
     /// #3465: Three-Way Color Corrector is the identity at its defaults, each wheel moves only its
@@ -1218,7 +1432,7 @@ pub fn hue_lut(points: &[[f32; 2]], n: usize) -> Option<Vec<f32>> {
     Some(lut[n - 1..2 * n - 1].to_vec())
 }
 
-/// Lumetri's other "vs Sat" curves (Luma vs Sat, Sat vs Sat): neutral 0.5 where there are no
+/// Color Grading's other "vs Sat" curves (Luma vs Sat, Sat vs Sat): neutral 0.5 where there are no
 /// points, like the hue curves, but over a straight 0..1 axis. Black and white are not neighbours,
 /// so the curve does not wrap; it stays flat beyond its outermost points.
 pub fn vs_sat_lut(points: &[[f32; 2]], n: usize) -> Option<Vec<f32>> {
@@ -1390,7 +1604,7 @@ fn hsl_key(v: [f32; 3], hc: f32, hr: f32, smin: f32, lmin: f32, lmax: f32, soft:
     mh * ms * ml
 }
 
-/// Lumetri ▸ HSL Secondary: key on hue / saturation / lightness, Refine (Denoise, Blur) the key,
+/// Color Grading ▸ HSL Secondary: key on hue / saturation / lightness, Refine (Denoise, Blur) the key,
 /// then correct inside it (or show the mask).
 ///
 /// - **Denoise** removes speckle from the key: a median filter (radius 1–3 px at full
@@ -1712,6 +1926,7 @@ mod lumetri_cpu_parity_tests {
         let cx = FxCtx {
             t: Tick::ZERO,
             px_scale: 1.0,
+            mask_scale: 1.0,
             seconds: 0.0,
             timecode: "",
             clip_name: "",
@@ -1744,7 +1959,7 @@ mod lumetri_cpu_parity_tests {
         }
     }
 
-    /// #719: positive Roundness rounds the Lumetri vignette (it used to be ignored), +100
+    /// #719: positive Roundness rounds the Color Grading vignette (it used to be ignored), +100
     /// is a circle and negative values widen the oval, on the CPU path and the GPU op alike.
     #[test]
     fn lumetri_vignette_roundness_shapes_the_vignette() {
@@ -1752,6 +1967,7 @@ mod lumetri_cpu_parity_tests {
         let cx = FxCtx {
             t: Tick::ZERO,
             px_scale: 1.0,
+            mask_scale: 1.0,
             seconds: 0.0,
             timecode: "",
             clip_name: "",

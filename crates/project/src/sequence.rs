@@ -12,6 +12,10 @@ pub struct SequenceSettings {
     pub par: (u32, u32),
     pub sample_rate: u32,
     pub drop_frame: bool,
+    /// Video Display Format: how the monitors, timeline and ruler show time (Timecode, Feet +
+    /// Frames 35mm / 16mm, Frames). Files from before this setting load as Timecode.
+    #[serde(default)]
+    pub display: filmcraft_time::TimeDisplay,
     /// Editing mode / preset name shown in the settings dialog.
     pub preset: String,
     pub audio_master: AudioChannels,
@@ -40,6 +44,7 @@ impl Default for SequenceSettings {
             par: (1, 1),
             sample_rate: 48_000,
             drop_frame: false,
+            display: filmcraft_time::TimeDisplay::Timecode,
             preset: "HD 1080p 23.976".into(),
             audio_master: AudioChannels::Stereo,
             preview_codec: "ProRes 422".into(),
@@ -169,6 +174,23 @@ pub struct Sequence {
     /// Split In/Out points (Markers ▸ Mark Split): per-channel overrides of `mark_in`/`mark_out`.
     #[serde(default, skip_serializing_if = "SplitMarks::is_empty")]
     pub split: SplitMarks,
+    /// Premiere Pro 27.0 Color Compound Groups shared across member video clips (`선택한 그룹에 추가`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub color_groups: Vec<ColorCompoundGroup>,
+    /// Global sequence bypass for color & contrast effects (`색상 및 대비 음소거`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mute_color_contrast: bool,
+}
+
+/// A shared color-grading compound group across multiple timeline clips (`선택한 그룹에 추가`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ColorCompoundGroup {
+    pub id: u64,
+    pub name: String,
+    pub clips: Vec<ClipId>,
+    pub effects: Vec<EffectInstance>,
+    pub muted: bool,
 }
 
 /// Split edit points: separate video and audio In/Out points (Markers ▸ Mark Split). `None` means

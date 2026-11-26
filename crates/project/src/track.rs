@@ -60,6 +60,14 @@ fn is_zero_stream(stream: &usize) -> bool {
     *stream == 0
 }
 
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
+}
+
+fn is_zero_tick(t: &Tick) -> bool {
+    t.0 == 0
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TrackItem {
     pub id: ClipId,
@@ -105,6 +113,10 @@ pub struct TrackItem {
     /// Video Options ▸ Time Interpolation: how frames are made when the clip's speed is changed.
     #[serde(default, skip_serializing_if = "TimeInterpolation::is_default")]
     pub time_interpolation: TimeInterpolation,
+    /// Speed/Duration ▸ Maintain Audio Pitch: at another speed the clip's audio is time-stretched
+    /// and keeps its pitch, instead of being resampled (varispeed) and sounding higher or lower.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub maintain_pitch: bool,
     /// Frame Hold Options ▸ Hold Filters: effects are evaluated at the held frame's time instead
     /// of animating through the hold.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -123,6 +135,15 @@ pub struct TrackItem {
     /// ([`GraphicMeta`]). Schema v12.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphic: Option<Box<GraphicMeta>>,
+    /// Speed/Duration ▸ Pitch Shift in semitones (`반음`, `-12.0..=12.0`).
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub pitch_semitones: f64,
+    /// Generative Extend head duration on the timeline (`생성형 확장`, ticks ≥ 0).
+    #[serde(default, skip_serializing_if = "is_zero_tick")]
+    pub generative_extend_head: Tick,
+    /// Generative Extend tail duration on the timeline (`생성형 확장`, ticks ≥ 0).
+    #[serde(default, skip_serializing_if = "is_zero_tick")]
+    pub generative_extend_tail: Tick,
 }
 
 /// Time interpolation for speed-changed clips (Clip ▸ Video Options ▸ Time Interpolation).
@@ -204,17 +225,23 @@ impl TrackItem {
     }
     /// Media time at timeline time `t` ignoring any frame hold.
     pub fn moving_source_time_at(&self, t: Tick) -> Tick {
-        let rel = t - self.start;
+        let head = self.generative_extend_head.max(Tick::ZERO);
+        let tail = self.generative_extend_tail.max(Tick::ZERO);
+        let rel = (t - self.start) - head;
         let scaled = Tick((rel.0 as f64 * self.speed.abs()).round() as i64);
         if self.reverse {
-            self.source_in + Tick((self.duration.0 as f64 * self.speed.abs()).round() as i64) - scaled - Tick(1)
+            let real_dur = (self.duration - head - tail).max(Tick::ZERO);
+            self.source_in + Tick((real_dur.0 as f64 * self.speed.abs()).round() as i64) - scaled - Tick(1)
         } else {
             self.source_in + scaled
         }
     }
     /// Media time consumed by the item (the source out point).
     pub fn source_out(&self) -> Tick {
-        self.source_in + Tick((self.duration.0 as f64 * self.speed.abs()).round() as i64)
+        let head = self.generative_extend_head.max(Tick::ZERO);
+        let tail = self.generative_extend_tail.max(Tick::ZERO);
+        let real_dur = (self.duration - head - tail).max(Tick::ZERO);
+        self.source_in + Tick((real_dur.0 as f64 * self.speed.abs()).round() as i64)
     }
     pub fn effect(&self, id: &str) -> Option<&EffectInstance> {
         self.effects.iter().find(|e| e.effect == id)

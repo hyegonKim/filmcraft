@@ -21,7 +21,7 @@
 //! the mask path to write the next Mask Path keyframe.
 
 use filmcraft_geom::{Affine, Vec2};
-use filmcraft_project::TrackMethod;
+use filmcraft_project::{MaskPath, MaskVertex, TrackMethod, TrackerQuality};
 use rayon::prelude::*;
 
 /// Most features tracked per frame.
@@ -213,6 +213,10 @@ pub fn features(g: &Gray, region: &[Vec2], max: usize, min_dist: f32) -> Vec<[f3
 
 /// Pyramidal Lucas–Kanade: where `p` in `a` moved to in `b` (pyramids from [`Gray::pyramid`]).
 fn lk(pa: &[Gray], pb: &[Gray], p: [f32; 2]) -> Option<[f32; 2]> {
+    lk_iters(pa, pb, p, 30)
+}
+
+fn lk_iters(pa: &[Gray], pb: &[Gray], p: [f32; 2], max_iters: usize) -> Option<[f32; 2]> {
     let levels = pa.len().min(pb.len());
     let mut d = [0.0f32; 2];
     for lvl in (0..levels).rev() {
@@ -241,7 +245,7 @@ fn lk(pa: &[Gray], pb: &[Gray], p: [f32; 2]) -> Option<[f32; 2]> {
             return None;
         }
         let mut v = [0.0f32; 2];
-        for _ in 0..30 {
+        for _ in 0..max_iters {
             let (mut bx, mut by) = (0.0f32, 0.0f32);
             let mut k = 0;
             for wy in -WIN..=WIN {
@@ -424,6 +428,155 @@ pub fn track_step(a: &Prepared, b: &Prepared, region: &[Vec2], method: TrackMeth
     Some(Step { transform, features: feats.len(), tracked: src.len(), inliers })
 }
 
+/// Track the picture inside `region` with explicit [`TrackerQuality`] (`Best` vs `Fast`).
+pub fn track_step_with_quality(a: &Prepared, b: &Prepared, region: &[Vec2], method: TrackMethod, quality: TrackerQuality) -> Option<Step> {
+    let (max_feats, min_dist, max_levels, max_iters, fb_max) = match quality {
+        TrackerQuality::Best => (256usize, 4.0f32, LEVELS, 30usize, 0.45f32),
+        TrackerQuality::Fast => (64usize, 8.0f32, 2usize, 10usize, 0.85f32),
+    };
+    let feats = features(a.base(), region, max_feats, min_dist);
+    if feats.len() < 3 {
+        return None;
+    }
+    let la = &a.levels[..a.levels.len().min(max_levels)];
+    let lb = &b.levels[..b.levels.len().min(max_levels)];
+    let pairs: Vec<(Vec2, Vec2)> = feats
+        .par_iter()
+        .filter_map(|&p| {
+            let q = lk_iters(la, lb, p, max_iters)?;
+            let back = lk_iters(lb, la, q, max_iters)?;
+            let fb = ((back[0] - p[0]).powi(2) + (back[1] - p[1]).powi(2)).sqrt();
+            (fb < fb_max).then(|| (Vec2::new(p[0] as f64, p[1] as f64), Vec2::new(q[0] as f64, q[1] as f64)))
+        })
+        .collect();
+    let (src, dst): (Vec<Vec2>, Vec<Vec2>) = pairs.into_iter().unzip();
+    let (transform, inliers) = fit_robust(method, &src, &dst)?;
+    if inliers < 3 {
+        return None;
+    }
+    Some(Step { transform, features: feats.len(), tracked: src.len(), inliers })
+}
+
+fn sample_rgb_f64(rgba: &[u8], width: usize, height: usize, x: isize, y: isize) -> [f64; 3] {
+    let cx = x.clamp(0, width as isize - 1) as usize;
+    let cy = y.clamp(0, height as isize - 1) as usize;
+    let i = (cy * width + cx) * 4;
+    [rgba.get(i).copied().unwrap_or(0) as f64, rgba.get(i + 1).copied().unwrap_or(0) as f64, rgba.get(i + 2).copied().unwrap_or(0) as f64]
+}
+
+fn rgb_dist(a: [f64; 3], b: [f64; 3]) -> f64 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+fn region_mean_rgb(rgba: &[u8], width: usize, height: usize, rect: [isize; 4], border_only: bool) -> [f64; 3] {
+    let [x0, y0, x1, y1] = rect;
+    let mut acc = [0.0f64; 3];
+    let mut cnt = 0.0f64;
+    let step = ((x1 - x0).max(y1 - y0) / 32).max(1);
+    let mut y = y0;
+    while y <= y1 {
+        let mut x = x0;
+        while x <= x1 {
+            let on_edge = (x - x0) <= step || (x1 - x) <= step || (y - y0) <= step || (y1 - y) <= step;
+            if !border_only || on_edge {
+                let c = sample_rgb_f64(rgba, width, height, x, y);
+                acc[0] += c[0];
+                acc[1] += c[1];
+                acc[2] += c[2];
+                cnt += 1.0;
+            }
+            x += step;
+        }
+        y += step;
+    }
+    if cnt > 0.0 { [acc[0] / cnt, acc[1] / cnt, acc[2] / cnt] } else { [128.0; 3] }
+}
+
+/// Edge-aware foreground saliency segmentation inside `seed_box` (`[x0, y0, x1, y1]` in frame
+/// pixels; default: central 56% × 64% box). Compares interior foreground distribution against the
+/// surrounding border ring + gradient edge snapping along `vertex_count` radial rays.
+pub fn segment_object_mask(rgba: &[u8], width: usize, height: usize, seed_box: Option<[f64; 4]>, vertex_count: usize) -> Option<MaskPath> {
+    if width < 8 || height < 8 || rgba.len() < width.saturating_mul(height).saturating_mul(4) {
+        return None;
+    }
+    let wf = width as f64;
+    let hf = height as f64;
+    let raw_box = seed_box.unwrap_or([wf * 0.22, hf * 0.18, wf * 0.78, hf * 0.82]);
+    let bx0 = raw_box[0].min(raw_box[2]).clamp(1.0, wf - 2.0);
+    let by0 = raw_box[1].min(raw_box[3]).clamp(1.0, hf - 2.0);
+    let bx1 = raw_box[0].max(raw_box[2]).clamp(bx0 + 4.0, wf - 1.0);
+    let by1 = raw_box[1].max(raw_box[3]).clamp(by0 + 4.0, hf - 1.0);
+    if bx1 - bx0 < 4.0 || by1 - by0 < 4.0 {
+        return None;
+    }
+    let cx = 0.5 * (bx0 + bx1);
+    let cy = 0.5 * (by0 + by1);
+    let rx = 0.5 * (bx1 - bx0);
+    let ry = 0.5 * (by1 - by0);
+
+    let bg = region_mean_rgb(rgba, width, height, [(bx0 - 4.0) as isize, (by0 - 4.0) as isize, (bx1 + 4.0) as isize, (by1 + 4.0) as isize], true);
+    let fg = region_mean_rgb(
+        rgba,
+        width,
+        height,
+        [(cx - rx * 0.35) as isize, (cy - ry * 0.35) as isize, (cx + rx * 0.35) as isize, (cy + ry * 0.35) as isize],
+        false,
+    );
+    let contrast = rgb_dist(fg, bg).max(12.0);
+    let n_verts = vertex_count.clamp(8, 64);
+    let mut radii = Vec::with_capacity(n_verts);
+
+    for i in 0..n_verts {
+        let ang = (i as f64) * std::f64::consts::TAU / (n_verts as f64);
+        let (dx, dy) = (ang.cos(), ang.sin());
+        let tx = if dx.abs() > 1e-6 { rx / dx.abs() } else { f64::INFINITY };
+        let ty = if dy.abs() > 1e-6 { ry / dy.abs() } else { f64::INFINITY };
+        let max_r = tx.min(ty).max(3.0);
+        let mut best_r = max_r * 0.55;
+        let mut best_edge = f64::NEG_INFINITY;
+        let mut last_fg = max_r * 0.25;
+        let steps = (max_r.ceil() as usize).clamp(6, 256);
+        for s in 2..=steps {
+            let r = (s as f64 / steps as f64) * max_r;
+            let px = (cx + dx * r).round() as isize;
+            let py = (cy + dy * r).round() as isize;
+            let c = sample_rgb_f64(rgba, width, height, px, py);
+            let c_out = sample_rgb_f64(rgba, width, height, (cx + dx * (r + 1.5)).round() as isize, (cy + dy * (r + 1.5)).round() as isize);
+            let d_bg = rgb_dist(c, bg);
+            let d_fg = rgb_dist(c, fg);
+            if d_bg > d_fg * 0.85 && d_bg > contrast * 0.28 {
+                last_fg = r;
+            }
+            let grad = rgb_dist(c, c_out);
+            let score = grad + (d_bg - d_fg) * 0.35;
+            if score > best_edge && r >= max_r * 0.18 {
+                best_edge = score;
+                best_r = r;
+            }
+        }
+        let chosen = if best_edge > contrast * 0.35 { 0.65 * best_r + 0.35 * last_fg } else { last_fg.max(max_r * 0.35) };
+        radii.push((ang, chosen.clamp(2.5, max_r)));
+    }
+
+    let mut pts = Vec::with_capacity(n_verts);
+    for i in 0..n_verts {
+        let prev_r = radii[(i + n_verts - 1) % n_verts].1;
+        let (ang, cur_r) = radii[i];
+        let next_r = radii[(i + 1) % n_verts].1;
+        let r = 0.2 * prev_r + 0.6 * cur_r + 0.2 * next_r;
+        pts.push(Vec2::new((cx + ang.cos() * r).clamp(0.0, wf), (cy + ang.sin() * r).clamp(0.0, hf)));
+    }
+    let mut vertices = Vec::with_capacity(n_verts);
+    for i in 0..n_verts {
+        let prev = pts[(i + n_verts - 1) % n_verts];
+        let curr = pts[i];
+        let next = pts[(i + 1) % n_verts];
+        let tangent = (next - prev) * 0.16;
+        vertices.push(MaskVertex { p: curr, t_in: Vec2::new(-tangent.x, -tangent.y), t_out: tangent });
+    }
+    Some(MaskPath { vertices, closed: true })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,6 +675,37 @@ mod tests {
         assert_eq!(inl, 30);
         for p in &src {
             assert!((m.apply(*p) - truth.apply(*p)).length() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn tracker_quality_best_and_fast_both_track() {
+        let (w, h) = (320, 240);
+        let region = circle(Vec2::new(150.0, 120.0), 50.0);
+        let a = Prepared::new(frame(w, h, &pose(0.0, 1.0, 0.0)));
+        let b = Prepared::new(frame(w, h, &pose(1.0, 1.0, 0.0)));
+        let best = track_step_with_quality(&a, &b, &region, TrackMethod::PositionRotation, TrackerQuality::Best).unwrap();
+        let fast = track_step_with_quality(&a, &b, &region, TrackMethod::PositionRotation, TrackerQuality::Fast).unwrap();
+        assert!(best.features >= fast.features);
+        assert!(best.inliers >= 3 && fast.inliers >= 3);
+    }
+
+    #[test]
+    fn segment_object_mask_isolates_foreground_disc() {
+        let (w, h) = (160, 120);
+        let mut rgba = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let d = ((x as f64 - 80.0).powi(2) + (y as f64 - 60.0).powi(2)).sqrt();
+                let c = if d <= 28.0 { [230u8, 60, 45, 255] } else { [25u8, 35, 50, 255] };
+                rgba[(y * w + x) * 4..(y * w + x) * 4 + 4].copy_from_slice(&c);
+            }
+        }
+        let path = segment_object_mask(&rgba, w, h, Some([35.0, 15.0, 125.0, 105.0]), 20).unwrap();
+        assert_eq!(path.vertices.len(), 20);
+        for v in &path.vertices {
+            let r = ((v.p.x - 80.0).powi(2) + (v.p.y - 60.0).powi(2)).sqrt();
+            assert!((22.0..=34.0).contains(&r), "unexpected object boundary radius {r}");
         }
     }
 }

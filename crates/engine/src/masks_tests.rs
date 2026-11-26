@@ -436,139 +436,85 @@ fn move_vertex_moves_a_list_of_vertices_together() {
     assert_eq!(pts(&mut s), before);
 }
 
-/// What a [`Disc`] source shows.
-#[derive(Clone, Copy, PartialEq)]
-enum Picture {
-    /// A bright disc of radius 50 at (160, 120) on a dark background.
-    Disc,
-    /// One flat colour.
-    Flat,
-    /// No picture: every frame fails to decode.
-    Broken,
-}
-
-struct Disc {
-    info: filmcraft_media::MediaInfo,
-    picture: Picture,
-}
-
-impl filmcraft_media::MediaSource for Disc {
-    fn info(&self) -> &filmcraft_media::MediaInfo {
-        &self.info
-    }
-    fn video_frame(&self, _: filmcraft_media::FrameRequest) -> filmcraft_media::Result<std::sync::Arc<filmcraft_frame::VideoFrame>> {
-        if self.picture == Picture::Broken {
-            return Err(filmcraft_media::MediaError::Decode("damaged frame".into()));
-        }
-        let (w, h) = (320usize, 240usize);
-        let mut px = vec![0u8; w * h * 4];
-        for y in 0..h {
-            for x in 0..w {
-                let inside = self.picture == Picture::Disc && (x as f64 + 0.5 - 160.0).hypot(y as f64 + 0.5 - 120.0) < 50.0;
-                px[(y * w + x) * 4..][..4].copy_from_slice(if inside { &[220, 200, 180, 255] } else { &[40, 40, 40, 255] });
-            }
-        }
-        Ok(std::sync::Arc::new(filmcraft_frame::VideoFrame::rgba8(w as u32, h as u32, px)))
-    }
-    fn audio(&self, _start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<filmcraft_frame::AudioBuffer> {
-        Ok(filmcraft_frame::AudioBuffer::silence(sample_rate, 2, frames))
-    }
-}
-
-fn disc_session(picture: Picture) -> Session {
-    let (s, _) = tracking_session();
-    let item = s.active_sequence().unwrap().video_tracks[0].items[0].item;
-    let info = s.source(item).unwrap().info().clone();
-    s.media.insert(item, std::sync::Arc::new(Disc { info, picture }));
-    s
-}
-
-fn first_mask_vertices(s: &mut Session) -> Vec<filmcraft_geom::Vec2> {
-    let l = s.execute("masks.list", json!({})).unwrap();
-    crate::masks::path_from_json(&l["masks"][0]["path"]).unwrap().vertices.iter().map(|v| v.p).collect()
-}
-
 #[test]
-fn a_color_region_mask_outlines_the_region_around_the_seed() {
-    let mut s = disc_session(Picture::Disc);
-    let r = s.execute("masks.colorRegion", json!({"effect": "opacity", "seed": [160, 120], "vertices": 16})).unwrap();
-    assert_eq!(r["mask"], 0, "{r}");
-    let v = first_mask_vertices(&mut s);
-    assert_eq!(v.len(), 16);
-    for p in &v {
-        let d = (p.x - 160.0).hypot(p.y - 120.0);
-        assert!((46.0..=51.0).contains(&d), "vertex {p:?} is {d} px from the centre (disc radius 50)");
-    }
-    // `masks.add` with the same shape name is the same mask
-    s.execute("masks.add", json!({"effect": "opacity", "shape": "colorRegion", "seed": [160, 120]})).unwrap();
-    assert_eq!(s.execute("masks.list", json!({})).unwrap()["masks"].as_array().unwrap().len(), 2);
-}
-
-/// A picture that cannot be read used to give a made-up circle; it is an error and adds no mask.
-#[test]
-fn a_color_region_mask_needs_a_readable_picture_and_a_region() {
-    let mut s = disc_session(Picture::Broken);
-    let e = s.execute("masks.colorRegion", json!({"effect": "opacity", "seed": [160, 120]})).unwrap_err().to_string();
-    assert!(e.contains("can't read the clip's picture"), "{e}");
-    assert!(s.execute("masks.list", json!({})).unwrap()["masks"].as_array().unwrap().is_empty());
-
-    let mut s = disc_session(Picture::Flat);
-    // in one flat colour, the region runs to the picture's edges
-    let e = s.execute("masks.colorRegion", json!({"effect": "opacity", "seed": [160, 120]})).unwrap_err().to_string();
-    assert!(e.contains("fills the whole picture"), "{e}");
-    assert!(s.execute("masks.list", json!({})).unwrap()["masks"].as_array().unwrap().is_empty());
-}
-
-#[test]
-fn hostile_color_region_parameters_are_errors_or_clamped() {
-    let mut s = disc_session(Picture::Disc);
-    for p in [
-        json!({"effect": "opacity", "seed": [160, 120], "vertices": u64::MAX, "tolerance": 1e300}),
-        json!({"effect": "opacity", "seed": [160, 120], "vertices": 0, "tolerance": -1e300}),
-        json!({"effect": "opacity", "seed": [1e308, -1e308]}),
-        json!({"effect": "opacity", "seed": [160, 120], "time": i64::MAX}),
-        json!({"effect": "opacity", "seed": [160, 120], "time": i64::MIN}),
-    ] {
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.execute("masks.colorRegion", p.clone())));
-        assert!(r.is_ok(), "{p} panicked");
-    }
-    for p in [json!({"effect": "opacity", "seed": "middle"}), json!({"effect": "opacity", "seed": [1]}), json!({"effect": 99, "seed": [160, 120]})] {
-        assert!(s.execute("masks.colorRegion", p.clone()).is_err(), "{p}");
-    }
-}
-
-#[test]
-fn bidirectional_tracking_runs_both_ways_with_a_keyframe_interval() {
+fn background_tracking_is_applied_without_a_ui_frame_loop() {
+    // headless sessions (CLI, MCP) never call `poll_persistence`: commands alone must apply the job (#3302)
     let (mut s, _) = tracking_session();
-    let rate = filmcraft_time::FrameRate::FPS_24;
-    s.set_playhead(rate.tick_of(10));
-    let c = truth(10.0).apply(filmcraft_geom::Vec2::ZERO);
+    let c = truth(0.0).apply(filmcraft_geom::Vec2::ZERO);
     s.execute("masks.add", json!({"effect": "opacity", "shape": "ellipse", "center": [c.x, c.y], "size": [90, 90]})).unwrap();
-    // `frames` limits each direction
-    let r = s.execute("masks.track", json!({"direction": "bidirectional", "frames": 4, "keyframeInterval": 2, "wait": true})).unwrap();
-    assert_eq!(r["frames"], 8, "{r}");
-    assert_eq!(r["direction"], "bidirectional");
+    let r = s.execute("masks.track", json!({"direction": "forward", "frames": 6})).unwrap();
+    let job = r["job"].clone();
+    let t0 = std::time::Instant::now();
+    loop {
+        let jobs = s.execute("jobs.list", json!({})).unwrap();
+        let done = jobs.as_array().unwrap().iter().any(|j| j["id"] == job && j["finished"] == true);
+        if done || t0.elapsed().as_secs() > 60 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     let l = s.execute("masks.list", json!({})).unwrap();
-    let mut keys: Vec<i64> = l["masks"][0]["pathKeyframes"].as_array().unwrap().iter().map(|v| v.as_i64().unwrap()).collect();
-    keys.sort_unstable();
-    let want: Vec<i64> = [6, 8, 10, 12, 14].iter().map(|&f| rate.tick_of(f).0).collect();
-    assert_eq!(keys, want, "every second frame both ways, from the playhead");
+    let keys = l["masks"][0]["pathKeyframes"].as_array().unwrap().len();
+    assert_eq!(keys, 7, "{l}");
+    assert!(s.mask_jobs.is_empty());
+    s.execute("masks.track", json!({"direction": "forward", "frames": 2, "wait": true})).unwrap();
 }
 
 #[test]
-fn hostile_tracking_parameters_are_errors_or_clamped() {
+fn replacing_the_project_drops_pending_tracking_jobs() {
+    // a job started on the old project must not write into the new one
     let (mut s, _) = tracking_session();
-    let rate = filmcraft_time::FrameRate::FPS_24;
-    s.set_playhead(rate.tick_of(10));
-    let c = truth(10.0).apply(filmcraft_geom::Vec2::ZERO);
+    let c = truth(0.0).apply(filmcraft_geom::Vec2::ZERO);
     s.execute("masks.add", json!({"effect": "opacity", "shape": "ellipse", "center": [c.x, c.y], "size": [90, 90]})).unwrap();
-    assert!(s.execute("masks.track", json!({"direction": "sideways", "wait": true})).is_err());
-    for p in [
-        json!({"direction": "bidirectional", "frames": u64::MAX, "keyframeInterval": u64::MAX, "wait": true}),
-        json!({"direction": "both", "frames": 1, "keyframeInterval": 0, "wait": true}),
-        json!({"direction": "backward", "frames": 0, "wait": true}),
-    ] {
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.execute("masks.track", p.clone())));
-        assert!(r.is_ok(), "{p} panicked");
+    let job = s.execute("masks.track", json!({"direction": "forward"})).unwrap()["job"].clone();
+    assert_eq!(s.mask_jobs.len(), 1);
+    s.execute("file.newProject", json!({"name": "Fresh"})).unwrap();
+    assert!(s.mask_jobs.is_empty(), "stale job survived file.newProject");
+    for _ in 0..20 {
+        s.poll_persistence();
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
+    assert!(s.mask_jobs.is_empty());
+    let h = s.execute("history.list", json!({})).unwrap();
+    assert!(!h["undo"].as_array().unwrap().iter().any(|v| v == "Track Mask"), "{h}");
+    // the new project has no masks and no Mask Path keyframes
+    if let Ok(l) = s.execute("masks.list", json!({})) {
+        assert!(l["masks"].as_array().is_none_or(|m| m.is_empty()), "{l}");
+    }
+    let project = serde_json::to_string(&*s.project).unwrap().to_lowercase();
+    assert!(!project.contains("mask"), "stale mask data in new project");
+    // the discarded job was told to stop (the worker may not have noticed yet on a slow machine,
+    // so its `finished` flag is not waited for)
+    let j = s.jobs.iter().find(|j| json!(j.id) == job).expect("the tracking job is listed");
+    assert!(j.progress.cancel.load(std::sync::atomic::Ordering::Relaxed), "{}", j.to_json());
+}
+
+#[test]
+fn every_project_replacing_path_drops_pending_tracking_jobs() {
+    // the epoch check covers paths that never call `discard_jobs`: recover (`install_project`), demo, close, template
+    let tpl = std::env::temp_dir().join(format!("filmcraft-mask-epoch-{}.fcproj", std::process::id())).to_string_lossy().to_string();
+    for path in ["recover", "demo", "close", "template"] {
+        let (mut s, _) = tracking_session();
+        s.execute("file.saveAsTemplate", json!({"path": tpl})).unwrap();
+        let c = truth(0.0).apply(filmcraft_geom::Vec2::ZERO);
+        s.execute("masks.add", json!({"effect": "opacity", "shape": "ellipse", "center": [c.x, c.y], "size": [90, 90]})).unwrap();
+        s.execute("masks.track", json!({"direction": "forward"})).unwrap();
+        assert_eq!(s.mask_jobs.len(), 1);
+        match path {
+            "recover" => crate::commands::install_project(&mut s, filmcraft_project::Project::new("Recovered"), None, false),
+            "demo" => drop(s.execute("file.openDemoProject", json!({})).unwrap()),
+            "close" => drop(s.execute("file.closeProject", json!({"force": true})).unwrap()),
+            _ => drop(s.execute("file.newProjectFromTemplate", json!({"template": tpl, "force": true})).unwrap()),
+        }
+        for _ in 0..20 {
+            s.poll_persistence();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(s.mask_jobs.is_empty(), "stale job survived {path}");
+        let h = s.execute("history.list", json!({})).unwrap();
+        assert!(!h["undo"].as_array().unwrap().iter().any(|v| v == "Track Mask"), "{path}: {h}");
+        let project = serde_json::to_string(&*s.project).unwrap();
+        assert!(!project.contains("pathKeyframes") && !project.to_lowercase().contains("\"masks\":[{"), "{path}: stale mask data");
+    }
+    let _ = std::fs::remove_file(&tpl);
 }

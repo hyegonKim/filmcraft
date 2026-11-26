@@ -220,14 +220,7 @@ pub(crate) fn poll(s: &mut Session) {
         } else {
             *lock(&job.progress.error) = Some(status);
         }
-        *lock(&job.result) = Some(result.map(|()| filmcraft_export::Report {
-            path: String::new(),
-            frames: 0,
-            seconds: 0.0,
-            bytes: 0,
-            render_fps: 0.0,
-            extra_files: Vec::new(),
-        }));
+        *lock(&job.result) = Some(result.map(|()| filmcraft_export::Report::default()));
         job.progress.finished.store(true, Ordering::Release);
         s.transcript_jobs[index].applied = true;
     }

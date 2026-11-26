@@ -62,14 +62,20 @@ fn psnr(a: &[u16], b: &[u16], bd: u32) -> f64 {
     if mse == 0.0 { 99.0 } else { 10.0 * (max * max / mse).log10() }
 }
 
-fn planes_of(p: &filmcraft_hevc::Picture) -> [Vec<u16>; 3] {
-    let wide = |pl: &filmcraft_hevc::Plane| -> Vec<u16> {
-        match pl {
-            filmcraft_hevc::Plane::U8(v) => v.iter().map(|&s| u16::from(s)).collect(),
-            filmcraft_hevc::Plane::U16(v) => v.clone(),
+fn planes_of(p: &craft_video::hevc::decode::Picture) -> [Vec<u16>; 3] {
+    let tight = |pl: &craft_video::hevc::decode::Plane, stride: usize, w: usize, h: usize| -> Vec<u16> {
+        let raw: Vec<u16> = match pl {
+            craft_video::hevc::decode::Plane::U8(v) => v.iter().map(|&s| u16::from(s)).collect(),
+            craft_video::hevc::decode::Plane::U16(v) => v.clone(),
+        };
+        if stride == w && raw.len() == w * h {
+            return raw;
         }
+        (0..h).flat_map(|y| raw[y * stride..y * stride + w].iter().copied()).collect()
     };
-    [wide(&p.y), wide(&p.u), wide(&p.v)]
+    let (w, h) = (p.width as usize, p.height as usize);
+    let (cw, ch) = (p.chroma_width as usize, p.chroma_height as usize);
+    [tight(&p.y, p.y_stride, w, h), tight(&p.u, p.uv_stride, cw, ch), tight(&p.v, p.uv_stride, cw, ch)]
 }
 
 /// Encode `frames` pictures, decode them, and check each decoded picture equals the encoder's
@@ -87,7 +93,7 @@ fn round_trip(cfg: EncoderConfig, frames: usize) -> (usize, f64) {
         sources.push(y);
     }
     let stream = annexb(&enc, &packets);
-    let mut dec = filmcraft_hevc::Decoder::new();
+    let mut dec = craft_video::hevc::decode::Decoder::new();
     let mut pics = dec.decode(&stream, 0).unwrap_or_else(|e| panic!("decode: {e}"));
     pics.extend(dec.flush());
     assert_eq!(pics.len(), frames, "every picture decodes");

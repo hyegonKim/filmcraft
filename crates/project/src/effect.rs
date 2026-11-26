@@ -418,7 +418,7 @@ fn build_effects() -> Vec<EffectDef> {
         ),
         video(
             "lumetri",
-            "Lumetri Color",
+            "Color Grading",
             COLOR_CORR,
             vec![
                 grp(b("basic_on", "Basic Correction", true), "Basic Correction"),
@@ -432,6 +432,8 @@ fn build_effects() -> Vec<EffectDef> {
                 grp(f("whites", "Whites", 0.0, -100.0, 100.0, ""), "Basic Correction"),
                 grp(f("blacks", "Blacks", 0.0, -100.0, 100.0, ""), "Basic Correction"),
                 grp(fs("saturation", "Saturation", 100.0, (0.0, 200.0), (0.0, 200.0), "", 1), "Basic Correction"),
+                grp(ch("gamut_compression", "Gamut Compression", &["None", "Luminance and Saturation Preserving"], 0), "Basic Correction"),
+                grp(f("gamut_compression_amount", "Compression Amount", 100.0, 0.0, 100.0, "%"), "Basic Correction"),
                 // HDR mode (PQ / HLG sequences): the grading range in cd/m² and the speculars above it
                 grp(fs("hdr_white", "HDR White", 1000.0, (100.0, 10_000.0), (100.0, 10_000.0), "nits", 0), "Basic Correction"),
                 grp(f("hdr_specular", "HDR Specular", 0.0, -100.0, 100.0, ""), "Basic Correction"),
@@ -490,6 +492,7 @@ fn build_effects() -> Vec<EffectDef> {
                 grp(f("vignette_midpoint", "Midpoint", 50.0, 0.0, 100.0, ""), "Vignette"),
                 grp(f("vignette_roundness", "Roundness", 0.0, -100.0, 100.0, ""), "Vignette"),
                 grp(f("vignette_feather", "Feather", 50.0, 0.0, 100.0, ""), "Vignette"),
+                grp(f("vignette_aberration", "Aberration", 0.0, 0.0, 100.0, ""), "Vignette"),
             ],
         ),
         video(
@@ -746,15 +749,25 @@ fn build_effects() -> Vec<EffectDef> {
                 fs("feather", "Edge Feather", 0.0, (0.0, 50.0), (0.0, 50.0), "", 1),
             ],
         ),
-        video("luma_key", "Luma Key", KEYING, vec![f("threshold", "Threshold", 0.0, 0.0, 100.0, "%"), f("cutoff", "Cutoff", 0.0, 0.0, 100.0, "%")]),
+        video(
+            "luma_key",
+            "Luma Key",
+            KEYING,
+            vec![f("threshold", "Threshold", 0.0, 0.0, 100.0, "%"), f("cutoff", "Cutoff", 0.0, 0.0, 100.0, "%"), b("invert", "Key Out Brights", false)],
+        ),
         video(
             "four_color_gradient",
             "4-Color Gradient",
             GENERATE,
             vec![
+                // NaN: the gradient's own position (a quarter in from each corner of the frame)
+                pt("p1", "Point 1", f64::NAN, f64::NAN),
                 col("c1", "Color 1", [1.0, 1.0, 0.0, 1.0]),
+                pt("p2", "Point 2", f64::NAN, f64::NAN),
                 col("c2", "Color 2", [0.0, 1.0, 0.0, 1.0]),
+                pt("p3", "Point 3", f64::NAN, f64::NAN),
                 col("c3", "Color 3", [1.0, 0.0, 1.0, 1.0]),
+                pt("p4", "Point 4", f64::NAN, f64::NAN),
                 col("c4", "Color 4", [0.0, 0.0, 1.0, 1.0]),
                 f("blend", "Blend", 100.0, 1.0, 1000.0, ""),
                 f("opacity", "Opacity", 100.0, 0.0, 100.0, "%"),
@@ -822,6 +835,118 @@ fn build_effects() -> Vec<EffectDef> {
             vec![pt("position", "Position", f64::NAN, f64::NAN), fs("size", "Size", 15.0, (1.0, 100.0), (1.0, 50.0), "%", 1)],
         ),
         video("simple_text", "Simple Text", vfx::UTILITY, vec![]),
+        // ---- DaVinci Resolve / OpenFX / DCTL Video & Color Plugins ----
+        video(
+            "dctl_transform",
+            "DCTL Color Transform",
+            &["Video Effects", "ResolveFX"],
+            vec![
+                txt("plugin_ref", "DCTL Source"),
+                txt("custom_code", "Inline DCTL"),
+                fs("p1", "Parameter 1", 0.0, (-10000.0, 10000.0), (-1.0, 2.0), "", 2),
+                fs("p2", "Parameter 2", 1.0, (-10000.0, 10000.0), (0.0, 2.0), "", 2),
+                fs("p3", "Parameter 3", 1.0, (-10000.0, 10000.0), (0.2, 3.0), "", 2),
+                fs("p4", "Parameter 4", 0.0, (-10000.0, 10000.0), (-1.0, 1.0), "", 2),
+                b("flag", "Enable Option", true),
+                ch("mode", "Preset / Mode", &["Custom / Linked", "Cinematic Teal & Amber", "Bleach Bypass", "Filmic Shoulder Soft-Clip"], 1),
+                f("mix", "Mix", 100.0, 0.0, 100.0, "%"),
+            ],
+        ),
+        video(
+            "color_space_transform",
+            "Color Space Transform",
+            &["Video Effects", "ResolveFX"],
+            vec![
+                ch(
+                    "input_space",
+                    "Input Color Space",
+                    &[
+                        "Use Timeline",
+                        "Rec. 709",
+                        "ARRI Wide Gamut 3 / LogC3",
+                        "ARRI Wide Gamut 4 / LogC4",
+                        "Sony S-Gamut3.Cine / S-Log3",
+                        "REDWideGamutRGB / Log3G10",
+                        "Blackmagic Design Film Gen 5",
+                        "ACEScct",
+                        "DaVinci Wide Gamut / Intermediate",
+                        "Rec. 2100 PQ",
+                        "Rec. 2100 HLG",
+                    ],
+                    0,
+                ),
+                ch(
+                    "output_space",
+                    "Output Color Space",
+                    &["Use Timeline", "Rec. 709", "DaVinci Wide Gamut / Intermediate", "ACEScct", "Rec. 2100 PQ", "Rec. 2100 HLG"],
+                    1,
+                ),
+                ch("tone_mapping", "Tone Mapping Method", &["None", "DaVinci Luminance Mapping", "Simple Reinhard"], 1),
+                fs("max_input_nits", "Max Input Luminance", 1000.0, (100.0, 10000.0), (100.0, 4000.0), "nits", 0),
+                b("gamut_compression", "Saturation Preserving Gamut Compression", true),
+                f("mix", "Mix", 100.0, 0.0, 100.0, "%"),
+            ],
+        ),
+        video(
+            "film_halation",
+            "Film Halation",
+            &["Video Effects", "ResolveFX"],
+            vec![
+                f("threshold", "Reflection Threshold", 65.0, 0.0, 100.0, "%"),
+                fs("strength", "Exposure Strength", 45.0, (0.0, 200.0), (0.0, 100.0), "%", 1),
+                fs("spread", "Emulsion Spread", 18.0, (1.0, 120.0), (1.0, 60.0), "px", 1),
+                fs("hue_shift", "Red-Orange Hue", 14.0, (-30.0, 60.0), (0.0, 35.0), "°", 1),
+                f("secondary_glow", "Secondary Green Layer", 20.0, 0.0, 100.0, "%"),
+                b("view_halation", "View Isolated Halation", false),
+            ],
+        ),
+        video(
+            "color_warper",
+            "Color Warper",
+            &["Video Effects", "ResolveFX"],
+            vec![
+                ang("target_hue", "Target Hue", 210.0),
+                fs("hue_rotate", "Hue Warp", 0.0, (-180.0, 180.0), (-60.0, 60.0), "°", 1),
+                fs("chroma_push", "Chroma Push", 0.0, (-100.0, 100.0), (-50.0, 50.0), "%", 1),
+                fs("luma_lift", "Luma Lift", 0.0, (-100.0, 100.0), (-50.0, 50.0), "%", 1),
+                fs("pin_falloff", "Pin Angular Falloff", 45.0, (5.0, 180.0), (15.0, 90.0), "°", 1),
+                f("sat_center", "Chroma Zone Center", 50.0, 0.0, 100.0, "%"),
+            ],
+        ),
+        video(
+            "qualifier_3d",
+            "3D HSL Qualifier",
+            &["Video Effects", "ResolveFX"],
+            vec![
+                ang("key_hue", "Center Hue", 24.0),
+                fs("hue_width", "Hue Width", 36.0, (1.0, 180.0), (5.0, 90.0), "°", 1),
+                f("hue_soft", "Hue Softness", 18.0, 0.0, 90.0, "°"),
+                f("sat_low", "Saturation Low", 15.0, 0.0, 100.0, "%"),
+                f("sat_high", "Saturation High", 100.0, 0.0, 100.0, "%"),
+                f("luma_low", "Luminance Low", 8.0, 0.0, 100.0, "%"),
+                f("luma_high", "Luminance High", 95.0, 0.0, 100.0, "%"),
+                f("matte_softness", "Matte Softness", 20.0, 0.0, 100.0, "%"),
+                fs("inside_exposure", "Inside Exposure", 0.0, (-4.0, 4.0), (-2.0, 2.0), "EV", 2),
+                fs("inside_sat", "Inside Saturation", 100.0, (0.0, 200.0), (0.0, 200.0), "%", 0),
+                fs("inside_temp", "Inside Warmth", 0.0, (-100.0, 100.0), (-100.0, 100.0), "", 0),
+                fs("outside_exposure", "Outside Exposure", 0.0, (-4.0, 4.0), (-2.0, 2.0), "EV", 2),
+                fs("outside_sat", "Outside Saturation", 100.0, (0.0, 200.0), (0.0, 200.0), "%", 0),
+                b("highlight_matte", "Highlight Matte", false),
+            ],
+        ),
+        video(
+            "dynamic_zoom",
+            "Dynamic Zoom",
+            &["Video Effects", "ResolveFX"],
+            vec![
+                ch("mode", "Dynamic Zoom Mode", &["Zoom In", "Zoom Out", "Swap Start/End"], 0),
+                ch("ease", "Dynamic Zoom Ease", &["Linear", "Ease In", "Ease Out", "Ease In and Out"], 3),
+                fs("start_scale", "Green Box Scale", 100.0, (25.0, 400.0), (50.0, 200.0), "%", 1),
+                fs("end_scale", "Red Box Scale", 125.0, (25.0, 400.0), (50.0, 200.0), "%", 1),
+                pt("start_center", "Green Center", f64::NAN, f64::NAN),
+                pt("end_center", "Red Center", f64::NAN, f64::NAN),
+            ],
+        ),
         // ---- audio effects ----
         // (defined in effect/audio.rs; appended below)
         EffectDef {
@@ -885,7 +1010,63 @@ pub fn find_effect(id: &str) -> Option<&'static EffectDef> {
 /// Case-insensitive lookup by id or display name.
 pub fn find_effect_by_name(name: &str) -> Option<&'static EffectDef> {
     let n = name.to_ascii_lowercase();
-    effect_defs().iter().find(|e| e.id == n || e.name.to_ascii_lowercase() == n)
+    // Old human-readable names are import/automation aliases, never display labels.
+    let legacy_id = match n.as_str() {
+        "lumetri" | "lumetri color" | "color grade" => Some("lumetri"),
+        "impact-bevel-alpha" | "impact-bevel-alpha.prm" | "임팩트 베벨 알파" => Some("impact_bevel_alpha"),
+        "impact-emboss" | "impact-emboss.prm" | "임팩트 엠보스" => Some("impact_emboss"),
+        "impact-fill" | "impact-fill.prm" | "임팩트 채우기" => Some("impact_fill"),
+        "impact-gradient-tint" | "impact-gradient-tint.prm" | "임팩트 그레이디언트 색조" => Some("impact_gradient_tint"),
+        "impact-hue-saturation" | "impact-hue-saturation.prm" | "impact hue and saturation" | "임팩트 색조 및 채도" => Some("impact_hue_saturation"),
+        "impact-posterize" | "impact-posterize.prm" | "임팩트 포스터화" => Some("impact_posterize"),
+        "impact-radial-blur" | "impact-radial-blur.prm" | "임팩트 방사형 흐림" => Some("impact_radial_blur"),
+        "impact-zoom-blur" | "impact-zoom-blur.prm" | "임팩트 줌 흐림" => Some("impact_zoom_blur"),
+        "volume_rider" | "volume rider" | "오디오 레벨링" => Some("audio_leveling"),
+        "생성형 제거" | "object removal" => Some("generative_object_removal"),
+        _ => None,
+    };
+    legacy_id.and_then(find_effect).or_else(|| effect_defs().iter().find(|e| e.id == n || e.name.to_ascii_lowercase() == n))
+}
+
+/// Names a user may still type into the Effects panel search for an effect whose display label
+/// changed (`"Lumetri"` → Color Grading). Search terms only: never display labels, never written
+/// to a project or an interchange file.
+pub fn search_aliases(def: &EffectDef) -> &'static [&'static str] {
+    match def.id {
+        "lumetri" => &["Lumetri", "Lumetri Color", "Color Grade"],
+        "impact_bevel_alpha" => &["FilmImpact", "Impact-Bevel-Alpha", "Bevel Alpha", "임팩트 베벨 알파"],
+        "impact_emboss" => &["FilmImpact", "Impact-Emboss", "임팩트 엠보스"],
+        "impact_fill" => &["FilmImpact", "Impact-Fill", "임팩트 채우기"],
+        "impact_gradient_tint" => &["FilmImpact", "Impact-Gradient-Tint", "임팩트 그레이디언트 색조"],
+        "impact_hue_saturation" => &["FilmImpact", "Impact-Hue-Saturation", "임팩트 색조 및 채도"],
+        "impact_posterize" => &["FilmImpact", "Impact-Posterize", "임팩트 포스터화"],
+        "impact_radial_blur" => &["FilmImpact", "Impact-Radial-Blur", "임팩트 방사형 흐림"],
+        "impact_zoom_blur" => &["FilmImpact", "Impact-Zoom-Blur", "임팩트 줌 흐림"],
+        "audio_leveling" => &["VolumeRider", "Volume Rider", "오디오 레벨링"],
+        "dialogue_leveler" => &["Fairlight", "Voice Leveler", "대사 레벨러", "VST3"],
+        "dctl_transform" => &["DCTL", "OpenFX", "ResolveFX", "DaVinci", "Shader"],
+        "dctl_transition" => &["DCTL", "OpenFX", "ResolveFX", "DaVinci", "Shader Transition"],
+        "color_space_transform" => &["CST", "ACES", "DaVinci Wide Gamut", "LogC", "S-Log3", "OpenFX", "ResolveFX"],
+        "film_halation" => &["Halation", "ResolveFX", "OpenFX", "Emulsion", "필름 할레이션"],
+        "color_warper" => &["Warper", "Spider Web", "Resolve", "컬러 워퍼"],
+        "qualifier_3d" => &["Qualifier", "HSL Keyer", "3D Keyer", "Resolve", "퀄리파이어"],
+        "dynamic_zoom" => &["Ken Burns", "Resolve", "다이나믹 줌"],
+        "generative_object_removal" => &["Object Removal", "Content-Aware Fill", "생성형 제거"],
+        "stage_3d" => &["Stager", "Modeler", "SDF Clay", "OBJ Mesh", "IBL", "Shadow Catcher"],
+        "surface_relight" => &["Sampler", "Relight", "Normal Map", "Delight", "Seamless Tile"],
+        "procedural_pbr" => &["Designer", "PBR", "Material", "Terrazzo", "Carbon Weave"],
+        _ => &[],
+    }
+}
+
+/// The name an interchange file (FCP7 XML, FCPXML, EDL) writes for an effect: the name it had
+/// before the UI rename, so a rename never changes an export. Display labels come from
+/// [`EffectDef::name`]; this is the stable name other applications read back.
+pub fn interchange_name(def: &EffectDef) -> &'static str {
+    match def.id {
+        "lumetri" => "Lumetri Color",
+        _ => def.name,
+    }
 }
 
 /// Intrinsic video effects every video track item carries (Motion, Opacity, Time Remapping).
@@ -912,5 +1093,41 @@ mod tests {
         assert!(effect_defs().len() > 90);
         assert_eq!(find_effect_by_name("Gaussian Blur").unwrap().id, "gaussian_blur");
         assert_eq!(intrinsic_video().len(), 3);
+    }
+
+    #[test]
+    fn descriptive_names_preserve_legacy_lookup_and_project_ids() {
+        for (id, old, label) in [
+            ("lumetri", "Lumetri Color", "Color Grading"),
+            ("lumetri", "Color Grade", "Color Grading"),
+            ("ultra_key", "Ultra Key", "Ultra Key"),
+            ("warp_stabilizer", "Warp Stabilizer", "Warp Stabilizer"),
+            ("morph_cut", "Morph Cut", "Morph Cut"),
+        ] {
+            let def = find_effect(id).unwrap();
+            assert_eq!(def.name, label);
+            assert_eq!(find_effect_by_name(old).unwrap().id, id);
+            assert_eq!(find_effect_by_name(&old.to_uppercase()).unwrap().id, id);
+            assert_eq!(find_effect_by_name(label).unwrap().id, id);
+            let saved = serde_json::to_value(def.instance()).unwrap();
+            assert_eq!(saved["effect"], id);
+            let loaded: EffectInstance = serde_json::from_value(saved).unwrap();
+            assert_eq!(loaded, def.instance());
+        }
+    }
+
+    #[test]
+    fn interchange_names_keep_exports_stable_across_the_rename() {
+        // FCP7 XML, FCPXML and EDL write the name other applications read back, so renaming a
+        // display label must not change a byte of an export.
+        let lumetri = find_effect("lumetri").unwrap();
+        assert_eq!(lumetri.name, "Color Grading");
+        assert_eq!(interchange_name(lumetri), "Lumetri Color");
+        for id in ["gaussian_blur", "cross_dissolve", "ultra_key", "warp_stabilizer"] {
+            let def = find_effect(id).unwrap();
+            assert_eq!(interchange_name(def), def.name, "{id}");
+        }
+        // and a file naming the old label still imports as the same effect
+        assert_eq!(find_effect_by_name(interchange_name(lumetri)).unwrap().id, "lumetri");
     }
 }

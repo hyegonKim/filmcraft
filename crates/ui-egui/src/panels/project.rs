@@ -75,13 +75,8 @@ pub enum ProjectDialog {
     ManagePresets { selected: usize, name: String },
     /// Freeform View Options….
     FreeformOptions { options: filmcraft_engine::project_panel::FreeformOptions },
-    /// Freeform ▸ Save Arrangement….
-    SaveArrangement {
-        name: String,
-        bin: Option<u64>,
-        #[serde(default)]
-        width: Option<f32>,
-    },
+    /// Freeform ▸ Save Arrangement…, with the canvas width (unscaled) its unplaced cards wrap at.
+    SaveArrangement { name: String, bin: Option<u64>, width: Option<f64> },
 }
 
 /// Frontend state of the Project panel (`UiState::project_panel`).
@@ -608,7 +603,13 @@ fn footer(app: &mut FilmcraftApp, ui: &mut egui::Ui, bar: Rect, v: &View, action
     let sw = (bar.width() - 300.0).clamp(40.0, 120.0);
     let sr = Rect::from_min_size(pos2(x + 8.0, bar.min.y + 8.0), vec2(sw, 16.0));
     let mut sz = v.icon_size;
-    let resp = crate::widgets::accessible_name(ui.put(sr, egui::Slider::new(&mut sz, 48.0..=400.0).show_value(false)), tl!("Zoom"));
+    // it sizes Icon view's cards, the Freeform canvas and List view's thumbnails (#3774): a List
+    // without thumbnails has nothing for it to size
+    let mut sui = ui.new_child(egui::UiBuilder::new().max_rect(sr).id_salt((pre, "zoom")));
+    if v.mode == ViewMode::List && !app.session.prefs.project_panel.thumbnails {
+        sui.disable();
+    }
+    let resp = crate::widgets::accessible_name(sui.put(sr, egui::Slider::new(&mut sz, 48.0..=400.0).show_value(false)), tl!("Zoom"));
     app.auto.add(&format!("{pre}.iconSize"), sr, "Zoom");
     // a drag ended by Escape goes back to the size it started from (#580)
     let orig_id = egui::Id::unique((pre, "icon-size-before-drag"));
@@ -682,7 +683,8 @@ fn footer(app: &mut FilmcraftApp, ui: &mut egui::Ui, bar: Rect, v: &View, action
                     crate::panels::clear_drag(ui);
                 }
             }
-            egui::Popup::menu(&resp).show(|ui| new_item_menu(app, ui, pre, actions));
+            let bin = (v.bin != app.session.project.root.id).then_some(v.bin.0);
+            egui::Popup::menu(&resp).show(|ui| new_item_menu(app, ui, pre, bin, actions));
         } else if resp.clicked() && enabled {
             match id {
                 "find" => actions.push(("edit.find".into(), json!({}))),
@@ -714,13 +716,23 @@ pub const NEW_ITEMS: [(&str, &str); 8] = [
     ("Demo Footage", "file.importDemoFootage"),
 ];
 
-pub fn new_item_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, pre: &str, actions: &mut Actions) {
-    let bin = view_of(app, action_inst(app, &json!({"panel": pre}))).bin.0;
+/// The bin of a New Item menu action (`{"bin": .., "newItem": true}`, nothing else): `Some(None)` is
+/// the root, as in the engine (`bin` null). The dialogs of Sequence and Color Matte open with it
+/// instead of the shown bin; the same params without the marker still run the command directly.
+pub fn bin_only(params: &Value) -> Option<Option<u64>> {
+    let m = params.as_object().filter(|m| m.len() == 2 && m.get("newItem") == Some(&Value::Bool(true)))?;
+    let bin = m.get("bin")?;
+    if bin.is_null() { Some(None) } else { bin.as_u64().map(Some) }
+}
+
+/// New Item menu of the panel instance `pre`, which shows `bin` (`None` = the root): every action
+/// names that bin, so a floating bin panel does not make its items in the main panel's bin.
+pub fn new_item_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui, pre: &str, bin: Option<u64>, actions: &mut Actions) {
     for (label, c) in NEW_ITEMS {
         let b = ui.button(crate::i18n::t(label));
         app.auto.add(&format!("{pre}.newItem.{c}"), b.rect, label);
         if b.clicked() {
-            actions.push((c.into(), json!({"bin": bin})));
+            actions.push((c.into(), json!({"bin": bin, "newItem": true})));
             ui.close();
         }
     }
@@ -974,16 +986,29 @@ pub fn route(app: &mut FilmcraftApp, ctx: &egui::Context, op: &str, params: &Val
             Ok(Value::Null)
         }
         "saveArrangement" => {
-            let view = view_of(app, inst);
-            let bin = Some(view.bin.0);
-            let width = params
-                .get("width")
-                .and_then(Value::as_f64)
-                .map(|w| w as f32)
-                .filter(|w| w.is_finite() && *w > 0.0)
-                .or_else(|| app.auto.find(&format!("{}.freeform.viewport", view.prefix)).map(|e| e.rect[2]));
-            app.ui.project_panel.dialog = Some(ProjectDialog::SaveArrangement { name: String::new(), bin, width });
-            Ok(Value::Null)
+            // the canvas the menu was opened on, which may be a floating bin window; a `bin` that is
+            // not a bin id, or names no bin, is refused, as the engine would save to the root bin
+            // instead (an omitted or null `bin` is the shown view's)
+            let given = params.get("bin").filter(|v| !v.is_null());
+            let id = given.map(|v| v.as_u64().ok_or_else(|| format!("`bin` is a bin id, not {v}")));
+            if let Some(Err(e)) = id {
+                Err(e)
+            } else if let Some(Ok(b)) = id
+                && app.session.project.root.find_bin(BinId(b)).is_none()
+            {
+                Err(format!("no bin {b}"))
+            } else {
+                let v = view_of(app, inst);
+                let given = id.and_then(Result::ok);
+                let bin = given.or(Some(v.bin.0));
+                let width = params.get("width").and_then(Value::as_f64).or_else(|| {
+                    let vp = format!("{}.freeform.viewport", v.prefix);
+                    let z = crate::panels::project_views::freeform_zoom(v.icon_size);
+                    app.auto.elements.iter().find(|e| e.id == vp).map(|e| (e.rect[2] / z) as f64)
+                });
+                app.ui.project_panel.dialog = Some(ProjectDialog::SaveArrangement { name: String::new(), bin, width });
+                Ok(Value::Null)
+            }
         }
         "revealProject" => {
             let Some(p) = app.session.path.clone() else { return Some(Err("the project has not been saved".into())) };
@@ -1070,6 +1095,13 @@ pub fn new_bin(app: &mut FilmcraftApp, params: &Value) -> Result<Value, String> 
     app.ui.project_panel.selected_bin = Some(bin);
     app.ui.project_panel.rename = Some(Rename { item: None, bin: Some(bin), text, panel });
     Ok(r)
+}
+
+/// The bin the Project panel is showing, `None` at the project's root: where a New Item or File ▸ New
+/// puts what it makes.
+pub fn shown_bin(app: &FilmcraftApp) -> Option<u64> {
+    let v = view_of(app, shown_inst(app));
+    (v.bin != app.session.project.root.id).then_some(v.bin.0)
 }
 
 /// Commit the inline rename (Enter / focus lost).

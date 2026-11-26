@@ -1,5 +1,5 @@
-//! Lumetri Presets (Effects panel ▸ Lumetri Presets): built-in Lumetri Color looks, and their
-//! thumbnails rendered by our own Lumetri on a generated preview picture.
+//! Color Grading Presets (Effects panel ▸ Color Grading Presets): built-in Color Grading looks, and their
+//! thumbnails rendered by our own Color Grading on a generated preview picture.
 //!
 //! The presets are original work: parameter values chosen by FilmCraft contributors, named
 //! descriptively (no third-party look names, LUTs or preview images). The preview picture
@@ -15,10 +15,10 @@ use filmcraft_time::Tick;
 use crate::Image;
 use crate::effects::{FxCtx, apply};
 
-/// One preset: a Lumetri Color instance with these parameters (the rest at their defaults).
+/// One preset: a Color Grading instance with these parameters (the rest at their defaults).
 #[derive(Clone, Debug)]
 pub struct LumetriPreset {
-    /// Sub-folder of Lumetri Presets.
+    /// Sub-folder of Color Grading Presets.
     pub folder: &'static str,
     pub name: &'static str,
     pub description: &'static str,
@@ -26,7 +26,7 @@ pub struct LumetriPreset {
 }
 
 impl LumetriPreset {
-    /// A Lumetri Color effect instance configured as the preset.
+    /// A Color Grading effect instance configured as the preset.
     pub fn instance(&self) -> EffectInstance {
         let mut e = match find_effect("lumetri") {
             Some(def) => def.instance(),
@@ -51,7 +51,7 @@ impl LumetriPreset {
 }
 
 /// The preset folders in Effects panel order.
-pub const FOLDERS: [&str; 4] = ["Cinematic", "Film Emulation", "Monochrome", "Technical"];
+pub const FOLDERS: [&str; 7] = ["Cinematic", "Film Emulation", "Effect Styles", "Boost & Holdout", "Monochrome", "Vignette", "Technical"];
 
 fn fl(v: f64) -> ParamValue {
     ParamValue::Float(v)
@@ -98,6 +98,91 @@ pub fn presets() -> Vec<LumetriPreset> {
             "High contrast with held highlights and deep shadows",
             vec![("contrast", fl(45.0)), ("shadows", fl(-20.0)), ("highlights", fl(-25.0)), ("vibrance", fl(15.0))],
         ),
+        p(
+            "Cinematic",
+            "Cinema Split Tone",
+            "Deep cyan-indigo shadow separation with amber highlight roll-off",
+            vec![
+                ("shadow_tint", rgb(0.30, 0.46, 0.64)),
+                ("highlight_tint", rgb(0.68, 0.56, 0.38)),
+                ("contrast", fl(24.0)),
+                ("highlights", fl(-18.0)),
+                ("vibrance", fl(15.0)),
+            ],
+        ),
+        p(
+            "Cinematic",
+            "Cinematic Cool Low",
+            "Subtle cool theatrical balance with gentle contrast",
+            vec![("temperature", fl(-16.0)), ("contrast", fl(12.0)), ("shadow_tint", rgb(0.44, 0.49, 0.57))],
+        ),
+        p(
+            "Cinematic",
+            "Cinematic Cool Med",
+            "Medium cool theatrical grade with crisp midtones",
+            vec![("temperature", fl(-28.0)), ("contrast", fl(22.0)), ("highlights", fl(-12.0)), ("shadow_tint", rgb(0.39, 0.47, 0.60))],
+        ),
+        p(
+            "Cinematic",
+            "Cinematic Cool High",
+            "Strong cool theatrical look with deep slate shadows",
+            vec![
+                ("temperature", fl(-42.0)),
+                ("contrast", fl(34.0)),
+                ("highlights", fl(-20.0)),
+                ("creative_sat", fl(88.0)),
+                ("shadow_tint", rgb(0.34, 0.44, 0.64)),
+            ],
+        ),
+        p(
+            "Cinematic",
+            "Cinematic Vivid Low",
+            "Lightly punchy cinema contrast and vibrance",
+            vec![("contrast", fl(14.0)), ("vibrance", fl(22.0)), ("creative_sat", fl(108.0))],
+        ),
+        p(
+            "Cinematic",
+            "Cinematic Vivid Med",
+            "Rich theatrical saturation with protected highlights",
+            vec![("contrast", fl(26.0)), ("highlights", fl(-15.0)), ("vibrance", fl(36.0)), ("creative_sat", fl(118.0))],
+        ),
+        p(
+            "Cinematic",
+            "Cinematic Vivid High",
+            "Bold high-impact cinema colour with gamut protection",
+            vec![
+                ("contrast", fl(38.0)),
+                ("highlights", fl(-22.0)),
+                ("vibrance", fl(50.0)),
+                ("creative_sat", fl(130.0)),
+                ("gamut_compression", ParamValue::Choice(1)),
+            ],
+        ),
+        p(
+            "Cinematic",
+            "Cinematic Warm Low",
+            "Gentle golden warmth with soft shadow lift",
+            vec![("temperature", fl(16.0)), ("tint", fl(4.0)), ("contrast", fl(12.0)), ("highlight_tint", rgb(0.58, 0.52, 0.44))],
+        ),
+        p(
+            "Cinematic",
+            "Cinematic Warm Med",
+            "Balanced warm cinema grade with rich skin and amber highlights",
+            vec![("temperature", fl(28.0)), ("tint", fl(7.0)), ("contrast", fl(22.0)), ("highlights", fl(-14.0)), ("highlight_tint", rgb(0.63, 0.54, 0.40))],
+        ),
+        p(
+            "Cinematic",
+            "Cinematic Warm High",
+            "Intense tungsten-gold cinema grade with deep contrast",
+            vec![
+                ("temperature", fl(44.0)),
+                ("tint", fl(10.0)),
+                ("contrast", fl(34.0)),
+                ("highlights", fl(-20.0)),
+                ("vibrance", fl(18.0)),
+                ("highlight_tint", rgb(0.68, 0.55, 0.36)),
+            ],
+        ),
         // ---- Film Emulation
         p(
             "Film Emulation",
@@ -122,6 +207,130 @@ pub fn presets() -> Vec<LumetriPreset> {
             ],
         ),
         p("Film Emulation", "Warm Negative", "Warm print stock with gentle roll-off", vec![("look", ParamValue::Choice(2)), ("temperature", fl(10.0))]),
+        p(
+            "Film Emulation",
+            "Colorful",
+            "Reversal stock look with lively primaries and smooth highlight shoulder",
+            vec![("vibrance", fl(38.0)), ("creative_sat", fl(120.0)), ("contrast", fl(18.0)), ("highlights", fl(-18.0)), ("faded_film", fl(8.0))],
+        ),
+        p(
+            "Film Emulation",
+            "Contemporary",
+            "Modern vision stock balance with clean neutrals and subtle split tone",
+            vec![
+                ("temperature", fl(8.0)),
+                ("contrast", fl(16.0)),
+                ("highlights", fl(-20.0)),
+                ("shadows", fl(12.0)),
+                ("shadow_tint", rgb(0.45, 0.50, 0.55)),
+                ("highlight_tint", rgb(0.55, 0.52, 0.46)),
+            ],
+        ),
+        p(
+            "Film Emulation",
+            "High Contrast",
+            "Print stock with crisp toe, dense blacks and punchy midtones",
+            vec![("contrast", fl(52.0)), ("blacks", fl(-20.0)), ("highlights", fl(-22.0)), ("faded_film", fl(6.0)), ("creative_sat", fl(106.0))],
+        ),
+        // ---- Effect Styles
+        p(
+            "Effect Styles",
+            "Muted",
+            "restrained chroma with lifted shadows and soft highlight roll-off",
+            vec![("saturation", fl(64.0)), ("faded_film", fl(24.0)), ("contrast", fl(-12.0)), ("highlights", fl(-16.0))],
+        ),
+        p(
+            "Effect Styles",
+            "Office",
+            "Fluorescent cool-green interior cast with crisp contrast",
+            vec![("temperature", fl(-18.0)), ("tint", fl(-22.0)), ("contrast", fl(18.0)), ("creative_sat", fl(88.0))],
+        ),
+        p(
+            "Effect Styles",
+            "Sunscorched",
+            "Overexposed desert heat with bleached highlights and amber push",
+            vec![("exposure", fl(0.45)), ("temperature", fl(38.0)), ("contrast", fl(28.0)), ("whites", fl(18.0)), ("faded_film", fl(14.0))],
+        ),
+        p(
+            "Effect Styles",
+            "Sunset",
+            "Magenta-gold horizon glow with deep warm shadows",
+            vec![
+                ("temperature", fl(40.0)),
+                ("tint", fl(18.0)),
+                ("highlights", fl(-16.0)),
+                ("vibrance", fl(26.0)),
+                ("shadow_tint", rgb(0.56, 0.42, 0.54)),
+                ("highlight_tint", rgb(0.68, 0.52, 0.36)),
+            ],
+        ),
+        p(
+            "Effect Styles",
+            "Vintage Faded",
+            "Aged print matte blacks, warm creamy highlights and softened detail",
+            vec![
+                ("faded_film", fl(52.0)),
+                ("temperature", fl(20.0)),
+                ("creative_sat", fl(80.0)),
+                ("sharpen", fl(-12.0)),
+                ("highlight_tint", rgb(0.60, 0.56, 0.44)),
+            ],
+        ),
+        // ---- Boost & Holdout
+        p(
+            "Boost & Holdout",
+            "Boost Blues",
+            "Emphasises sky and cyan-blue hues while keeping neutrals clean",
+            vec![("hue_vs_sat", curve(&[[0.0, 0.5], [0.46, 0.52], [0.62, 0.92], [0.76, 0.52], [1.0, 0.5]])), ("vibrance", fl(16.0))],
+        ),
+        p(
+            "Boost & Holdout",
+            "Boost Green",
+            "Enriches foliage and emerald hues across midtones",
+            vec![("hue_vs_sat", curve(&[[0.0, 0.5], [0.20, 0.52], [0.34, 0.95], [0.48, 0.52], [1.0, 0.5]])), ("vibrance", fl(22.0))],
+        ),
+        p(
+            "Boost & Holdout",
+            "Boost Pink",
+            "Lifts magenta, rose and neon pink accents",
+            vec![("hue_vs_sat", curve(&[[0.0, 0.55], [0.72, 0.50], [0.87, 0.95], [0.97, 0.72], [1.0, 0.55]])), ("vibrance", fl(22.0)), ("tint", fl(8.0))],
+        ),
+        p(
+            "Boost & Holdout",
+            "Boost Red",
+            "Deepens crimson and scarlet hues without clipping skin",
+            vec![("hue_vs_sat", curve(&[[0.0, 0.94], [0.06, 0.65], [0.15, 0.50], [0.90, 0.52], [0.97, 0.90], [1.0, 0.94]])), ("vibrance", fl(18.0))],
+        ),
+        p(
+            "Boost & Holdout",
+            "Boost Skin",
+            "Warms and enriches natural skin-tone orange-amber hues",
+            vec![("hue_vs_sat", curve(&[[0.0, 0.56], [0.07, 0.86], [0.16, 0.54], [1.0, 0.56]])), ("temperature", fl(12.0)), ("vibrance", fl(16.0))],
+        ),
+        p(
+            "Boost & Holdout",
+            "Boost Yellow",
+            "Intensifies warm gold and sunlit yellow tones",
+            vec![("hue_vs_sat", curve(&[[0.0, 0.50], [0.08, 0.56], [0.16, 0.94], [0.26, 0.52], [1.0, 0.50]])), ("vibrance", fl(18.0))],
+        ),
+        p(
+            "Boost & Holdout",
+            "Holdout Blue",
+            "Isolates cyan-blue hues while desaturating the rest of the frame",
+            vec![("hue_vs_sat", curve(&[[0.0, 0.04], [0.46, 0.06], [0.56, 0.72], [0.64, 0.78], [0.72, 0.06], [1.0, 0.04]]))],
+        ),
+        p(
+            "Boost & Holdout",
+            "Holdout Green",
+            "Isolates green hues while pulling all other colours to neutral",
+            vec![("hue_vs_sat", curve(&[[0.0, 0.04], [0.20, 0.06], [0.30, 0.76], [0.38, 0.76], [0.46, 0.06], [1.0, 0.04]]))],
+        ),
+        p(
+            "Boost & Holdout",
+            "Holdout Red",
+            "Isolates red hues while desaturating warm/cool surroundings",
+            vec![("hue_vs_sat", curve(&[[0.0, 0.82], [0.05, 0.72], [0.11, 0.05], [0.90, 0.05], [0.96, 0.76], [1.0, 0.82]]))],
+        ),
         // ---- Monochrome
         p("Monochrome", "Neutral Mono", "Black and white", vec![("saturation", fl(0.0))]),
         p(
@@ -137,6 +346,43 @@ pub fn presets() -> Vec<LumetriPreset> {
             vec![("look", ParamValue::Choice(6)), ("wheel_midtones", wheel(30.0, 0.35)), ("wheel_highlights", wheel(45.0, 0.2))],
         ),
         p("Monochrome", "Cold Mono", "Monochrome toned cyan-blue", vec![("look", ParamValue::Choice(6)), ("wheel_midtones", wheel(210.0, 0.3))]),
+        p(
+            "Monochrome",
+            "Mono Contrasty",
+            "Punchy silver halide monochrome with crisp S-curve and deep blacks",
+            vec![("saturation", fl(0.0)), ("contrast", fl(48.0)), ("blacks", fl(-18.0)), ("whites", fl(14.0))],
+        ),
+        p(
+            "Monochrome",
+            "Mono Sepia",
+            "Classic archival sepia print with soft faded blacks",
+            vec![("look", ParamValue::Choice(6)), ("faded_film", fl(18.0)), ("wheel_midtones", wheel(34.0, 0.42)), ("wheel_shadows", wheel(26.0, 0.18))],
+        ),
+        p(
+            "Monochrome",
+            "Mono Steel",
+            "Metallic blue-grey monochrome with crisp contrast",
+            vec![("look", ParamValue::Choice(6)), ("contrast", fl(28.0)), ("wheel_midtones", wheel(215.0, 0.34)), ("wheel_shadows", wheel(225.0, 0.22))],
+        ),
+        // ---- Vignette
+        p(
+            "Vignette",
+            "Vignette Medium",
+            "Balanced optical edge falloff drawing focus to the centre",
+            vec![("vignette_amount", fl(-2.0)), ("vignette_midpoint", fl(46.0)), ("vignette_feather", fl(62.0))],
+        ),
+        p(
+            "Vignette",
+            "Vignette Heavy",
+            "Deep dramatic corner darkening with tight midpoint",
+            vec![("vignette_amount", fl(-3.8)), ("vignette_midpoint", fl(34.0)), ("vignette_feather", fl(55.0))],
+        ),
+        p(
+            "Vignette",
+            "Vignette Aberration",
+            "Optical corner vignette with radial red-blue chromatic fringing",
+            vec![("vignette_amount", fl(-2.2)), ("vignette_midpoint", fl(42.0)), ("vignette_feather", fl(58.0)), ("vignette_aberration", fl(70.0))],
+        ),
         // ---- Technical
         p("Technical", "Lift Shadows", "Opens up the shadows", vec![("shadows", fl(40.0)), ("blacks", fl(10.0))]),
         p("Technical", "Protect Highlights", "Pulls highlights and whites down", vec![("highlights", fl(-40.0)), ("whites", fl(-15.0))]),
@@ -151,9 +397,13 @@ pub fn presets() -> Vec<LumetriPreset> {
     ]
 }
 
-/// The preset called `name` (case-insensitive).
+/// The preset called `name` (case-insensitive, supporting `"Film Emulation <Name>"` aliases).
 pub fn find(name: &str) -> Option<LumetriPreset> {
-    presets().into_iter().find(|p| p.name.eq_ignore_ascii_case(name))
+    let trimmed = name.trim();
+    let stripped = trimmed.strip_prefix("Film Emulation ").or_else(|| trimmed.strip_prefix("film emulation "));
+    presets()
+        .into_iter()
+        .find(|p| p.name.eq_ignore_ascii_case(trimmed) || stripped.is_some_and(|s| p.folder == "Film Emulation" && p.name.eq_ignore_ascii_case(s)))
 }
 
 /// The procedural preview picture (`w`×`h`, opaque, linear premultiplied like every [`Image`]).
@@ -223,6 +473,7 @@ pub fn thumbnail(preset: &LumetriPreset, w: usize, h: usize) -> Image {
     let cx = FxCtx {
         t: Tick::ZERO,
         px_scale: w as f32 / 1920.0,
+        mask_scale: w as f32 / 1920.0,
         seconds: 0.0,
         timecode: "",
         clip_name: "",
@@ -236,7 +487,7 @@ pub fn thumbnail(preset: &LumetriPreset, w: usize, h: usize) -> Image {
 }
 
 /// A grid of thumbnails (`cols` columns of `w`×`h` cells, 4 px gaps over a dark background), in
-/// the order given: the Effects panel's thumbnail view of a Lumetri Presets folder.
+/// the order given: the Effects panel's thumbnail view of a Color Grading Presets folder.
 pub fn grid(presets: &[LumetriPreset], cols: usize, w: usize, h: usize) -> Image {
     const GAP: usize = 4;
     let cols = cols.max(1);
@@ -248,9 +499,11 @@ pub fn grid(presets: &[LumetriPreset], cols: usize, w: usize, h: usize) -> Image
         let t = thumbnail(p, w, h);
         let (x0, y0) = (GAP + (k % cols) * (w + GAP), GAP + (k / cols) * (h + GAP));
         for y in 0..h {
-            let src = &t.px[y * w * 4..(y + 1) * w * 4];
+            // a buffer that could not be allocated comes back empty: skip it rather than panic
             let d = ((y0 + y) * gw + x0) * 4;
-            out.px[d..d + w * 4].copy_from_slice(src);
+            if let (Some(src), Some(dst)) = (t.px.get(y * w * 4..(y + 1) * w * 4), out.px.get_mut(d..d + w * 4)) {
+                dst.copy_from_slice(src);
+            }
         }
     }
     out

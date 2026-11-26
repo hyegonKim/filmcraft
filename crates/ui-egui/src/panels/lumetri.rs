@@ -1,5 +1,5 @@
-//! Lumetri Color panel: Basic Correction, Creative, Curves (RGB + hue curves), Color Wheels,
-//! HSL Secondary, Vignette — editing the selected clip's Lumetri effect through engine commands.
+//! Color Grading panel: Basic Correction, Creative, Curves (RGB + hue curves), Color Wheels,
+//! HSL Secondary, Vignette — editing the selected clip's Color Grading effect through engine commands.
 //!
 //! In an HDR sequence (Rec. 2100 PQ / HLG working space) Basic Correction shows HDR White and
 //! HDR Specular and Curves shows HDR Range (cd/m²): the sliders and curves then span 0 … that
@@ -29,6 +29,217 @@ fn selected(app: &FilmcraftApp) -> Option<(ClipId, filmcraft_project::TrackItem)
     })
 }
 
+fn node_short_label(effect_id: &str) -> Option<&'static str> {
+    match effect_id {
+        "lumetri" => Some("Color"),
+        "color_space_transform" => Some("CST"),
+        "film_halation" => Some("Halation"),
+        "color_warper" => Some("Warper"),
+        "qualifier_3d" => Some("3D Key"),
+        "dctl_transform" => Some("DCTL"),
+        "surface_relight" => Some("Relight"),
+        _ => None,
+    }
+}
+
+/// DaVinci Resolve-style Serial Color Node Pipeline & Gallery PowerGrades header bar.
+fn draw_resolve_color_header(app: &mut FilmcraftApp, ui: &mut egui::Ui, clip: ClipId, it: &filmcraft_project::TrackItem, t: &Tokens) {
+    let nodes: Vec<(usize, &str, bool)> =
+        it.effects.iter().enumerate().filter_map(|(i, fx)| node_short_label(&fx.effect).map(|lbl| (i, lbl, fx.enabled))).collect();
+    let mut node_toggle: Option<usize> = None;
+    let mut node_select: Option<(usize, bool)> = None;
+    let mut add_node_fx: Option<&'static str> = None;
+
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (ord, (fx_idx, lbl, enabled)) in nodes.iter().enumerate() {
+            let tag = format!("{:02} {}", ord + 1, lbl);
+            let col = if *enabled { t.text } else { t.text_faint };
+            let b = ui.button(egui::RichText::new(&tag).size(11.0).color(col));
+            app.auto.add(&format!("lumetri.node.{ord}"), b.rect, &tag);
+            if b.clicked() {
+                node_select = Some((*fx_idx, *lbl != "Color"));
+            }
+            if b.secondary_clicked() {
+                node_toggle = Some(*fx_idx);
+            }
+        }
+        let add_combo = craft_ui::ComboBox::from_id_salt("lumetri-add-serial-node").selected_text(tl!("+ Node")).width(78.0).show_ui(ui, |ui| {
+            for (fx_id, title) in [
+                ("lumetri", "Color Grading Node"),
+                ("color_space_transform", "Color Space Transform (CST)"),
+                ("film_halation", "Film Halation"),
+                ("color_warper", "Color Warper"),
+                ("qualifier_3d", "3D HSL Qualifier"),
+                ("dctl_transform", "DCTL Color Transform"),
+                ("surface_relight", "Surface Relight & PBR Sampler"),
+            ] {
+                if ui.selectable_label(false, title).clicked() {
+                    add_node_fx = Some(fx_id);
+                }
+            }
+        });
+        app.auto.add("lumetri.addNode", add_combo.response.rect, "+ Node");
+    });
+
+    if let Some(fx_idx) = node_toggle {
+        let _ = app.session.execute("effects.toggleEnabled", json!({ "clip": clip.0, "index": fx_idx }));
+    }
+    if let Some((fx_idx, open_ec)) = node_select {
+        app.session.state.selected_effect = filmcraft_engine::EffectSel::of(clip, &it.effects, fx_idx);
+        if open_ec {
+            app.show_panel(crate::dock::PanelKind::EffectControls);
+        }
+    }
+    if let Some(fx_id) = add_node_fx {
+        let _ = app.session.execute("color.addSerialNode", json!({ "clips": [clip.0], "effect": fx_id }));
+    }
+
+    // PowerGrades Gallery row
+    let stills = app.session.project.power_grades.clone();
+    let mut apply_id: Option<u64> = None;
+    let mut delete_id: Option<u64> = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let grab = ui.add_enabled(!nodes.is_empty(), egui::Button::new(egui::RichText::new(tl!("Grab Still")).size(11.0)));
+        app.auto.add("lumetri.powerGrade.grab", grab.rect, "Grab Still");
+        if grab.on_hover_text(tl!("Capture clip color pipeline into PowerGrades Gallery")).clicked() {
+            let _ = app.session.execute("color.grabStill", json!({ "clips": [clip.0] }));
+        }
+        for pg in &stills {
+            let hover = tlf!("{tc} ({n} node(s)) — click to apply, right-click to delete", tc = pg.timecode, n = pg.effects.len());
+            let pill = ui.button(egui::RichText::new(format!("★ {}", pg.name)).size(11.0).color(t.accent)).on_hover_text(hover);
+            app.auto.add(&format!("lumetri.powerGrade.{}", pg.id), pill.rect, &pg.name);
+            if pill.clicked() {
+                apply_id = Some(pg.id);
+            }
+            if pill.secondary_clicked() {
+                delete_id = Some(pg.id);
+            }
+        }
+    });
+    if let Some(id) = apply_id {
+        let _ = app.session.execute("color.applyStill", json!({ "id": id, "clips": [clip.0] }));
+    }
+    if let Some(id) = delete_id {
+        let _ = app.session.execute("color.deleteStill", json!({ "id": id }));
+    }
+    ui.separator();
+}
+
+/// Interactive DaVinci Resolve-style `160×160` Color Warper Spider-Web Grid (12 radial hue spokes
+/// + 4 concentric chroma rings + draggable target/warped pin handle).
+fn draw_color_warper_spider_web(
+    app: &mut FilmcraftApp,
+    ui: &mut egui::Ui,
+    clip: ClipId,
+    it: &filmcraft_project::TrackItem,
+    mt: Tick,
+    t: &Tokens,
+) {
+    let Some((warper_idx, warper)) = it.effects.iter().enumerate().find(|(_, fx)| fx.effect == "color_warper") else {
+        return;
+    };
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(tl!("Color Warper (Spider-Web)")).color(t.text).strong().size(11.5));
+
+    let target_hue = (warper.f64_at("target_hue", mt) as f32).rem_euclid(360.0);
+    let sat_center = (warper.f64_at("sat_center", mt) as f32).clamp(0.0, 100.0);
+    let hue_rot = (warper.f64_at("hue_rotate", mt) as f32).clamp(-180.0, 180.0);
+    let chroma_push = (warper.f64_at("chroma_push", mt) as f32).clamp(-100.0, 100.0);
+    let falloff = (warper.f64_at("pin_falloff", mt) as f32).clamp(5.0, 180.0);
+
+    let (area, resp) = ui.allocate_exact_size(vec2(160.0, 160.0), Sense::click_and_drag());
+    app.auto.add("lumetri.colorWarper.canvas", area, "Color Warper Spider-Web");
+
+    let c = area.center();
+    let radius = 68.0_f32;
+    let p = ui.painter();
+    p.circle_filled(c, radius + 8.0, Color32::from_rgb(0x16, 0x18, 0x1c));
+    p.circle_stroke(c, radius + 8.0, Stroke::new(1.0, t.separator));
+
+    let polar = |hue_deg: f32, sat01: f32| -> Pos2 {
+        let rad = hue_deg.to_radians();
+        c + vec2(rad.cos(), -rad.sin()) * (sat01.clamp(0.0, 1.0) * radius)
+    };
+    let warped_polar = |hue_deg: f32, sat01: f32| -> Pos2 {
+        let dh = (hue_deg - target_hue + 540.0).rem_euclid(360.0) - 180.0;
+        let ang_w = (-0.5 * (dh / (falloff * 0.55)).powi(2)).exp();
+        let sat_w = (sat01 * 4.0).clamp(0.0, 1.0) * (-0.5 * ((sat01 - sat_center / 100.0) / 0.45).powi(2)).exp();
+        let w = ang_w * sat_w;
+        polar(hue_deg + hue_rot * w, (sat01 + (chroma_push / 100.0) * w * 0.75).clamp(0.0, 1.0))
+    };
+
+    // 4 concentric chroma rings deformed by the active pin warp
+    for ring in 1..=4 {
+        let sat01 = ring as f32 * 0.25;
+        let pts: Vec<Pos2> = (0..36).map(|k| warped_polar(k as f32 * 10.0, sat01)).collect();
+        p.add(egui::Shape::closed_line(pts, Stroke::new(1.0, Color32::from_rgba_unmultiplied(180, 190, 205, 58))));
+    }
+
+    // 12 radial hue spokes colored around the perimeter
+    for spoke in 0..12 {
+        let hue_deg = spoke as f32 * 30.0;
+        let rgb = filmcraft_color::hsl_to_rgb(hue_deg / 360.0, 0.85, 0.55);
+        let spoke_col = Color32::from_rgba_unmultiplied((rgb[0] * 255.0) as u8, (rgb[1] * 255.0) as u8, (rgb[2] * 255.0) as u8, 130);
+        let bead_col = Color32::from_rgb((rgb[0] * 255.0) as u8, (rgb[1] * 255.0) as u8, (rgb[2] * 255.0) as u8);
+        let pts: Vec<Pos2> = (0..=4).map(|r_idx| warped_polar(hue_deg, r_idx as f32 * 0.25)).collect();
+        p.add(egui::Shape::line(pts, Stroke::new(1.1, spoke_col)));
+        p.circle_filled(polar(hue_deg, 1.06), 3.0, bead_col);
+    }
+
+    let anchor_pt = polar(target_hue, sat_center / 100.0);
+    let warped_pt = polar(target_hue + hue_rot, ((sat_center + chroma_push * 0.75) / 100.0).clamp(0.0, 1.0));
+    p.line_segment([anchor_pt, warped_pt], Stroke::new(1.5, t.accent));
+    p.circle_stroke(anchor_pt, 4.0, Stroke::new(1.2, Color32::WHITE));
+    p.circle_filled(warped_pt, 5.0, t.accent);
+    p.circle_stroke(warped_pt, 5.0, Stroke::new(1.2, Color32::WHITE));
+
+    let drag_key = egui::Id::unique(("cw-spider-origin", clip.0, warper_idx));
+    if resp.double_clicked() {
+        ui.data_mut(|d| d.remove::<(f32, f32)>(drag_key));
+        let _ = app.session.execute("effects.setParam", json!({ "clip": clip.0, "effect": warper_idx, "param": "hue_shift", "value": 0.0 }));
+        let _ = app.session.execute("effects.setParam", json!({ "clip": clip.0, "effect": warper_idx, "param": "sat_shift", "value": 0.0 }));
+        return;
+    }
+
+    if (resp.dragged() || resp.clicked())
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let rel = pos - c;
+        let ptr_hue = (-rel.y).atan2(rel.x).to_degrees().rem_euclid(360.0);
+        let ptr_sat = (rel.length() / radius * 100.0).clamp(0.0, 100.0);
+        let existing_origin: Option<(f32, f32)> = ui.data(|d| d.get_temp(drag_key));
+        let begin = existing_origin.is_none();
+        let (orig_hue, orig_sat) = existing_origin.unwrap_or_else(|| {
+            if pos.distance(warped_pt) <= 16.0 { (target_hue, sat_center) } else { (ptr_hue, ptr_sat) }
+        });
+        if resp.dragged() {
+            ui.data_mut(|d| d.insert_temp(drag_key, (orig_hue, orig_sat)));
+            let dh = ((ptr_hue - orig_hue + 540.0).rem_euclid(360.0) - 180.0).clamp(-180.0, 180.0);
+            let ds = ((ptr_sat - orig_sat) / 0.75).clamp(-100.0, 100.0);
+            for (i, (pname, pval)) in [("target_hue", orig_hue), ("target_sat", orig_sat), ("hue_shift", dh), ("sat_shift", ds)].into_iter().enumerate() {
+                let _ = app.session.execute(
+                    "effects.setParam",
+                    json!({
+                        "clip": clip.0,
+                        "effect": warper_idx,
+                        "param": pname,
+                        "value": pval,
+                        "merge": "colorWarperWeb",
+                        "begin": begin && i == 0,
+                    }),
+                );
+            }
+        } else {
+            let _ = app.session.execute("effects.setParam", json!({ "clip": clip.0, "effect": warper_idx, "param": "target_hue", "value": ptr_hue }));
+            let _ = app.session.execute("effects.setParam", json!({ "clip": clip.0, "effect": warper_idx, "param": "target_sat", "value": ptr_sat }));
+        }
+    } else if !resp.dragged() {
+        ui.data_mut(|d| d.remove::<(f32, f32)>(drag_key));
+    }
+}
+
 pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
     let Some((clip, it)) = selected(app) else {
@@ -36,21 +247,28 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         return;
     };
     let mut bui = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(12.0, 6.0))).id_salt("lumetri2"));
+    let ph = app.session.playhead();
+    let mt = it.effect_time_at(ph.clamp(it.start, it.end() - Tick(1)));
     let Some(idx) = it.effects.iter().position(|e| e.effect == "lumetri") else {
-        bui.add_space(8.0);
-        bui.label(egui::RichText::new(tlf!("Master · {name}", name = it.name)).color(t.text_dim));
-        bui.add_space(8.0);
-        if bui.button(tl!("Add Lumetri Color to clip")).clicked() {
-            let _ = app.session.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"}));
-        }
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(&mut bui, |ui| {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new(tlf!("Master · {name}", name = it.name)).color(t.text_dim));
+            ui.add_space(8.0);
+            if ui.button(tl!("Add Color Grading to clip")).clicked() {
+                let _ = app.session.execute("effects.apply", json!({"clips": [clip.0], "effect": "lumetri"}));
+            }
+            ui.add_space(8.0);
+            sub(ui, &t, tl!("Color Nodes & PowerGrades"));
+            draw_resolve_color_header(app, ui, clip, &it, &t);
+            draw_color_warper_spider_web(app, ui, clip, &it, mt, &t);
+            ui.add_space(20.0);
+        });
         return;
     };
     let e = it.effects[idx].clone();
     // HDR mode: the sequence's working space is Rec. 2100 PQ or HLG
     let hdr = app.session.active_sequence().is_some_and(|q| q.settings.color.working.is_hdr());
     let mut auto_rows: Vec<(String, Rect, &'static str)> = Vec::new();
-    let ph = app.session.playhead();
-    let mt = it.effect_time_at(ph.clamp(it.start, it.end() - Tick(1)));
     let mut actions: Actions = Vec::new();
     // header: clip context + fx toggle
     // the fx toggle is laid out first so a long clip name is truncated instead of widening the panel
@@ -71,10 +289,42 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(&mut bui, |ui| {
         if open_section(ui, app, &e, "Basic Correction", "basic_on", "basic", &mut sections) {
             lut_combo(ui, app, &e, "input_lut", tl!("Input LUT"), true, &mut lut_actions);
+            ui.horizontal(|ui| {
+                let auto_btn = ui.button(tl!("Auto Exposure & Color Balance"));
+                auto_rows.push(("lumetri.autoColor".into(), auto_btn.rect, "Auto Exposure & Color Balance"));
+                if auto_btn.clicked() {
+                    lut_actions.push(("lumetri.autoColor", json!({})));
+                }
+            });
             sub(ui, &t, tl!("Color"));
             slider(ui, &e, mt, "temperature", tl!("Temperature"), Some(Gradient::Temp), &t, &mut actions, clip, idx);
             slider(ui, &e, mt, "tint", tl!("Tint"), Some(Gradient::Tint), &t, &mut actions, clip, idx);
             slider(ui, &e, mt, "saturation", tl!("Saturation"), None, &t, &mut actions, clip, idx);
+            let gc = match e.param("gamut_compression").map(|p| &p.value) {
+                Some(ParamValue::Choice(c)) => *c as usize,
+                _ => 0,
+            };
+            let gc_opts = [tl!("None"), tl!("Luminance and Saturation Preserving")];
+            ui.horizontal(|ui| {
+                ui.add_sized(vec2(110.0, 20.0), egui::Label::new(egui::RichText::new(tl!("Gamut Compression")).color(t.text_dim)));
+                let mut sel = gc.min(1);
+                let r = craft_ui::ComboBox::from_id_salt("lumetri-gamut-comp")
+                    .selected_text(gc_opts[sel])
+                    .width((ui.available_width() - 8.0).max(60.0))
+                    .show_ui(ui, |ui| {
+                        for (i, o) in gc_opts.iter().enumerate() {
+                            if ui.selectable_value(&mut sel, i, *o).changed() {
+                                set(&mut actions, "gamut_compression", json!(i));
+                            }
+                        }
+                    })
+                    .response;
+                auto_rows.push(("lumetri.param.gamut_compression".into(), r.rect, "Gamut Compression"));
+            });
+            if gc == 1 {
+                let r = slider(ui, &e, mt, "gamut_compression_amount", tl!("Compression Amount"), None, &t, &mut actions, clip, idx);
+                auto_rows.push(("lumetri.param.gamut_compression_amount".into(), r, "Compression Amount"));
+            }
             sub(ui, &t, tl!("Light"));
             for (id, label) in [
                 ("exposure", tl!("Exposure")),
@@ -231,10 +481,15 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 ("vignette_midpoint", tl!("Midpoint")),
                 ("vignette_roundness", tl!("Roundness")),
                 ("vignette_feather", tl!("Feather")),
+                ("vignette_aberration", tl!("Aberration")),
             ] {
                 slider(ui, &e, mt, id, label, None, &t, &mut actions, clip, idx);
             }
         }
+        ui.add_space(8.0);
+        sub(ui, &t, tl!("Color Nodes & PowerGrades"));
+        draw_resolve_color_header(app, ui, clip, &it, &t);
+        draw_color_warper_spider_web(app, ui, clip, &it, mt, &t);
         ui.add_space(20.0);
     });
     for (id, r, label) in auto_rows {
@@ -292,6 +547,50 @@ fn open_section(
     open
 }
 
+/// The Color Grading panel's ≡ menu items: Export .cube… saves the grade of the clip the panel
+/// shows (also an Apply Match result) as a 3D LUT (`lumetri.exportCube`; automation id
+/// `panel.menu.LumetriColor.exportCube`). It is enabled only when that clip has an enabled
+/// Color Grading, and exports that clip even when another selected clip has one.
+/// True when the menu should close.
+pub fn panel_menu(app: &mut FilmcraftApp, ui: &mut egui::Ui) -> bool {
+    let shown = selected(app).filter(|(_, it)| it.effects.iter().any(|e| e.enabled && e.effect == "lumetri")).map(|(c, _)| c);
+    let r = ui.add_enabled(shown.is_some(), egui::Button::new(tl!("Export .cube…")));
+    app.auto.add_response("panel.menu.LumetriColor.exportCube", &r, "Export .cube…");
+    if let (true, Some(clip)) = (r.clicked(), shown) {
+        if let Err(e) = crate::menus::invoke(app, ui.ctx(), "lumetri.exportCube", json!({"clip": clip.0})) {
+            app.ui.status = e;
+        }
+        return true;
+    }
+    let has_sel = selected(app).is_some();
+    let r_create = ui.add_enabled(has_sel, egui::Button::new(tl!("Create Color Group")));
+    app.auto.add_response("panel.menu.LumetriColor.createGroup", &r_create, "Create Color Group");
+    if r_create.clicked() {
+        if let Err(e) = app.session.execute("lumetri.createGroup", json!({})) {
+            app.ui.status = e.to_string();
+        }
+        return true;
+    }
+    let r_add = ui.add_enabled(has_sel, egui::Button::new(tl!("Add to Selected Group")));
+    app.auto.add_response("panel.menu.LumetriColor.addToGroup", &r_add, "Add to Selected Group");
+    if r_add.clicked() {
+        if let Err(e) = app.session.execute("lumetri.addToGroup", json!({})) {
+            app.ui.status = e.to_string();
+        }
+        return true;
+    }
+    let muted = app.session.active_sequence().is_some_and(|q| q.mute_color_contrast);
+    let r_mute = ui.add_enabled(app.session.active_sequence().is_some(), egui::Button::new(tl!("Mute Color and Contrast")).selected(muted));
+    app.auto.add_response("panel.menu.LumetriColor.muteColorContrast", &r_mute, "Mute Color and Contrast");
+    if r_mute.clicked() {
+        if let Err(e) = app.session.execute("lumetri.muteColorContrast", json!({})) {
+            app.ui.status = e.to_string();
+        }
+        return true;
+    }
+    false
+}
+
 /// LUT menu: None, built-ins, the project's LUT library, Browse… (file dialog → `lut.import`).
 fn lut_combo(ui: &mut egui::Ui, app: &mut FilmcraftApp, e: &EffectInstance, param: &str, label: &str, input: bool, out: &mut Vec<(&'static str, Value)>) {
     let t = app.tokens;
@@ -324,7 +623,7 @@ pub(crate) enum LutPick {
 }
 
 /// The LUT combo box for the LUT reference `cur`: None, the built-in input LUTs (`input`) or looks,
-/// the project's LUT library, Browse…. Shared by the Lumetri Color panel and Effect Controls (#1123).
+/// the project's LUT library, Browse…. Shared by the Color Grading panel and Effect Controls (#1123).
 /// The entries get automation ids `<auto_id>.lut.<reference>` (`.lut.none`) and `<auto_id>.browse`.
 pub(crate) fn lut_menu(
     ui: &mut egui::Ui,

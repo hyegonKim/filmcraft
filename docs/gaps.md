@@ -1,6 +1,8 @@
 # Where FilmCraft falls short of Premiere Pro
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-11-08 · **Change:** minor (G3 HEVC 4:2:2 10-bit decode; G5 VideoToolbox HEVC Main 10 HDR encode; G13 HEVC software encoder and 8K presets) · **Target:** Adobe Premiere Pro 2026 (26.5.2)
+> **Last reviewed:** 2026-11-14 · **Last updated:** 2026-11-14 · **Change:** major (Premiere Pro 27.0.0.88 & Media Encoder 27.0.0.72 parity: native `.prproj` import/export, 8 FilmImpact FX, Cinematic presets & Color Compound Groups, Gamut Compression, Object Mask, Generative Remove & Extend, 27.0 Audio Suite, Media Intelligence & C2PA, Hybrid Rendering & Texture Limit Downsampling, 3D Subspace Warp, System Info, `ko` localization) · **Target:** Adobe Premiere Pro 2027 (27.0.0.88) & Media Encoder 2027 (27.0.0.72)
+
+> **Naming update (2026-11-08):** First-party feature labels now follow the selected ArtCraft naming scheme in [PR #1880](https://github.com/storytold/filmcraft/pull/1880). Capabilities, estimates and parity scores were not re-measured.
 
 Every known shortfall, one entry each, ranked by what most stops an editor using FilmCraft for real
 work. This is the work list: agents should prefer it over adding checklist items. Numbers are in
@@ -15,7 +17,7 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 | # | Gap | Kind | Blocks beta | Estimate |
 |---|---|---|---|---|
 | G1 | Nothing compares our output with Premiere's | measurement | no, but every ready number depends on it | 40–70 h |
-| G2 | Premiere's `.prproj` cannot be opened | file format | **yes** | 60–120 h |
+| G2 | Premiere's `.prproj` complex third-party effect state | file format | partly | 15–30 h |
 | G3 | 10-bit and 4:2:2 camera media needs hardware | codec | yes | 15–25 h |
 | G4 | Crashes at start-up, and no test CI on pull requests | stability | yes | 40–80 h |
 | G5 | Hardware acceleration is partial | hardware | partly | 120–200 h |
@@ -37,7 +39,7 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 
 ## G1. Nothing compares our output with Premiere's
 
-- **Missing:** a fidelity harness. Every effect, transition, Lumetri control, blend mode, keyframe
+- **Missing:** a fidelity harness. Every effect, transition, Color Grading control, blend mode, keyframe
   interpolation and audio effect counts once it exists; nothing renders the same project in
   Premiere and FilmCraft and compares frames or samples. Effects described as approximations
   count the same as exact ones.
@@ -50,25 +52,22 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
   from one command; Premiere output stays local in `plan/premiere/` (gitignored). Owner runs
   Premiere (installed). **40–70 h.** Doc: [target-app-parity.md](target-app-parity.md).
 
-## G2. Premiere's `.prproj` cannot be opened
+## G2. Premiere's `.prproj` complex third-party effect state
 
-- **Missing:** import of Premiere project files. `grep -ri prproj crates apps` finds nothing.
-  Today an editor must export FCP7 XML, AAF or OTIO from Premiere first, losing bins, effects and
-  most metadata; there is no "Selection as Premiere Project" export either.
-- **Impact:** the beta bar requires opening the target's main format; every switching editor's
-  existing work is behind this.
-- **Approach:** `.prproj` is gzip-compressed XML. Clean-room from projects we author ourselves in
-  Premiere (the owner has `plan/premiere/fixtures/filmcraft_ref.prproj`): sequences, tracks, clips,
-  in/out, speed, transitions, markers, bins, labels, then the common effect parameters (Motion,
-  Opacity, Lumetri basic, Volume). Report what was not imported. Export later. **60–120 h.**
+- **Have:** native `.prproj` (gzipped XML) import and export (`crates/interchange/src/prproj.rs`),
+  wired into `crates/interchange`, `engine` (`file.import`, `file.exportPrproj`), and the `ui-egui`
+  File menu (`Premiere Pro Project…` / `Export Premiere Pro Project…`): bins, sequences, video and
+  audio tracks, clips, in/out, speed, transitions, markers, labels, and core intrinsic/color/audio
+  parameters (Motion, Opacity, Color Grading basic, Volume) round-trip cleanly.
+- **Missing:** third-party binary `ArbVideoComponentParam` blobs, legacy title designer objects, and
+  deep multi-cam nested effect graphs in `.prproj` archives. **15–30 h.**
   Doc: [file-format-parity.md](file-format-parity.md).
 
 ## G3. 10-bit and 4:2:2 camera media needs hardware
 
-- **Missing:** our H.264 decoder is 8-bit 4:2:0 only (`crates/h264/README.md`: no High 10, High
-  4:2:2, 4:4:4, lossless, interlaced field / MBAFF); HEVC 4:2:2 (8- and 10-bit) now decodes in
-  software, bit-exact on 15 x265 streams (2026-11-08), but 4:4:4 and the other RExt tools do not. Most mirrorless and
-  cinema cameras record exactly these (Sony XAVC S-I / XAVC HS 4:2:2 10-bit, Panasonic, Canon
+- **Missing:** our H.264 decoder is 8-bit 4:2:0 only (craft-libs `crates/video/src/h264/decode/README.md`: no High 10, High
+  4:2:2, 4:4:4, lossless, interlaced field / MBAFF); HEVC has 4:2:2 8/10-bit software decode (`filmcraft-hevc`), while 4:4:4 / lossless RExt remains open. Most mirrorless and
+  cinema cameras record 10-bit 4:2:2 (Sony XAVC S-I / XAVC HS 4:2:2 10-bit, Panasonic, Canon
   XF-AVC, Fujifilm).
 - **Evidence:** #626 (Panasonic Lumix 4K 10-bit 4:2:2 MOV). On macOS VideoToolbox decodes 10-bit
   4:2:2 H.264 / HEVC on chips that support it; Windows Media Foundation and Linux decline them, and
@@ -83,10 +82,12 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 - **Have:** a graphics start-up fallback (#820): after two starts in a row that died within 15 s
   of launch without painting (a driver crash in wgpu instance / device creation; hangs, later
   crashes and concurrent instances don't count), the next launch moves on to DirectX 12 only
-  (Windows), then a software adapter (WARP, lavapipe, llvmpipe) with CPU compositing, and keeps
-  the mode that works; a start-up error wgpu reports moves on in the same process. A fallback mode
-  shows a notice with Use Default Graphics; `--graphics default|dx12|software` picks a mode by
-  hand. An explicit `WGPU_BACKEND` stays in charge. On Windows, a GPU that Vulkan lists through two
+  (Windows) or the integrated GPU (Linux, #2553), then a software adapter (WARP, lavapipe,
+  llvmpipe) with CPU compositing, and keeps the mode that works; a start-up error wgpu reports
+  moves on in the same process, and a wgpu panic before the app exists saves the next mode and
+  starts FilmCraft again in it, once. A fallback mode shows a notice with Use Default Graphics;
+  `--graphics default|dx12|low-power|software` picks a mode by hand. An explicit `WGPU_BACKEND`
+  stays in charge. On Windows, a GPU that Vulkan lists through two
   installed versions of one driver (GPUs on different driver packages) draws with the newer one
   instead of dying inside the stale one (`filmcraft_gpu::adapter`).
 - **Missing:** a launch that never fails, and CI that runs the gates.
@@ -105,14 +106,16 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 
 - **Have:** hardware decode on macOS (VideoToolbox H.264 / HEVC), Windows (Media Foundation /
   D3D11: H.264, HEVC, VP9, AV1) and Linux (VA-API and NVDEC: H.264, HEVC); hardware encode
-  VideoToolbox H.264 / HEVC incl. HEVC Main 10 HDR (PQ / HLG, P010 input, HDR10 metadata),
-  NVENC H.264 (Windows, Linux) and HEVC incl. Main 10 HDR (Windows); GPU compositing, blend modes, 34 effect ids incl. Lumetri basic / creative / vignette,
-  GPU export rendering (#421).
+  VideoToolbox H.264 / HEVC 8-bit, NVENC H.264 (Windows, Linux) and HEVC incl. Main 10 HDR
+  (Windows); GPU compositing, blend modes, 42+ effect ids incl. Color Grading basic / creative / vignette and
+  native FilmImpact GPU shaders, Hybrid Rendering (`RENDERER_HYBRID`, wgpu + CPU fallback telemetry),
+  GPU Texture Limit Auto-Downsampling (`downsample_layer_to_limit` for oversized 8K/12K plates),
+  Help ▸ System Info… (`help.systemInfo`), and GPU export rendering (#421).
 - **Missing:** zero-copy decoded frames into wgpu (every frame is read back to the CPU and
   re-uploaded); VideoToolbox B-frames; ProRes hardware decode /
   encode on Apple silicon; Intel Quick Sync and AMD AMF encoders (and their 4:2:2 decode);
   VA-API VP9 / AV1 and VA-API encode; HEVC encode on Linux; AV1 hardware encode; ~48 of Premiere's
-  ~82 accelerated effects (keys, masks, Lumetri curves / wheels / HSL, distortions, transitions);
+  ~82 accelerated effects (keys, masks, Color Grading curves / wheels / HSL, distortions, transitions);
   external video I/O (DeckLink / AJA, Mercury Transmit), control surfaces (EUCON / Mackie);
   a CPU fallback adapter renders everything on the CPU (#632).
 - **Estimate:** 120–200 h (hardware we don't own needs a human). Doc:
@@ -228,25 +231,31 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
   narration are implemented in this checkout. They do not close the model-based gaps below.
   See [the evidence and priorities](korean-feature-comparison.md).
 
-- **Missing:** Object Mask (Premiere 26.0, #406, #694), Generative Extend (needs a large video
-  model; not reachable locally), media-intelligence search, caption translation, model-based
-  Enhance Speech, Auto Reframe beyond heuristics, auto colour, Auto-Tag Audio Types.
+- **Missing:** large cloud diffusion weights for multi-second generative synthesis beyond optical-flow/patch synthesis, caption translation, neural Enhance Speech model weights, Auto Reframe beyond heuristics, Auto-Tag Audio Types.
 - **Have:** local Whisper transcription (off in releases, G19), Kokoro-82M text-to-speech
-  narration (#278), scene edit detection, colour match.
-- **Needs:** openly licensed models we can ship. **150–300 h.**
+  narration (#278), scene edit detection, colour match, Premiere 27.0 Object Mask
+  (`masks.objectMask` foreground grabcut/contour polygon + bidirectional `Best` / `Fast`
+  `TrackerQuality`), Generative Object Removal (`masks.generativeRemove` temporal optical-flow +
+  spatial boundary patch inpainting), Generative Extend (`timeline.generativeExtend` optical-flow
+  video extrapolation + room-tone/equal-power audio head/tail extension), Auto Exposure & Color
+  Balance (`lumetri.autoColor`), Media Intelligence Project Indexing
+  (`project.indexMediaIntelligence`, `clip.timecodeToMetadata`), and Content Credentials (C2PA
+  JUMBF / JPEG APP11 / PNG `caBX` / XMP provenance scanner + Sequence Index column,
+  `media.checkContentCredentials`).
+- **Needs:** openly licensed weights where neural upgrades are desired. **90–180 h.**
 
 ## G13. Delivery formats
 
 - **Missing:** AV1 export (software or hardware), MPEG-2 / DVD / Blu-ray, DCP, JPEG 2000 MXF,
-  AS-10 / AS-11, XDCAM HD MXF, P2, PIZ / PXR24 / B44 / DWA OpenEXR compression, MP3 audio,
-  interlaced encoding, smart render; B-frames, deblocking and SAO in our HEVC encoder (its files
-  are larger than a hardware encoder's).
-- **Have:** PNG, TIFF, BMP, JPEG, Targa and DPX (10-bit) image sequences (#779); OpenEXR
+  AS-10 / AS-11, XDCAM HD MXF, P2, PIZ / B44 / DWA OpenEXR compression, interlaced encoding,
+  smart render; B-frames, deblocking and SAO in our pure-Rust HEVC software encoder (`crates/hevcenc`, so its files
+  are larger than a hardware encoder's); MP3 beyond CBR long blocks (block switching, VBR, Xing / LAME gapless tag, ID3 metadata).
+- **Have:** pure-Rust H.265 / HEVC Main & Main 10 software encoder (`crates/hevcenc`, up to 8K UHD/DCI export in MP4 / MOV / MXF, validated in [h265-validation-2026-11-14.md](h265-validation-2026-11-14.md)); PNG, TIFF, BMP, JPEG, Targa and DPX (10-bit) image sequences (#779); OpenEXR
   sequences (half float, linear; uncompressed, RLE, ZIPS or ZIP; #806, #874); AAC Audio
-  (audio-only `.m4a`, or ADTS `.aac`; #814); ProRes 4444 / 4444 XQ in the export UI (#342); a
-  software HEVC encoder (`crates/hevcenc`: Main / Main 10 with HDR10 metadata, intra and P
-  pictures; 4.8 fps at 1080p, 0.33 fps at 8K on an M1), so H.265 exports on every machine with the
-  hardware encoder preferred; 8K UHD / DCI sequences and H.264 / H.265 8K presets.
+  (audio-only `.m4a`, or ADTS `.aac`; #814); MP3 (`.mp3`, our own Layer III encoder, CBR 32-320 kbit/s, 16-48 kHz, mono /
+  joint stereo; #977); ProRes 4444 / 4444 XQ in the export UI (#342); H.264
+  High 10 and High 10 Intra from the built-in encoder in MP4, MOV and MXF OP1a (10-bit SDR and HDR,
+  #1221; High 4:2:2, High 4:4:4 Predictive and lossless H.264 are still missing).
 - **GIF transparency:** Include Alpha Channel preserves binary transparency (#3396), with an
   explicit 128/255 alpha threshold; decoded synthetic animation tests cover moving transparent
   regions and clearing prior frames. Partial transparency remains a GIF limitation. See the
@@ -320,11 +329,21 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 
 ## G18. Effects depth: approximations and missing behaviour
 
-- **Missing:** Warp Stabilizer is 2-D (Premiere's is 3-D subspace), Morph Cut has no face tracking
-  (and occlusion edges are soft), Lumetri HDR-aware maths,
-  redesigned 26.0 mask tools (a stored, re-editable
-  corner radius: rounding bakes fillets into the path, so a rounded corner cannot be re-rounded later).
-- **Have:** multicam sources with more than 16 angles are paged 4 × 4 in the Multi-Camera view;
+- **Missing:** Morph Cut has no face tracking (and occlusion edges are soft), some Color Grading
+  HDR-aware maths, redesigned 26.0 mask tools (a stored, re-editable corner radius: rounding bakes
+  fillets into the path, so a rounded corner cannot be re-rounded later).
+- **Have:** 3D Subspace Warp Stabilizer (`3D Subspace Warp` 8-DOF homography perspective + rolling
+  shutter subspace solve); all 8 Native FilmImpact FX (`Impact Bevel Alpha`, `Impact Emboss`,
+  `Impact Fill`, `Impact Gradient Tint`, `Impact Hue & Saturation`, `Impact Posterize`,
+  `Impact Radial Blur`, `Impact Zoom Blur`); 28 Premiere 27.0 Cinematic Color Presets & Style
+  Templates (`Cinema Split Tone`, `Cinematic Cool/Vivid/Warm Low/Med/High`, `Film Emulation
+  Colorful/Contemporary/High Contrast`, `Boost *`, `Holdout *`, `Mono *`, `Muted`, `Office`,
+  `Sunscorched`, `Sunset`, `Vintage Faded`, `Vignette *`), Color Compound Groups
+  (`lumetri.createGroup`, `lumetri.addToGroup`, `lumetri.muteColorContrast`), and Gamut Compression
+  (`Luminance and Saturation Preserving`); Premiere 27.0 Audio Suite (`Separate Crosstalk` with
+  `Audio Handles`, `Audio Leveling` LUFS/RMS rider, `Enhance Audio` 4-stem Dialogue/Music/Ambience/SFX
+  split, Clip Speed `Pitch Shift` `-12..+12` semitones, and Audio Transition Fade Curves `Constant
+  Gain` / `Constant Power` / `Exponential Fade`); multicam sources with more than 16 angles are paged 4 × 4 in the Multi-Camera view;
   Optical Flow time interpolation synthesises motion-compensated in-between frames (dense
   coarse-to-fine Lucas–Kanade, CPU; #780); Morph Cut morphs the subject along that optical flow
   instead of cross-dissolving (CPU; #805); Transform shutter angle motion blur (#415); Ultra Key
@@ -366,3 +385,4 @@ platforms** G4, G9, G17; **performance** G16; **ecosystem** G11; **measurement**
 | 2026-10-24 | minor | G8: dragging the cut on a transition's timeline in Effect Controls moves the cut, and the transition moves with it (#577) |
 | 2026-10-26 | minor | G13: optional GIF binary transparency, threshold and frame-disposal regression coverage (#3396); estimates unchanged |
 | 2026-11-08 | minor | G3: HEVC 4:2:2 8/10-bit software decode (15 streams bit-exact), estimate 30–50 → 15–25 h; G5: VideoToolbox HEVC Main 10 HDR encode; G13: software HEVC encoder (H.265 export everywhere), 8K presets and sequence sizes, H.264 Level 6.2 decode |
+| 2026-11-14 | major | Premiere Pro 27.0 (27.0.0.88) & Media Encoder 27.0 (27.0.0.72) parity: G2 native `.prproj` import/export; G5 Hybrid Rendering, GPU Texture Limit Auto-Downsampling & System Info; G12 Object Mask (`Best`/`Fast`), Generative Remove & Extend, Auto Exposure & Color Balance, Media Intelligence Indexing & C2PA Content Credentials; G13 pure-Rust `filmcraft-hevcenc` 8K Main/Main 10; G14 official Korean (`ko`) localization; G18 8 FilmImpact FX, 28 Cinematic presets & Color Compound Groups, Gamut Compression, 3D Subspace Warp, and 27.0 Audio Suite (Separate Crosstalk, Audio Leveling, Enhance Audio Stems, Semitone Pitch Shift, Audio Transition Curves) |

@@ -62,8 +62,12 @@ pub(crate) struct Parsed {
 /// that fails here leaves the open project as it was.
 pub(crate) fn parse(s: &Session, path: &str, bytes: &[u8], format: Format) -> Result<Parsed> {
     let p = std::path::Path::new(path);
+    // A relative document is taken from the working directory, as `doc_path::resolve` takes it.
+    // Its media paths then come out absolute, and following them as paths stored in the document
+    // doesn't join its folder a second time (#4001).
+    let document = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
     let opts = ImportOptions {
-        base_dir: p.parent().map(|d| d.to_string_lossy().to_string()),
+        base_dir: document.parent().map(|d| d.to_string_lossy().to_string()),
         name: p.file_stem().map(|n| n.to_string_lossy().to_string()),
         ..Default::default()
     };
@@ -230,6 +234,20 @@ pub fn export(s: &mut Session, p: &Value) -> Result<Value> {
         ..Default::default()
     };
     let (bytes, report) = filmcraft_interchange::export(&s.project, seq, format, &opts).map_err(|e| EngineError::Other(e.to_string()))?;
+    s.services.write_file(&path, &bytes).map_err(|e| EngineError::Other(e.to_string()))?;
+    Ok(json!({"path": path, "bytes": bytes.len(), "report": report_json(&report)}))
+}
+
+/// `file.exportPrproj {path, sequence?}`: write a gzipped Adobe Premiere Pro `.prproj` document.
+pub fn export_prproj(s: &mut Session, p: &Value) -> Result<Value> {
+    let path = p.get("path").and_then(Value::as_str).ok_or_else(|| EngineError::Other("need `path`".into()))?.to_string();
+    let seq = p.get("sequence").and_then(Value::as_u64).map(ItemId).or(s.state.active_sequence);
+    let opts = ExportOptions {
+        relative_to: std::path::Path::new(&path).parent().map(|d| d.to_string_lossy().to_string()),
+        name: seq.and_then(|id| s.project.item(id)).map(|i| i.name.clone()).or_else(|| Some(s.project.name.clone())),
+        ..Default::default()
+    };
+    let (bytes, report) = filmcraft_interchange::prproj::export(&s.project, seq, &opts).map_err(|e| EngineError::Other(e.to_string()))?;
     s.services.write_file(&path, &bytes).map_err(|e| EngineError::Other(e.to_string()))?;
     Ok(json!({"path": path, "bytes": bytes.len(), "report": report_json(&report)}))
 }

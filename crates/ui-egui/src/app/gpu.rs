@@ -46,13 +46,19 @@ impl FilmcraftApp {
             self.disable_gpu("device error");
             return None;
         }
+        let downsample = self.session.project.settings.gpu_texture_limit_downsample;
+        let hybrid = self.session.project.settings.renderer == filmcraft_engine::project_tools::RENDERER_HYBRID;
         let g = self.gpu.as_mut()?;
+        g.compositor.auto_downsample_oversized = downsample;
+        g.compositor.hybrid_mode = hybrid;
         if g.last_key == Some(key)
             && let Some(t) = g.texture
         {
             return Some((t, g.size));
         }
-        if plan_side(&plan.plan) > g.max_texture as usize {
+        let (out_w, out_h) = plan.plan.output_size();
+        let out_exceeds = out_w.max(out_h) > g.max_texture as usize;
+        if out_exceeds || (!downsample && !hybrid && plan_side(&plan.plan) > g.max_texture as usize) {
             self.disable_gpu("frame larger than the GPU's maximum texture size");
             return None;
         }

@@ -287,6 +287,10 @@ fn typed_body(ui: &mut egui::Ui, cx: &mut Ctx, st: &EssentialSound, items: &[Tra
                     });
                     slot(ui, cx, tl!("DeEss"), "repair.deess", st.repair.deess, on);
                     slot(ui, cx, tl!("Reduce Reverb"), "repair.reverb", st.repair.reverb, on);
+                    if kind == AudioType::Dialogue {
+                        ui.add_space(6.0);
+                        separate_crosstalk_ui(ui, cx, on);
+                    }
                 }
                 Section::Clarity => {
                     slot(ui, cx, tl!("Dynamics"), "clarity.dynamics", st.clarity.dynamics, on);
@@ -329,8 +333,70 @@ fn typed_body(ui: &mut egui::Ui, cx: &mut Ctx, st: &EssentialSound, items: &[Tra
             ui.add_space(8.0);
         }
     }
+    enhance_stems_section(ui, cx, st, collapsed);
     let r = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover()).0;
     ui.painter().line_segment([r.left_top(), r.right_top()], Stroke::new(1.0, t.separator));
+}
+
+fn separate_crosstalk_ui(ui: &mut egui::Ui, cx: &mut Ctx, active: bool) {
+    let t = cx.t;
+    let hid = egui::Id::unique("es-crosstalk-handles");
+    let current = ui.data_mut(|m| m.get_temp::<String>(hid).unwrap_or_else(|| "1s".to_string()));
+    ui.add_enabled_ui(active, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(tl!("Audio Handles")).color(t.text_dim).size(11.5));
+            let shown = if current == "none" { tl!("None").to_string() } else { current.clone() };
+            let mut next = None;
+            let cb = craft_ui::ComboBox::from_id_salt("es-crosstalk-handles-cb").selected_text(shown).width(84.0).show_ui(ui, |ui| {
+                for (val, label) in [("none", tl!("None")), ("1s", "1s"), ("2s", "2s"), ("3s", "3s"), ("4s", "4s"), ("5s", "5s")] {
+                    if ui.selectable_label(current == val, label).clicked() {
+                        next = Some(val.to_string());
+                    }
+                }
+            });
+            cx.auto.add("essentialSound.crosstalk.handles", cb.response.rect, "Audio Handles");
+            if let Some(v) = next {
+                ui.data_mut(|m| m.insert_temp(hid, v));
+            }
+        });
+    });
+    let handles = ui.data_mut(|m| m.get_temp::<String>(hid).unwrap_or_else(|| "1s".to_string()));
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
+    let br = Rect::from_min_size(r.min + vec2(0.0, 2.0), vec2(154.0, 24.0));
+    if button(ui, cx, br, tl!("Separate Crosstalk"), "audio.separateCrosstalk") && active {
+        cx.run("audio.separateCrosstalk", json!({"audioHandles": handles}));
+    }
+}
+
+fn enhance_stems_section(ui: &mut egui::Ui, cx: &mut Ctx, st: &EssentialSound, collapsed: &[String]) {
+    let t = cx.t;
+    let key = "essentialSound:EnhanceAudio";
+    let open = !collapsed.contains(&key.to_string());
+    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
+    ui.painter().line_segment([r.left_top(), r.right_top()], Stroke::new(1.0, t.separator));
+    icons::paint(
+        ui.painter(),
+        Rect::from_center_size(pos2(r.min.x + 10.0, r.center().y), vec2(11.0, 11.0)),
+        if open { Icon::ChevronDown } else { Icon::ChevronRight },
+        t.text,
+    );
+    ui.painter().text(pos2(r.min.x + 30.0, r.center().y), Align2::LEFT_CENTER, tl!("Enhance Audio"), Tokens::semibold(13.0), t.text);
+    cx.auto.add("essentialSound.section.EnhanceAudio", r, "Enhance Audio");
+    let sw = Rect::from_center_size(pos2(r.max.x - 16.0, r.center().y), vec2(30.0, 15.0));
+    if switch(ui, cx, sw, st.stems.enabled, "essentialSound.section.EnhanceAudio.toggle", "Enhance Audio") {
+        cx.set("stems.enabled", json!(!st.stems.enabled), true);
+    } else if resp.clicked() {
+        cx.actions.push(("ui.twirl".into(), json!({"key": key, "open": !open})));
+    }
+    if open {
+        ui.add_space(4.0);
+        let on = st.stems.enabled;
+        slider(ui, cx, tl!("Dialogue"), "stems.dialogue", st.stems.dialogue, (0.0, 200.0), 0, "%", on);
+        slider(ui, cx, tl!("Music"), "stems.music", st.stems.music, (0.0, 200.0), 0, "%", on);
+        slider(ui, cx, tl!("Ambience"), "stems.ambience", st.stems.ambience, (0.0, 200.0), 0, "%", on);
+        slider(ui, cx, tl!("SFX"), "stems.sfx", st.stems.sfx, (0.0, 200.0), 0, "%", on);
+        ui.add_space(8.0);
+    }
 }
 
 fn loudness(ui: &mut egui::Ui, cx: &mut Ctx, st: &EssentialSound, items: &[TrackItem]) {
@@ -348,6 +414,8 @@ fn loudness(ui: &mut egui::Ui, cx: &mut Ctx, st: &EssentialSound, items: &[Track
     if items.len() > 1 {
         ui.label(egui::RichText::new(tlf!("Matches each of the {n} clips on its own.", n = items.len())).color(t.text_faint).size(11.0));
     }
+    ui.add_space(6.0);
+    slot(ui, cx, tl!("Audio Leveling"), "loudness.leveling", st.loudness.leveling, st.loudness.enabled);
 }
 
 fn ducking(ui: &mut egui::Ui, cx: &mut Ctx, st: &EssentialSound, on: bool) {

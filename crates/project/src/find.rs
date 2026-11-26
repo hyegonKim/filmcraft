@@ -89,7 +89,7 @@ pub struct SearchBin {
 }
 
 /// The columns offered by the Find dialog, in its order (metadata fields after the built-ins).
-pub const COLUMNS: [&str; 15] = [
+pub const COLUMNS: [&str; 17] = [
     "All",
     "Name",
     "Label",
@@ -105,6 +105,8 @@ pub const COLUMNS: [&str; 15] = [
     "Log Note",
     "Scene",
     "Shot",
+    "Content Credentials",
+    "Media Intelligence",
 ];
 
 /// The text of one column of an item (empty when the item has no such value).

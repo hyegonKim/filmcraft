@@ -4,7 +4,7 @@
 # Clean-room: every entry was written from the plain meaning of the English text using ordinary
 # Korean video-editing vocabulary (시퀀스, 타임라인, 트랙, 클립, 재생 헤드, 빈, 렌더, 내보내기…). No
 # proprietary localisation resource, string table or product UI was consulted or copied; add entries
-# the same way. Product and technology names (FilmCraft, ArtCraft, Lumetri, ProRes, LUFS…) keep their
+# the same way. Product and technology names (FilmCraft, ArtCraft, ProRes, LUFS…) keep their
 # spelling. Hangul is drawn with an installed system font (Malgun Gothic, Apple SD Gothic Neo, Noto
 # Sans CJK KR…, see cjk.rs); native-speaker review welcome.
 
@@ -102,10 +102,10 @@
 	Add Guide	안내선 추가
 	Add Guide…	안내선 추가…
 	Add keyframe	키프레임 추가
-	Add Lumetri Color to clip	클립에 Lumetri Color 추가
+	Add Color Grading to clip	클립에 색 보정 추가
 	Add Marker	마커 추가
 	Add Marker (M)	마커 추가(M)
-	Add media to your project. Drop files anywhere in the window, or choose a source below.	프로젝트에 미디어를 추가합니다. 창 아무 곳에나 파일을 놓거나 아래에서 소스를 선택하세요.
+	Add media to your project. Drop files or folders anywhere in the window, or choose a source below.	프로젝트에 미디어를 추가합니다. 창 아무 곳에나 파일이나 폴더를 놓거나 아래에서 소스를 선택하세요.
 	Add New Caption Track…	새 자막 트랙 추가…
 	Add Property…	속성 추가…
 	Add Range Marker	범위 마커 추가
@@ -1034,7 +1034,7 @@
 	Enable hardware accelerated decoding (requires restart)	하드웨어 가속 디코딩 사용(재시작 필요)
 	Enable HSL Secondary	HSL 보조 사용
 	Enable language auto-detection	언어 자동 감지 사용
-	Enable Mercury Transmit	Mercury Transmit 사용
+	Enable External Video Output	외부 비디오 출력 사용
 	Enable ProRes hardware accelerated encoding, if available	가능한 경우 ProRes 하드웨어 가속 인코딩 사용
 	Enable proxies	프록시 사용
 	Enable Remix	리믹스 사용
@@ -1223,7 +1223,7 @@
 	Font Size	글꼴 크기
 	Font Style	글꼴 스타일
 	Fonts used in the project:	프로젝트에 사용된 글꼴:
-	For color management parameters, go to the Settings tab in the Lumetri Color panel.	색상 관리 매개변수는 Lumetri 색상 패널의 설정 탭에서 지정합니다.
+	For color management parameters, go to the Settings tab in the Color Grading panel.	색 관리 매개변수는 색 보정 패널의 설정 탭에서 변경할 수 있습니다.
 	Forest	포레스트
 	Format	형식
 	Format and size	형식 및 크기
@@ -1679,7 +1679,7 @@
 	Lighting Effects	조명 효과
 	Lightning	번개
 	Lights & Blurs	조명 및 흐림
-	Lights & Glows	조명 및 글로우
+	Lights & Glows	조명 및 광선
 	Limiter	리미터
 	Limiter Release	리미터 릴리스
 	Limiter Threshold	리미터 임계값
@@ -1755,10 +1755,9 @@
 	Luma Min / Max	루마 최소/최대
 	Luma Source	루마 소스
 	Luma vs Sat	휘도 대 채도
-	Lumetri	Lumetri
-	Lumetri Color	Lumetri 색상
-	Lumetri Presets	Lumetri 사전 설정
-	Lumetri Scopes	Lumetri 스코프
+	Color Grading	색 보정
+	Color Grading Presets	색 보정 사전 설정
+	Video Scopes	비디오 스코프
 	Luminance	휘도
 	Luminance Threshold	휘도 임계값
 	Luminosity	광도
@@ -2581,6 +2580,7 @@
 	Reverse Field Dominance	필드 우선순위 반전
 	Reverse Match Frame	역방향 프레임 일치
 	Reverse Speed	역방향 속도
+	Maintain Audio Pitch	오디오 피치 유지
 	Reverse the order	순서 반대로
 	Revert	되돌리기
 	Revert Remix	리믹스 되돌리기
@@ -2934,6 +2934,7 @@
 	Soften Harshness	거친 소리 완화
 	Softness	부드러움
 	software rendering	소프트웨어 렌더링
+	integrated GPU	내장 GPU
 	Solarize	솔라리스
 	Solid	단색
 	Solid Colors	단색
@@ -3711,6 +3712,183 @@
 	Previous	이전
 	Next	다음
 	Enter a valid HH:MM:SS:FF timecode	올바른 HH:MM:SS:FF 타임코드를 입력하세요
-	Frame Size Preset:	프레임 크기 사전 설정:
-	Vertical (1080 × 1920)	세로 (1080 × 1920)
-	Square (1080 × 1080)	정사각형 (1080 × 1080)
+
+# Export: H.264 High 10 and all-intra (#1221).
+	High 10	High 10
+	10-bit color	10비트 색상
+	All Intra	올 인트라
+	Every frame a keyframe (edit-friendly, larger files)	모든 프레임을 키프레임으로(편집하기 쉬움, 파일 크기 증가)
+	H.264 High 10 Master	H.264 High 10 마스터
+	H.264 High 10 Intra	H.264 High 10 Intra
+	H.264 High 10 (10-bit 4:2:0) at the sequence's size, constant quality CRF 16, AAC 320 kbps; a 10-bit master	H.264 High 10 (10비트 4:2:0), 시퀀스 크기, 고정 품질 CRF 16, AAC 320 kbps, 10비트 마스터
+	H.264 High 10 Intra (10-bit 4:2:0, every frame a keyframe), CRF 12, AAC 320 kbps; an edit-friendly intermediate	H.264 High 10 Intra (10비트 4:2:0, 모든 프레임이 키프레임), CRF 12, AAC 320 kbps, 편집하기 쉬운 중간 파일
+	List Color Grading Presets	색 보정 사전 설정 목록
+	Apply Color Grading Preset	색 보정 사전 설정 적용
+	Color Grading Preset Thumbnails	색 보정 사전 설정 썸네일
+	Toggle Color Grading Section	색 보정 섹션 전환
+	Color Grading Section	색 보정 섹션
+	Read Video Scopes	비디오 스코프 읽기
+
+# Premiere Pro 2027 (27.0.0.88) & Media Encoder 2027 (27.0.0.72) Parity
+	Impact Bevel Alpha	임팩트 베벨 알파
+	Impact Emboss	임팩트 엠보스
+	Impact Fill	임팩트 채우기
+	Impact Gradient Tint	임팩트 그레이디언트 색조
+	Impact Hue & Saturation	임팩트 색조 및 채도
+	Impact Posterize	임팩트 포스터화
+	Impact Radial Blur	임팩트 방사형 흐림
+	Impact Zoom Blur	임팩트 줌 흐림
+	Style Templates	스타일 템플릿
+	Cinematic Tools	시네마틱 도구
+	Impact Zoom Punch In	임팩트 줌 펀치 인
+	Duotone Poster	듀오톤 포스터
+	Bevel Title Polish	베벨 타이틀 폴리시
+	Cinema Halation Bloom	시네마 할레이션 블룸
+	Style Templates ▸ Impact Zoom Punch In	스타일 템플릿 ▸ 임팩트 줌 펀치 인
+	Style Templates ▸ Duotone Poster	스타일 템플릿 ▸ 듀오톤 포스터
+	Style Templates ▸ Bevel Title Polish	스타일 템플릿 ▸ 베벨 타이틀 폴리시
+	Cinematic Tools ▸ Cinema Split Tone	시네마틱 도구 ▸ 시네마 스플릿 톤
+	Cinematic Tools ▸ Cinema Halation Bloom	시네마틱 도구 ▸ 시네마 할레이션 블룸
+	Cinema Split Tone	시네마 스플릿 톤
+	Cinematic Cool Low	시네마틱 쿨(약)
+	Cinematic Cool Med	시네마틱 쿨(중)
+	Cinematic Cool High	시네마틱 쿨(강)
+	Cinematic Vivid Low	시네마틱 비비드(약)
+	Cinematic Vivid Med	시네마틱 비비드(중)
+	Cinematic Vivid High	시네마틱 비비드(강)
+	Cinematic Warm Low	시네마틱 웜(약)
+	Cinematic Warm Med	시네마틱 웜(중)
+	Cinematic Warm High	시네마틱 웜(강)
+	Colorful	컬러풀
+	Contemporary	컨템포러리
+	High Contrast	고대비
+	Boost Blues	블루 강조
+	Boost Green	그린 강조
+	Boost Pink	핑크 강조
+	Boost Red	레드 강조
+	Boost Skin	피부톤 강조
+	Boost Yellow	옐로 강조
+	Holdout	홀드아웃
+	Holdout Blue	블루 홀드아웃
+	Holdout Green	그린 홀드아웃
+	Holdout Red	레드 홀드아웃
+	Mono Contrasty	고대비 모노
+	Mono Sepia	세피아 모노
+	Mono Steel	스틸 모노
+	Muted	뮤트
+	Office	오피스
+	Sunscorched	선스코치드
+	Sunset	선셋
+	Vintage Faded	빈티지 페이드
+	Vignettes	비네트
+	Vignette Aberration	비네트 색수차
+	Vignette Heavy	비네트 강하게
+	Vignette Medium	비네트 보통
+	Auto Exposure & Color Balance	자동 노출 및 색상 균형
+	Create Color Group	색상 그룹 만들기
+	Add to Selected Group	선택한 그룹에 추가
+	Mute Color and Contrast	색상 및 대비 음소거
+	Gamut Compression	색역 압축
+	Luminance and Saturation Preserving	휘도 및 채도 유지
+	Compression Amount	압축 강도
+	Object Mask	오브젝트 마스크
+	Create Object Mask	오브젝트 마스크 만들기
+	Create object mask	오브젝트 마스크 만들기
+	Tracker Quality	추적기 품질
+	Best	최상
+	Generative Object Removal	생성형 제거
+	Generative Extend	생성형 확장
+	Generative Extend…	생성형 확장…
+	Edge	가장자리
+	Tail (Out Point)	끝점(아웃 포인트)
+	Head (In Point)	시작점(인 포인트)
+	Extension:	확장 길이:
+	Separate Crosstalk	크로스토크 분리
+	Separate Crosstalk…	크로스토크 분리…
+	Audio Handles	오디오 핸들
+	Audio Leveling	오디오 레벨링
+	Enhance Audio	오디오 향상
+	Enhance Audio Stem Split	오디오 향상 스템 분리
+	Pitch Shift (Semitones):	피치 시프트(반음):
+	Semitones	반음
+	Fade Curve	페이드 곡선
+	Index Media Intelligence	메타데이터 색인화
+	Timecode to Metadata	타임코드를 메타데이터로
+	Content Credentials	Content Credentials
+	Media Intelligence	미디어 인텔리전스
+	Check Content Credentials	Content Credentials 확인
+	Checking Content Credentials…	Content Credentials 확인 중…
+	Sequence Index	시퀀스 인덱스
+	Search Sequence Index	시퀀스 인덱스 검색
+	Search clips, Content Credentials, metadata	클립, Content Credentials, 메타데이터 검색
+	FilmCraft Hybrid Rendering (wgpu + CPU)	하이브리드 렌더링(wgpu + CPU)
+	Hybrid Rendering	하이브리드 렌더링
+	Texture Limit Auto-Downsampling	텍스처 제한 다운샘플링
+	Texture Limit Downsampling	텍스처 제한 다운샘플링
+	3D Subspace Warp	3D 서브스페이스 워프
+	System Info	시스템 정보
+	System Info…	시스템 정보…
+	Copy to Clipboard	클립보드에 복사
+	Parity Target	호환 대상
+	OS / Architecture	OS / 아키텍처
+	CPU Threads	CPU 스레드
+	GPU Adapter	GPU 어댑터
+	Premiere Pro Project	Premiere Pro 프로젝트
+	Export Premiere Pro Project…	Premiere Pro 프로젝트 내보내기…
+
+# DaVinci Resolve 7-Page Bar, Plugin Hub, DCTL Studio & PowerGrades
+	Fusion	퓨전
+	Fairlight	페어라이트
+	Deliver	딜리버
+	Open Plugin Hub & Live DCTL Studio	플러그인 허브 및 라이브 DCTL 스튜디오 열기
+	Installed & Discovered Plugins	설치 및 검색된 플러그인
+	Open DCTL Studio	DCTL 스튜디오 열기
+	Rescan Folders	폴더 다시 스캔
+	Scanned plugin folders ({n} external bundle(s) found)	플러그인 폴더 스캔 완료 (외부 번들 {n}개 발견)
+	DCTL Studio	DCTL 스튜디오
+	Scan	스캔
+	Rescan OpenFX, VST3, DCTL, and OGraf folders	OpenFX, VST3, DCTL 및 OGraf 폴더 다시 스캔
+	Plugin scan complete ({n} external item(s))	플러그인 스캔 완료 (외부 항목 {n}개)
+	Search plugins, DCTL shaders, OpenFX, VST3…	플러그인, DCTL 셰이더, OpenFX, VST3 검색…
+	Edit DCTL	DCTL 편집
+	Applied {name} to selected clip(s)	선택한 클립에 {name} 적용됨
+	Live DCTL Studio	라이브 DCTL 스튜디오
+	Templates	템플릿
+	Validate DCTL	DCTL 검증
+	Valid DCTL ({kind}, {count} UI parameter(s))	유효한 DCTL ({kind}, UI 파라미터 {count}개)
+	Save & Apply to Clip	저장 후 클립에 적용
+	Save to Project	프로젝트에 저장
+	Saved {name} ({applied} clip(s) updated)	{name} 저장됨 ({applied}개 클립 업데이트)
+	+ Node	+ 노드
+	Grab Still	스틸 캡처
+	Capture clip color pipeline into PowerGrades Gallery	클립 컬러 파이프라인을 PowerGrades 갤러리에 캡처
+	{tc} ({n} node(s)) — click to apply, right-click to delete	{tc} (노드 {n}개) — 클릭하여 적용, 우클릭하여 삭제
+	Color Nodes & PowerGrades	컬러 노드 및 PowerGrades
+	Show Page Navigation Bar	페이지 탐색 바 표시
+	Cut Overview	컷 전체 조감도
+
+# 3D Stage, SDF Clay Modeler, Material Sampler & Procedural PBR
+	3D & Material	3D 및 재질
+	3D & Material Lab	3D 및 재질 랩
+	3D Stage & SDF Clay	3D 스테이지 및 SDF 클레이
+	Material Sampler & Relight	재질 샘플러 및 리라이트
+	Procedural PBR	절차적 PBR
+	Polished Gold Sphere	광택 골드 구체
+	Product Bottle Mockup	제품 보틀 목업
+	SDF Clay Sculpture	SDF 클레이 조형물
+	3D Surface Relight	3D 표면 리라이트
+	Extract Normal Map	노멀 맵 추출
+	Make Seamless PBR	심리스 PBR 변환
+	Brushed Metal	브러시드 메탈
+	Terrazzo Marble	테라조 마블
+	Carbon Hex Weave	카본 헥스 위브
+	Sample PBR	PBR 샘플링
+	Sampled 6 PBR channels ({w}×{h}, seam RMSE {seam})	6개 PBR 채널 샘플링 완료 ({w}×{h}, 경계 오차 {seam})
+	Color Warper (Spider-Web)	컬러 워퍼(스파이더 웹)
+	Imported {n} DCTL shader(s) from {name}	{name}에서 DCTL 셰이더 {n}개 가져옴
+	Inserted OGraf graphic {name} at playhead	재생 헤드에 OGraf 그래픽 {name} 삽입됨
+	Clone & Checksum Media	미디어 복제 및 체크섬 검증
+	Evaluate or Create Smart Bin	스마트 빈 평가 또는 생성
+	Create Rough Cut from Script…	대본으로 러프컷 시퀀스 생성…
+	Smart Multicam Audio Switch	스마트 멀티캠 오디오 전환
+	Match Dialogue Tone & Loudness	대사 톤 및 라우드니스 매칭

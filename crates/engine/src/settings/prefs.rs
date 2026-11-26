@@ -422,10 +422,31 @@ impl TimelinePrefs {
 }
 
 /// Settings ▸ Plugins.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PluginPrefs {
     pub developer_mode: bool,
+    pub enable_openfx: bool,
+    pub enable_dctl: bool,
+    pub enable_audio_plugins: bool,
+    pub scan_system_folders: bool,
+    pub custom_search_path: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_plugins: Vec<String>,
+}
+
+impl Default for PluginPrefs {
+    fn default() -> Self {
+        Self {
+            developer_mode: false,
+            enable_openfx: true,
+            enable_dctl: true,
+            enable_audio_plugins: true,
+            scan_system_folders: true,
+            custom_search_path: String::new(),
+            disabled_plugins: Vec::new(),
+        }
+    }
 }
 
 /// Indeterminate Media Timebase choices → frame rates.

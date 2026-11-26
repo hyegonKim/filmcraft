@@ -55,6 +55,10 @@ const OP_BOKEH_BOOST: u32 = 33u;
 const OP_BOKEH: u32 = 34u;
 const OP_BOKEH_UP: u32 = 35u;
 const OP_THREE_WAY: u32 = 36u;
+const OP_COLOR_SPACE_TRANSFORM: u32 = 37u;
+const OP_COLOR_WARPER: u32 = 38u;
+const OP_QUALIFIER_3D: u32 = 39u;
+const OP_DYNAMIC_ZOOM: u32 = 40u;
 
 fn size() -> vec2<i32> {
     return vec2<i32>(i32(u.i0.y), i32(u.i0.z));
@@ -118,25 +122,6 @@ fn ld_in(p: vec2<i32>, r: vec2<i32>) -> vec4<f32> {
     return textureLoad(src, clamp(p, vec2(0), r - 1), 0);
 }
 
-// `Image::sample_bilinear_clamped` within `r`
-fn sample_clamped_in(x: f32, y: f32, r: vec2<i32>) -> vec4<f32> {
-    let fx = clamp(x - 0.5, 0.0, f32(r.x) - 1.0);
-    let fy = clamp(y - 0.5, 0.0, f32(r.y) - 1.0);
-    let x0 = i32(floor(fx));
-    let y0 = i32(floor(fy));
-    let x1 = min(x0 + 1, r.x - 1);
-    let y1 = min(y0 + 1, r.y - 1);
-    let tx = fx - f32(x0);
-    let ty = fy - f32(y0);
-    let a = ld(vec2(x0, y0));
-    let b = ld(vec2(x1, y0));
-    let c = ld(vec2(x0, y1));
-    let d = ld(vec2(x1, y1));
-    let top = a + (b - a) * tx;
-    let bot = c + (d - c) * tx;
-    return top + (bot - top) * ty;
-}
-
 // `Image::get_or_clear` within `r`
 fn ld_or_clear_in(p: vec2<i32>, r: vec2<i32>) -> vec4<f32> {
     if p.x < 0 || p.y < 0 || p.x >= r.x || p.y >= r.y {
@@ -161,21 +146,6 @@ fn sample_bilinear_in(x: f32, y: f32, r: vec2<i32>) -> vec4<f32> {
     let top = a + (b - a) * tx;
     let bot = c + (d - c) * tx;
     return top + (bot - top) * ty;
-}
-
-// `vfx::blur::poly_radius`: radius of a regular `n`-gon (circumradius 1, rotated by `rot`) in
-// direction `theta`; n = 0 is a circle.
-fn poly_radius(n: u32, theta: f32, rot: f32) -> f32 {
-    if n == 0u {
-        return 1.0;
-    }
-    let seg = 6.2831855 / f32(n);
-    var m = (theta - rot) % seg;
-    if m < 0.0 {
-        m += seg;
-    }
-    let a = m - seg / 2.0;
-    return cos(3.1415927 / f32(n)) / cos(a);
 }
 
 // Bokeh Blur's passes (`vfx::bokeh`); i1.xy = the size of the image they read.
@@ -204,27 +174,17 @@ fn bokeh(op: u32, p: vec2<i32>) -> vec4<f32> {
             return vec4(o.rgb * k, o.a);
         }
         case OP_BOKEH: {
+            // the iris gather through its kernel (`vfx::bokeh_kernel`): i1.z entries in aux,
+            // 64 a row, each (dx, dy, weight); the reads edge-clamped within the halved image
             if p.x >= r.x || p.y >= r.y {
                 return vec4(0.0);
             }
-            let pc = vec2<f32>(p) + 0.5;
-            let sides = u.i1.z;
-            let rings = u.i1.w;
-            let rr = u.p0.x;
-            let rot = u.p0.y;
-            var acc = sample_clamped_in(pc.x, pc.y, r);
-            var n_taps = 1u;
-            for (var ring = 1u; ring <= rings; ring++) {
-                let rad = rr * f32(ring) / f32(rings);
-                let n = max(ring * 8u, 6u);
-                for (var i = 0u; i < n; i++) {
-                    let th = 6.2831855 * (f32(i) + 0.5 * f32(ring % 2u)) / f32(n);
-                    let pr = rad * poly_radius(sides, th, rot);
-                    acc += sample_clamped_in(pc.x + cos(th) * pr, pc.y + sin(th) * pr, r);
-                }
-                n_taps += n;
+            var acc = vec4(0.0);
+            for (var k = 0u; k < u.i1.z; k++) {
+                let c = textureLoad(aux, vec2(i32(k % 64u), i32(k / 64u)), 0);
+                acc += ld_in(p + vec2<i32>(c.xy), r) * c.z;
             }
-            return acc * (1.0 / f32(n_taps));
+            return acc;
         }
         default: {
             // OP_BOKEH_UP: `Image::transformed` by the scale back to the whole image
@@ -689,6 +649,314 @@ fn lumetri_op(c: vec3<f32>, p: vec2<i32>) -> vec3<f32> {
     return dec(v);
 }
 
+fn signed_linear_to_srgb1(v: f32) -> f32 {
+    if v >= 0.0 {
+        return linear_to_srgb1(v);
+    }
+    return -linear_to_srgb1(-v);
+}
+
+fn signed_srgb_to_linear1(v: f32) -> f32 {
+    if v >= 0.0 {
+        return srgb_to_linear1(v);
+    }
+    return -srgb_to_linear1(-v);
+}
+
+fn cst_to_linear1(v: f32, space: u32) -> f32 {
+    switch space {
+        case 2u: {
+            // ARRI LogC3 (EI 800)
+            if v > 0.1496582 {
+                return (exp2(clamp((v - 0.385537) / 0.247190, -20.0, 20.0) * 3.321928094887362) - 0.052272) / 5.555556;
+            }
+            return (v - 0.092809) / 5.367655;
+        }
+        case 3u: {
+            // ARRI LogC4
+            if v >= 0.0 {
+                return (exp2(clamp(14.0 * (v - 0.092864126) / 0.9071359 + 6.0, -40.0, 40.0)) - 64.0) / 2231.8264;
+            }
+            return v * 0.113598354 - 0.018056893;
+        }
+        case 4u: {
+            // Sony S-Log3
+            if v >= 171.2102946929 / 1023.0 {
+                return exp2(clamp((v * 1023.0 - 420.0) / 261.5, -20.0, 20.0) * 3.321928094887362) * 0.19 - 0.01;
+            }
+            return (v * 1023.0 - 95.0) * 0.01125 / (171.2102946929 - 95.0);
+        }
+        case 5u: {
+            // RED Log3G10
+            if v < 0.0 {
+                return (v / 15.1927) - 0.01;
+            }
+            return (exp2(clamp(v / 0.224282, -20.0, 20.0) * 3.321928094887362) - 1.0) / 155.97533 - 0.01;
+        }
+        case 6u: {
+            // Blackmagic Design Film Gen 5
+            if v < 0.09246575 {
+                return (v - 0.09246575) / 10.540238 + 0.005;
+            }
+            return exp(clamp((v - 0.5300133) / 0.08692876, -40.0, 40.0)) - 0.00549407;
+        }
+        case 7u: {
+            // ACEScct
+            if v <= 0.15525114 {
+                return (v - 0.07290553) / 10.540238;
+            }
+            return exp2(clamp(v * 17.52 - 9.72, -40.0, 40.0));
+        }
+        case 8u: {
+            // DaVinci Intermediate
+            if v <= 0.02740668 {
+                return v / 10.444268;
+            }
+            return exp2(clamp(v / 0.07329248 - 7.0, -40.0, 40.0)) - 0.0075;
+        }
+        case 9u: {
+            // SMPTE ST 2084 PQ
+            let p = powf(clamp(v, 0.0, 1.0), 1.0 / 78.84375);
+            let num = max(p - 0.8359375, 0.0);
+            let den = max(18.851563 - 18.6875 * p, 1e-6);
+            return powf(num / den, 1.0 / 0.15930176) * 100.0;
+        }
+        case 10u: {
+            // ITU-R BT.2100 HLG
+            let x = max(v, 0.0);
+            if x <= 0.5 {
+                return x * x;
+            }
+            return (exp(clamp((x - 0.5599107) / 0.17883277, -40.0, 40.0)) + 0.28466892) * 0.25;
+        }
+        default: {
+            return v;
+        }
+    }
+}
+
+fn cst_from_linear1(lin: f32, space: u32) -> f32 {
+    switch space {
+        case 2u: {
+            var enc_v: f32;
+            if lin > 0.010591 {
+                enc_v = 0.247190 * (log2(5.555556 * lin + 0.052272) * 0.3010299956639812) + 0.385537;
+            } else {
+                enc_v = 5.367655 * lin + 0.092809;
+            }
+            return signed_srgb_to_linear1(enc_v);
+        }
+        case 3u: {
+            var enc_v: f32;
+            if lin >= -0.018056893 {
+                enc_v = (log2(2231.8264 * lin + 64.0) - 6.0) / 14.0 * 0.9071359 + 0.092864126;
+            } else {
+                enc_v = (lin + 0.018056893) / 0.113598354;
+            }
+            return signed_srgb_to_linear1(enc_v);
+        }
+        case 4u: {
+            var enc_v: f32;
+            if lin >= 0.01125 {
+                enc_v = (420.0 + (log2((lin + 0.01) / 0.19) * 0.3010299956639812) * 261.5) / 1023.0;
+            } else {
+                enc_v = (lin * (171.2102946929 - 95.0) / 0.01125 + 95.0) / 1023.0;
+            }
+            return signed_srgb_to_linear1(enc_v);
+        }
+        case 7u: {
+            var cct: f32;
+            if lin <= 0.0078125 {
+                cct = 10.540238 * lin + 0.07290553;
+            } else {
+                cct = (log2(lin) + 9.72) / 17.52;
+            }
+            return signed_srgb_to_linear1(cct);
+        }
+        case 8u: {
+            var di: f32;
+            if lin <= 0.00262409 {
+                di = lin * 10.444268;
+            } else {
+                di = (log2(max(lin, -0.0074) + 0.0075) + 7.0) * 0.07329248;
+            }
+            return signed_srgb_to_linear1(di);
+        }
+        case 9u: {
+            let y = powf(clamp(max(lin, 0.0) / 100.0, 0.0, 1.0), 0.15930176);
+            let pq = powf((0.8359375 + 18.851563 * y) / (1.0 + 18.6875 * y), 78.84375);
+            return signed_srgb_to_linear1(clamp(pq, 0.0, 1.0));
+        }
+        case 10u: {
+            let e = max(max(lin, 0.0) / 3.0, 0.0);
+            var hlg: f32;
+            if e <= 1.0 / 12.0 {
+                hlg = sqrt(3.0 * e);
+            } else {
+                hlg = 0.17883277 * log(12.0 * e - 0.28466892) + 0.5599107;
+            }
+            return signed_srgb_to_linear1(clamp(hlg, 0.0, 1.5));
+        }
+        default: {
+            return lin;
+        }
+    }
+}
+
+fn gamut_compress_channel(c: f32, ach: f32) -> f32 {
+    let dist = (ach - c) / ach;
+    var comp = dist;
+    if dist > 0.82 {
+        let x = clamp((dist - 0.82) / 0.5, -10.0, 10.0);
+        let e2 = exp(2.0 * x);
+        comp = 0.82 + 0.18 * ((e2 - 1.0) / (e2 + 1.0));
+    }
+    return max(ach * (1.0 - comp), 0.0);
+}
+
+fn cst_op(unpre: vec3<f32>) -> vec3<f32> {
+    let in_code = u.i1.x;
+    let out_code = u.i1.y;
+    let tone_mode = u.i1.z;
+    let gamut_comp = u.i1.w != 0u;
+    let max_nits = u.p3.x;
+    let mix_amt = u.p3.y;
+
+    var lin_src = unpre;
+    if in_code >= 2u {
+        let c0 = signed_linear_to_srgb1(unpre.x);
+        let c1 = signed_linear_to_srgb1(unpre.y);
+        let c2 = signed_linear_to_srgb1(unpre.z);
+        lin_src = vec3(cst_to_linear1(c0, in_code), cst_to_linear1(c1, in_code), cst_to_linear1(c2, in_code));
+    }
+
+    let r0 = u.p0.xyz;
+    let r1 = u.p1.xyz;
+    let r2 = u.p2.xyz;
+    var rgb = vec3(
+        r0.x * lin_src.x + r0.y * lin_src.y + r0.z * lin_src.z,
+        r1.x * lin_src.x + r1.y * lin_src.y + r1.z * lin_src.z,
+        r2.x * lin_src.x + r2.y * lin_src.y + r2.z * lin_src.z,
+    );
+
+    let peak = max(max_nits / 100.0, 1.0);
+    if tone_mode == 1u {
+        let y = luma709(max(rgb, vec3(0.0)));
+        if y > 0.65 {
+            let t = (y - 0.65) / max(peak - 0.65, 0.35);
+            let mapped_y = 0.65 + 0.35 * (t / (1.0 + t));
+            rgb = rgb * (mapped_y / max(y, 1e-6));
+        }
+    } else if tone_mode == 2u {
+        let pos = max(rgb, vec3(0.0));
+        let k = 1.0 + 1.0 / peak;
+        rgb = vec3(
+            pos.x / (1.0 + pos.x / peak) * k,
+            pos.y / (1.0 + pos.y / peak) * k,
+            pos.z / (1.0 + pos.z / peak) * k,
+        );
+    }
+
+    if gamut_comp {
+        let ach = max(max(max(rgb.x, rgb.y), rgb.z), 1e-6);
+        rgb = vec3(
+            gamut_compress_channel(rgb.x, ach),
+            gamut_compress_channel(rgb.y, ach),
+            gamut_compress_channel(rgb.z, ach),
+        );
+    }
+
+    let dst = vec3(
+        cst_from_linear1(rgb.x, out_code),
+        cst_from_linear1(rgb.y, out_code),
+        cst_from_linear1(rgb.z, out_code),
+    );
+    return unpre * (1.0 - mix_amt) + dst * mix_amt;
+}
+
+fn shortest_hue_deg_fx(h1: f32, h2: f32) -> f32 {
+    return fract_euclid((h1 - h2 + 540.0) / 360.0) * 360.0 - 180.0;
+}
+
+fn color_warper_op(unpre: vec3<f32>) -> vec3<f32> {
+    let target_hue = u.p0.x;
+    let hue_rot = u.p0.y;
+    let chroma_push = u.p0.z;
+    let luma_lift = u.p0.w;
+    let falloff = u.p1.x;
+    let sat_center = u.p1.y;
+
+    let sr = enc(unpre);
+    let hsl = rgb_to_hsl(clamp(sr, vec3(0.0), vec3(1.0)));
+    let dh = shortest_hue_deg_fx(hsl.x * 360.0, target_hue);
+    let ang_t = dh / (falloff * 0.55);
+    let ang_w = exp(-0.5 * ang_t * ang_t);
+    let sat_t = (hsl.y - sat_center) / 0.45;
+    let sat_w = clamp(hsl.y * 4.0, 0.0, 1.0) * exp(-0.5 * sat_t * sat_t);
+    let weight = ang_w * sat_w;
+    if weight <= 1e-4 {
+        return unpre;
+    }
+    let new_h = fract_euclid(hsl.x + (hue_rot * weight) / 360.0);
+    let new_s = clamp(hsl.y + chroma_push * weight * 0.75, 0.0, 1.0);
+    let new_l = clamp(hsl.z + luma_lift * weight * 0.45, 0.0, 1.0);
+    let warped = hsl_to_rgb(new_h, new_s, new_l);
+    return vec3(srgb_to_linear1(warped.x), srgb_to_linear1(warped.y), srgb_to_linear1(warped.z));
+}
+
+fn smooth_band_fx(x: f32, lo: f32, hi: f32, soft: f32) -> f32 {
+    let s = max(soft, 1e-4);
+    let enter = clamp((x - (lo - s)) / s, 0.0, 1.0);
+    let exit_v = clamp(((hi + s) - x) / s, 0.0, 1.0);
+    return min(enter, exit_v);
+}
+
+fn grade_zone_fx(sr: vec3<f32>, ev: f32, sat_mul: f32, warmth: f32) -> vec3<f32> {
+    let gain = exp2(clamp(ev, -20.0, 20.0));
+    let sc = clamp(sr, vec3(0.0), vec3(1.0));
+    let lin = vec3(
+        srgb_to_linear1(sc.x) * gain * (1.0 + warmth * 0.22),
+        srgb_to_linear1(sc.y) * gain,
+        srgb_to_linear1(sc.z) * gain * (1.0 - warmth * 0.22),
+    );
+    let y = luma709(max(lin, vec3(0.0)));
+    return max(vec3(y) + (lin - vec3(y)) * sat_mul, vec3(0.0));
+}
+
+fn qualifier_3d_op(unpre: vec3<f32>) -> vec3<f32> {
+    let show_matte = u.i1.x != 0u;
+    let key_hue = u.p0.x;
+    let hue_half = u.p0.y;
+    let hue_soft = u.p0.z;
+    let soft = u.p0.w;
+    let sat_lo = u.p1.x;
+    let sat_hi = u.p1.y;
+    let lum_lo = u.p1.z;
+    let lum_hi = u.p1.w;
+    let in_ev = u.p2.x;
+    let in_sat = u.p2.y;
+    let in_temp = u.p2.z;
+    let out_ev = u.p2.w;
+    let out_sat = u.p3.x;
+
+    let sr = enc(unpre);
+    let hsl = rgb_to_hsl(clamp(sr, vec3(0.0), vec3(1.0)));
+    let dh = abs(shortest_hue_deg_fx(hsl.x * 360.0, key_hue));
+    let hw = clamp((hue_half + hue_soft - dh) / hue_soft, 0.0, 1.0);
+    let sw = smooth_band_fx(hsl.y, sat_lo, sat_hi, soft);
+    let lw = smooth_band_fx(hsl.z, lum_lo, lum_hi, soft);
+    let matte = clamp(hw * sw * lw, 0.0, 1.0);
+
+    if show_matte {
+        let gray = srgb_to_linear1(0.18);
+        let sr_lin = vec3(srgb_to_linear1(sr.x), srgb_to_linear1(sr.y), srgb_to_linear1(sr.z));
+        return sr_lin * matte + vec3(gray * (1.0 - matte));
+    }
+    let inside = grade_zone_fx(sr, in_ev, in_sat, in_temp);
+    let outside = grade_zone_fx(sr, out_ev, out_sat, 0.0);
+    return inside * matte + outside * (1.0 - matte);
+}
+
 // One output pixel of every op but the running-sum box blur.
 fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
     let s = size();
@@ -875,6 +1143,40 @@ fn pixel(op: u32, p: vec2<i32>) -> vec4<f32> {
             let c = o.rgb / a;
             let res = lumetri_op(c, p);
             return vec4(res * a, a);
+        }
+        case OP_COLOR_SPACE_TRANSFORM: {
+            let o = ld(p);
+            let a = o.a;
+            if a <= 1e-6 {
+                return o;
+            }
+            return vec4(cst_op(o.rgb / a) * a, a);
+        }
+        case OP_COLOR_WARPER: {
+            let o = ld(p);
+            let a = o.a;
+            if a <= 1e-6 {
+                return o;
+            }
+            return vec4(color_warper_op(o.rgb / a) * a, a);
+        }
+        case OP_QUALIFIER_3D: {
+            let o = ld(p);
+            let a = o.a;
+            if a <= 1e-6 {
+                return o;
+            }
+            return vec4(qualifier_3d_op(o.rgb / a) * a, a);
+        }
+        case OP_DYNAMIC_ZOOM: {
+            let inv_s = u.p0.x;
+            let cx_px = u.p0.y;
+            let cy_px = u.p0.z;
+            let hw = f32(s.x) * 0.5;
+            let hh = f32(s.y) * 0.5;
+            let sx = cx_px + (pc.x - hw) * inv_s;
+            let sy = cy_px + (pc.y - hh) * inv_s;
+            return sample_clamped(sx, sy);
         }
         default: {
             let o = ld(p);

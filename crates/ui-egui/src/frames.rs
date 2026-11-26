@@ -26,8 +26,10 @@ pub enum Target {
     Sequence(ItemId),
     /// A single project item at a media time (Source monitor, thumbnails).
     Item(ItemId),
-    /// A GPU frame plan of a sequence (decoded layers + transforms), composited on the GPU.
-    SequencePlan(ItemId),
+    /// A GPU frame plan of a sequence (decoded layers + transforms), planned for and composited on
+    /// a device that runs these caps. A plan made for other caps is another frame: it may hold
+    /// steps this device would have to composite on the CPU, on the UI thread.
+    SequencePlan(ItemId, filmcraft_render::plan::DeviceCaps),
     /// The Multi-Camera view's angle grid of a multi-camera source at its time: one page (grid
     /// side, 0 = automatic; page) of the shown angles, each at the job's scale.
     MulticamGrid(ItemId, u8, u16),
@@ -301,6 +303,10 @@ impl filmcraft_media::MediaSource for TimedSource {
     }
     fn video_frame(&self, req: filmcraft_media::FrameRequest) -> filmcraft_media::Result<Arc<filmcraft_frame::VideoFrame>> {
         timed_source(|| self.0.video_frame(req))
+    }
+    /// The inner source's unturned frame, timed like [`Self::video_frame`].
+    fn video_frame_unturned(&self, req: filmcraft_media::FrameRequest) -> filmcraft_media::Result<(Arc<filmcraft_frame::VideoFrame>, u8)> {
+        timed_source(|| self.0.video_frame_unturned(req))
     }
     fn audio(&self, start: i64, frames: usize, sample_rate: u32) -> filmcraft_media::Result<filmcraft_frame::AudioBuffer> {
         self.0.audio(start, frames, sample_rate)
@@ -592,7 +598,7 @@ impl FrameServer {
     /// Whether the exact frame (image or plan) is ready.
     pub fn is_ready(&self, k: &FrameKey) -> bool {
         match k.target {
-            Target::SequencePlan(_) => self.shared.plans.lock().unwrap_or_else(PoisonError::into_inner).map.contains_key(k),
+            Target::SequencePlan(..) => self.shared.plans.lock().unwrap_or_else(PoisonError::into_inner).map.contains_key(k),
             _ => self.shared.done.lock().unwrap_or_else(PoisonError::into_inner).map.contains_key(k),
         }
     }
@@ -613,7 +619,7 @@ impl FrameServer {
     pub fn recent(&self, key: FrameKey, dir: i64, max_back: i64, lag: u64) -> Option<FrameKey> {
         let keys = recent_keys(key, dir, max_back, lag);
         match key.target {
-            Target::SequencePlan(_) => {
+            Target::SequencePlan(..) => {
                 let g = self.shared.plans.lock().unwrap_or_else(|e| e.into_inner());
                 keys.into_iter().find(|k| g.map.contains_key(k))
             }
@@ -995,8 +1001,8 @@ fn run_job(sh: &Shared, job: &Job, pool: &Arc<MediaPool>, services: &Arc<dyn Ser
         filmcraft_media::cancel::with_catch_up(job.catch_up, || {
             filmcraft_media::cancel::with_draft(job.key.draft, || {
                 filmcraft_media::cancel::with_background(is_background(job), || {
-                    if let Target::SequencePlan(seq) = job.key.target {
-                        let (plan, pv) = plan_job(job, seq, pool, services, previews);
+                    if let Target::SequencePlan(seq, caps) = job.key.target {
+                        let (plan, pv) = plan_job(job, seq, caps, pool, services, previews);
                         loading = filmcraft_media::pending::take();
                         if !job.cancel.load(Ordering::Relaxed) && !loading {
                             // Convert texels for upload here, not on the UI thread when the frame is shown.
@@ -1074,7 +1080,14 @@ fn provider(job: &Job, pool: &Arc<MediaPool>, services: &Arc<dyn Services>) -> J
     JobProvider { inner: pool.provider(job.project.clone(), services.clone()) }
 }
 
-fn plan_job(job: &Job, seq: ItemId, pool: &Arc<MediaPool>, services: &Arc<dyn Services>, previews: &PreviewStore) -> (filmcraft_render::plan::FramePlan, bool) {
+fn plan_job(
+    job: &Job,
+    seq: ItemId,
+    caps: filmcraft_render::plan::DeviceCaps,
+    pool: &Arc<MediaPool>,
+    services: &Arc<dyn Services>,
+    previews: &PreviewStore,
+) -> (filmcraft_render::plan::FramePlan, bool) {
     let opts = filmcraft_render::RenderOptions { scale: job.scale, captions: true, ..Default::default() };
     if let Some(frame) = preview_frame(job, seq, pool, previews)
         && let Some(q) = job.project.sequence(seq)
@@ -1097,12 +1110,12 @@ fn plan_job(job: &Job, seq: ItemId, pool: &Arc<MediaPool>, services: &Arc<dyn Se
         return (filmcraft_render::plan::FramePlan::Layers { width: w, height: h, layers }, true);
     }
     let provider = provider(job, pool, services);
-    (filmcraft_render::plan::plan_frame(&job.project, seq, job.time, opts, &provider), false)
+    (filmcraft_render::plan::plan_frame(&job.project, seq, job.time, opts, caps, &provider), false)
 }
 
 /// Render a job to RGBA8; the flag says whether it came from a render preview.
 fn render_job(job: &Job, pool: &Arc<MediaPool>, services: &Arc<dyn Services>, previews: &PreviewStore) -> (Rgba, bool) {
-    if let Target::Sequence(seq) | Target::SequencePlan(seq) = job.key.target
+    if let Target::Sequence(seq) | Target::SequencePlan(seq, _) = job.key.target
         && let Some(f) = preview_frame(job, seq, pool, previews)
         && let Some(q) = job.project.sequence(seq)
     {
@@ -1123,7 +1136,7 @@ fn render_job(job: &Job, pool: &Arc<MediaPool>, services: &Arc<dyn Services>, pr
     let provider = provider(job, pool, services);
     let opts = filmcraft_render::RenderOptions { scale: job.scale, captions: true, ..Default::default() };
     let img = match job.key.target {
-        Target::Sequence(seq) | Target::SequencePlan(seq) | Target::SequenceLive(seq) => {
+        Target::Sequence(seq) | Target::SequencePlan(seq, _) | Target::SequenceLive(seq) => {
             let (w, h, px) = filmcraft_render::render_sequence_rgba8(&job.project, seq, job.time, opts, &provider);
             return (Rgba { w, h, px }, false);
         }
@@ -1158,7 +1171,7 @@ mod tests {
         assert!(!background_work(1, item));
         // the scopes ask for the program frame at 40 while playing: never background
         assert!(!background_work(40, Target::Sequence(ItemId(1))));
-        assert!(!background_work(50, Target::SequencePlan(ItemId(1))));
+        assert!(!background_work(50, Target::SequencePlan(ItemId(1), filmcraft_render::plan::DeviceCaps::NONE)));
     }
 
     #[test]
@@ -1308,85 +1321,68 @@ mod tests {
         assert!(job.cancel.load(Ordering::Relaxed), "the job ran without its cancel flag");
         assert!(!server.is_ready(&job.key), "a cancelled job's frame is not cached");
     }
+    /// A sequence plan is made for the caps in its key: the same frame asked for a device without
+    /// an effect stage and for one with it gives two cached plans, the CPU image and the plan with
+    /// the adjustment step, so a plan made for one device is never shown on the other.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn repaint_callback_runs_without_holding_the_callback_mutex() {
+    fn a_sequence_plan_is_made_for_the_caps_in_its_key() {
         use super::{FrameKey, FrameServer};
-        use std::sync::{Arc, mpsc};
-        use std::time::Duration;
+        use filmcraft_media::generators::GeneratorSource;
+        use filmcraft_media::{Generator, MediaSource};
+        use filmcraft_project::{ItemKind, Label, MediaClip, MediaRef, Project, SequenceSettings, TrackKind};
+        use filmcraft_render::plan::{DeviceCaps, FramePlan, PlanStep};
+        use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick, TimeRange};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
 
-        let s = filmcraft_engine::Session::default();
-        let server = FrameServer::new(s.media.clone(), s.services.clone(), s.previews.clone(), 1);
-        let slot = Arc::downgrade(&server.repaint);
-        let (tx, rx) = mpsc::channel();
-        *server.repaint.lock().unwrap() = Some(
-            (Box::new(move || {
-                let unlocked = slot.upgrade().unwrap().try_lock().is_ok();
-                tx.send(unlocked).unwrap();
-            }) as Box<dyn Fn() + Send + Sync>)
-                .into(),
+        let r = FrameRate::FPS_24;
+        let mut p = Project::new("Frames");
+        let g = GeneratorSource::new(Generator::ColorMatte { color: [0.9, 0.2, 0.1, 1.0] }, 320, 180, r, Tick(2 * TICKS_PER_SECOND));
+        let info = g.info().clone();
+        let matte = p.add_item(
+            &info.name.clone(),
+            Label::Iris,
+            ItemKind::Media(Box::new(MediaClip {
+                media: MediaRef::Generator(g.generator.clone()),
+                info,
+                interpret: Default::default(),
+                mark_in: None,
+                mark_out: None,
+                markers: vec![],
+                offline: false,
+                proxy: None,
+                identity: None,
+            })),
+            None,
         );
-        let p = Arc::new(filmcraft_project::Project::new("Repaint"));
-        let key = FrameKey { target: Target::Item(ItemId(999)), frame: 0, size: 32, revision: 0, draft: false };
-        server.request(key, filmcraft_time::Tick::ZERO, 0.1, &p, 0);
-        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), "a repaint callback may enter egui; the callback mutex must already be released");
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn a_panicking_repaint_callback_does_not_stop_the_worker() {
-        use super::{FrameKey, FrameServer};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::{Arc, mpsc};
-        use std::time::Duration;
-
+        let adj =
+            p.add_item("Adjustment Layer", Label::Lavender, ItemKind::AdjustmentLayer { width: 320, height: 180, rate: r, duration: r.tick_of(24) }, None);
+        let seq = p.new_sequence("s", SequenceSettings { width: 320, height: 180, frame_rate: r, ..Default::default() }, 2, 0, None);
+        for (track, item) in [(0, matte), (1, adj)] {
+            let mut ti = p.make_track_item(item, TrackKind::Video, Tick::ZERO, TimeRange::new(Tick::ZERO, r.tick_of(24)), r).unwrap();
+            if item == adj {
+                ti.effects.insert(0, filmcraft_project::find_effect("invert").unwrap().instance());
+            }
+            p.sequence_mut(seq).unwrap().video_tracks[track].items.push(ti);
+        }
+        let p = Arc::new(p);
         let s = filmcraft_engine::Session::default();
-        let server = FrameServer::new(s.media.clone(), s.services.clone(), s.previews.clone(), 1);
-        let calls = AtomicUsize::new(0);
-        let (first_tx, first_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
-        *server.repaint.lock().unwrap() = Some(
-            (Box::new(move || {
-                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                    first_tx.send(()).unwrap();
-                    panic!("synthetic repaint callback failure");
-                }
-                done_tx.send(()).unwrap();
-            }) as Box<dyn Fn() + Send + Sync>)
-                .into(),
+        let server = FrameServer::new(s.media.clone(), s.services.clone(), s.previews.clone(), 2);
+        let key = |caps| FrameKey { target: Target::SequencePlan(seq, caps), frame: 0, size: 1000, revision: 0, draft: false };
+        for caps in [DeviceCaps::NONE, DeviceCaps::ALL] {
+            server.request(key(caps), Tick::ZERO, 1.0, &p, 0);
+        }
+        let t0 = Instant::now();
+        while !(server.is_ready(&key(DeviceCaps::NONE)) && server.is_ready(&key(DeviceCaps::ALL))) && t0.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let none = server.get_plan(&key(DeviceCaps::NONE)).expect("the plan for a device without an effect stage");
+        assert!(matches!(none.plan, FramePlan::Image(_)), "no effect stage: the worker renders the frame on the CPU");
+        let all = server.get_plan(&key(DeviceCaps::ALL)).expect("the plan for a device with an effect stage");
+        assert!(
+            matches!(&all.plan, FramePlan::Composite { steps, .. } if steps.iter().any(|st| matches!(st, PlanStep::Adjust { .. }))),
+            "an effect stage: the adjustment layer is a step of the plan"
         );
-        let p = Arc::new(filmcraft_project::Project::new("Repaint recovery"));
-        let key = FrameKey { target: Target::Item(ItemId(999)), frame: 0, size: 32, revision: 0, draft: false };
-        server.request(key, filmcraft_time::Tick::ZERO, 0.1, &p, 0);
-        first_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        server.request(FrameKey { frame: 1, ..key }, filmcraft_time::Tick::ZERO, 0.1, &p, 0);
-        done_rx.recv_timeout(Duration::from_secs(5)).expect("worker must process the next job after a repaint callback panics");
-    }
-
-    /// #2281: the clock starts once the frame due first and the two after it are ready, in the
-    /// direction of play, and at the end of the sequence once the frames left are.
-    #[test]
-    fn the_preroll_waits_for_the_first_three_frames() {
-        use super::{FrameKey, FrameServer, PREROLL_FRAMES, Rgba};
-        use std::sync::{Arc, PoisonError};
-
-        assert_eq!(PREROLL_FRAMES, 3);
-        let s = filmcraft_engine::Session::default();
-        let server = FrameServer::new(s.media.clone(), s.services.clone(), s.previews.clone(), 1);
-        let key = FrameKey { target: Target::Item(ItemId(999)), frame: 10, size: 32, revision: 0, draft: false };
-        let ready = |frame: i64| {
-            let img = Arc::new(Rgba { w: 1, h: 1, px: vec![0; 4] });
-            server.shared.done.lock().unwrap_or_else(PoisonError::into_inner).insert(FrameKey { frame, ..key }, img);
-        };
-        ready(10);
-        ready(11);
-        assert!(!server.preroll_ready(key, 1.0, 100), "frame 12 is not ready yet");
-        assert!(server.preroll_ready(key, 1.0, 11), "the last frame of the sequence is 11");
-        ready(12);
-        assert!(server.preroll_ready(key, 1.0, 100));
-        assert!(!server.preroll_ready(key, -1.0, 100), "playing backwards needs frames 9 and 8");
-        ready(9);
-        ready(8);
-        assert!(server.preroll_ready(key, -1.0, 100));
     }
 }

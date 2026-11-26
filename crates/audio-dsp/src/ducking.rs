@@ -132,6 +132,25 @@ pub fn duck_keyframes(regions: &[(f64, f64)], clip_start_s: f64, clip_end_s: f64
     out
 }
 
+/// Multi-mic crosstalk bleed regions `(start_s, end_s)` where a competing dialogue track
+/// (`other_env_db`) exceeds `gate_db` AND dominates this mic (`self_env_db`) by at least
+/// `bleed_margin_db` (e.g. `4.0` dB). Short gaps (`< 0.12 s`) are bridged and sub-40 ms blips
+/// dropped, ready to feed [`duck_keyframes`] for Premiere Pro 27.0 **Separate Crosstalk**.
+pub fn crosstalk_regions(self_env_db: &[f32], other_env_db: &[f32], hop_s: f32, gate_db: f32, bleed_margin_db: f32) -> Vec<(f64, f64)> {
+    let n = self_env_db.len().min(other_env_db.len());
+    if n == 0 {
+        return Vec::new();
+    }
+    let dominance: Vec<f32> = (0..n)
+        .map(|k| {
+            let o = other_env_db[k];
+            let s = self_env_db[k];
+            if o > gate_db && (o - s) >= bleed_margin_db { 0.0 } else { FLOOR_DB }
+        })
+        .collect();
+    activity(&dominance, hop_s, -10.0, 0.04, 0.12)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +244,27 @@ mod tests {
         assert!(duck_keyframes(&[(11.0, 12.0)], 0.0, 10.0, 0.0, 10.0, 0.5).is_empty());
         let k = duck_keyframes(&[(2.0, 3.0)], 0.0, 10.0, 0.0, 10.0, 0.0);
         assert!(strictly_increasing(&k) && k.len() == 4);
+    }
+
+    #[test]
+    fn crosstalk_regions_detects_competing_mic_bleed_only() {
+        let mut mic_a = vec![-60.0f32; 200];
+        let mut mic_b = vec![-60.0f32; 200];
+        // 0.2s..0.8s: Speaker A talks (-18 dBFS on mic A, -32 dBFS bleed on mic B)
+        for i in 20..80 {
+            mic_a[i] = -18.0;
+            mic_b[i] = -32.0;
+        }
+        // 1.0s..1.6s: Speaker B talks (-16 dBFS on mic B, -30 dBFS bleed on mic A)
+        for i in 100..160 {
+            mic_b[i] = -16.0;
+            mic_a[i] = -30.0;
+        }
+        let bleed_on_a = crosstalk_regions(&mic_a, &mic_b, 0.01, -48.0, 4.0);
+        let bleed_on_b = crosstalk_regions(&mic_b, &mic_a, 0.01, -48.0, 4.0);
+        assert_eq!(bleed_on_a.len(), 1);
+        assert!((bleed_on_a[0].0 - 1.0).abs() < 1e-6 && (bleed_on_a[0].1 - 1.6).abs() < 1e-6);
+        assert_eq!(bleed_on_b.len(), 1);
+        assert!((bleed_on_b[0].0 - 0.2).abs() < 1e-6 && (bleed_on_b[0].1 - 0.8).abs() < 1e-6);
     }
 }

@@ -73,11 +73,12 @@ pub fn config_for(w: u32, h: u32, rate: FrameRate, s: &ExportSettings) -> Result
     if s.bitrate_mode == BitrateMode::Crf {
         return Err("CRF (constant quality)".into());
     }
-    let hdr = match (s.signal.is_hdr(), hevc) {
-        (false, _) => None,
-        (true, false) => return Err("HDR (H.264 hardware encoding is 8-bit; the built-in encoder carries HDR)".into()),
-        (true, true) => Some(vt_hdr(&s.signal)?),
-    };
+    if !hevc && s.h264_intra_only {
+        return Err("all-intra H.264".into());
+    }
+    if s.signal.is_hdr() {
+        return Err("HDR".into());
+    }
     if !w.is_multiple_of(2) || !h.is_multiple_of(2) {
         return Err("odd picture size".into());
     }
@@ -101,6 +102,8 @@ pub fn config_for(w: u32, h: u32, rate: FrameRate, s: &ExportSettings) -> Result
             (false, H264Profile::Baseline) => VtProfile::Baseline,
             (false, H264Profile::Main) => VtProfile::Main,
             (false, H264Profile::High) => VtProfile::High,
+            // 10-bit H.264 is the built-in encoder's
+            (false, H264Profile::High10) => return Err("High 10".into()),
         },
         rate: match s.bitrate_mode {
             BitrateMode::Cbr => VtRate::Cbr { kbps },
@@ -207,7 +210,7 @@ pub fn videotoolbox_encoder_factory(
         Ok(c) => c,
         Err(why) => {
             log::info!("hardware {name} encoding declined: {why}");
-            filmcraft_export::note_hw_encode_declined();
+            filmcraft_export::note_hw_encode_declined_by("VideoToolbox", &why);
             return None;
         }
     };
@@ -218,7 +221,7 @@ pub fn videotoolbox_encoder_factory(
         }
         Err(why) => {
             log::info!("hardware {name} encoding declined: {why}");
-            filmcraft_export::note_hw_encode_declined();
+            filmcraft_export::note_hw_encode_declined_by("VideoToolbox", &why);
             None
         }
     }
@@ -406,6 +409,10 @@ impl VideoEncoder for HardwareEncoder {
     fn flush(&mut self) -> filmcraft_export::Result<Vec<EncodedPacket>> {
         let packets = self.vt.flush().map_err(ExportError::Encode)?;
         self.samples(packets)
+    }
+
+    fn hardware(&self) -> Option<&'static str> {
+        Some("VideoToolbox")
     }
 }
 

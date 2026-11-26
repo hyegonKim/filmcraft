@@ -54,6 +54,8 @@ pub(crate) fn effect_rows(
         (Icon::Rectangle, "polygon", tl!("Create 4-point polygon mask")),
         (Icon::Pen, "pen", tl!("Free draw bezier")),
         (Icon::Sparkle, "colorRegion", tl!("Create color region mask")),
+        (Icon::Selection, "objectMask", tl!("Create object mask")),
+        (Icon::Adjust, "generativeRemove", tl!("Generative Object Removal")),
     ]
     .into_iter()
     .enumerate()
@@ -75,6 +77,10 @@ pub(crate) fn effect_rows(
                 }
             } else if kind == "colorRegion" {
                 actions.push(("masks.colorRegion".into(), json!({"clip": clip.0, "effect": idx})));
+            } else if kind == "objectMask" {
+                actions.push(("masks.objectMask".into(), json!({"clip": clip.0, "effect": idx})));
+            } else if kind == "generativeRemove" {
+                actions.push(("masks.generativeRemove".into(), json!({"clip": clip.0})));
             } else {
                 actions.push(("masks.add".into(), json!({"clip": clip.0, "effect": idx, "shape": kind})));
             }
@@ -986,6 +992,13 @@ pub fn path_value(app: &mut FilmcraftApp, ui: &mut egui::Ui, clip: ClipId, effec
         for tm in filmcraft_project::TrackMethod::ALL {
             if ui.selectable_label(tm == m.track_method, crate::i18n::t(tm.label())).clicked() {
                 actions.push(("masks.set".into(), json!({"clip": clip.0, "effect": effect, "mask": k, "trackMethod": tm.label()})));
+            }
+        }
+        ui.separator();
+        ui.label(egui::RichText::new(tl!("Tracker Quality")).size(11.0).color(t.text_dim));
+        for tq in filmcraft_project::TrackerQuality::ALL {
+            if ui.selectable_label(tq == m.tracker_quality, crate::i18n::t(tq.label())).clicked() {
+                actions.push(("masks.set".into(), json!({"clip": clip.0, "effect": effect, "mask": k, "trackerQuality": tq.label()})));
             }
         }
         ui.separator();

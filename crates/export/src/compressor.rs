@@ -41,11 +41,7 @@ impl HlsRendition {
     /// Standard 4-rung H.264/HEVC ABR ladder (360p, 720p, 1080p, 2160p) like Apple Compressor's
     /// "HTTP Live Streaming" destination bundle.
     pub fn standard_abr_ladder(fps: f64, audio_group: Option<&str>) -> Vec<Self> {
-        let fps = if fps.is_finite() && fps > 0.0 {
-            fps
-        } else {
-            29.97
-        };
+        let fps = if fps.is_finite() && fps > 0.0 { fps } else { 29.97 };
         let ag = audio_group.map(ToString::to_string);
         vec![
             Self {
@@ -120,10 +116,7 @@ pub struct HlsSegment {
 
 /// Build an RFC 8216 HLS Master Playlist (`master.m3u8`) from video [`HlsRendition`]s and
 /// optional [`HlsAudioGroup`] renditions.
-pub fn build_hls_master_playlist(
-    renditions: &[HlsRendition],
-    audio_groups: &[HlsAudioGroup],
-) -> String {
+pub fn build_hls_master_playlist(renditions: &[HlsRendition], audio_groups: &[HlsAudioGroup]) -> String {
     let mut out = String::with_capacity(1024);
     out.push_str("#EXTM3U\n");
     out.push_str("#EXT-X-VERSION:7\n");
@@ -152,11 +145,7 @@ pub fn build_hls_master_playlist(
         let avg = r.average_bandwidth_bps.max(1);
         let w = r.width.max(1);
         let h = r.height.max(1);
-        let fps = if r.frame_rate_fps.is_finite() && r.frame_rate_fps > 0.0 {
-            r.frame_rate_fps
-        } else {
-            29.97
-        };
+        let fps = if r.frame_rate_fps.is_finite() && r.frame_rate_fps > 0.0 { r.frame_rate_fps } else { 29.97 };
         let _ = write!(
             out,
             "#EXT-X-STREAM-INF:BANDWIDTH={bw},AVERAGE-BANDWIDTH={avg},RESOLUTION={w}x{h},FRAME-RATE={fps:.3},CODECS=\"{}\"",
@@ -173,19 +162,8 @@ pub fn build_hls_master_playlist(
 }
 
 /// Build an RFC 8216 HLS Media Playlist (`prog_index.m3u8`) for a single rendition's segments.
-pub fn build_hls_media_playlist(
-    target_duration_sec: u32,
-    media_sequence: u64,
-    segments: &[HlsSegment],
-    end_list: bool,
-) -> String {
-    let max_seg = segments
-        .iter()
-        .map(|s| s.duration_sec.ceil() as u32)
-        .max()
-        .unwrap_or(target_duration_sec)
-        .max(target_duration_sec)
-        .max(1);
+pub fn build_hls_media_playlist(target_duration_sec: u32, media_sequence: u64, segments: &[HlsSegment], end_list: bool) -> String {
+    let max_seg = segments.iter().map(|s| s.duration_sec.ceil() as u32).max().unwrap_or(target_duration_sec).max(target_duration_sec).max(1);
 
     let mut out = String::with_capacity(1024);
     out.push_str("#EXTM3U\n");
@@ -195,11 +173,7 @@ pub fn build_hls_media_playlist(
     let _ = writeln!(out, "#EXT-X-MEDIA-SEQUENCE:{media_sequence}");
 
     for seg in segments {
-        let dur = if seg.duration_sec.is_finite() && seg.duration_sec > 0.0 {
-            seg.duration_sec
-        } else {
-            f64::from(target_duration_sec.max(1))
-        };
+        let dur = if seg.duration_sec.is_finite() && seg.duration_sec > 0.0 { seg.duration_sec } else { f64::from(target_duration_sec.max(1)) };
         let _ = writeln!(out, "#EXTINF:{dur:.6},{}", seg.title);
         if let Some((len, offset)) = seg.byte_range {
             let _ = writeln!(out, "#EXT-X-BYTERANGE:{len}@{offset}");
@@ -293,12 +267,7 @@ pub fn build_imf_package_xmls(spec: &ImfPackageSpec) -> ImfPackageXmls {
     let pkl_xml = build_imf_pkl(spec, cpl_xml.len() as u64);
     let assetmap_xml = build_imf_assetmap(spec);
     let volindex_xml = build_imf_volindex();
-    ImfPackageXmls {
-        cpl_xml,
-        pkl_xml,
-        assetmap_xml,
-        volindex_xml,
-    }
+    ImfPackageXmls { cpl_xml, pkl_xml, assetmap_xml, volindex_xml }
 }
 
 fn build_imf_cpl(spec: &ImfPackageSpec) -> String {
@@ -306,82 +275,31 @@ fn build_imf_cpl(spec: &ImfPackageSpec) -> String {
     xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     xml.push_str("<CompositionPlaylist xmlns=\"http://www.smpte-ra.org/schemas/2067-3/2016\" xmlns:cc=\"http://www.smpte-ra.org/schemas/2067-2/2016\">\n");
     let _ = writeln!(xml, "  <Id>urn:uuid:{}</Id>", escape_xml(&spec.cpl_uuid));
-    let _ = writeln!(
-        xml,
-        "  <Annotation>{}</Annotation>",
-        escape_xml(&spec.annotation)
-    );
+    let _ = writeln!(xml, "  <Annotation>{}</Annotation>", escape_xml(&spec.annotation));
     xml.push_str("  <IssueDate>2026-01-01T00:00:00Z</IssueDate>\n");
     let _ = writeln!(xml, "  <Issuer>{}</Issuer>", escape_xml(&spec.issuer));
     let _ = writeln!(xml, "  <Creator>{}</Creator>", escape_xml(&spec.creator));
-    let _ = writeln!(
-        xml,
-        "  <ContentTitle>{}</ContentTitle>",
-        escape_xml(&spec.content_title)
-    );
-    let _ = writeln!(
-        xml,
-        "  <ContentKind>{}</ContentKind>",
-        escape_xml(&spec.content_kind)
-    );
-    let _ = writeln!(
-        xml,
-        "  <EditRate>{} {}</EditRate>",
-        spec.edit_rate.0.max(1),
-        spec.edit_rate.1.max(1)
-    );
+    let _ = writeln!(xml, "  <ContentTitle>{}</ContentTitle>", escape_xml(&spec.content_title));
+    let _ = writeln!(xml, "  <ContentKind>{}</ContentKind>", escape_xml(&spec.content_kind));
+    let _ = writeln!(xml, "  <EditRate>{} {}</EditRate>", spec.edit_rate.0.max(1), spec.edit_rate.1.max(1));
     xml.push_str("  <SegmentList>\n");
     xml.push_str("    <Segment>\n");
-    let _ = writeln!(
-        xml,
-        "      <Id>urn:uuid:{}-seg1</Id>",
-        escape_xml(&spec.cpl_uuid)
-    );
+    let _ = writeln!(xml, "      <Id>urn:uuid:{}-seg1</Id>", escape_xml(&spec.cpl_uuid));
     xml.push_str("      <SequenceList>\n");
 
     for (idx, tr) in spec.tracks.iter().enumerate() {
         let tag = tr.kind.cpl_sequence_tag();
         let _ = writeln!(xml, "        <{tag}>");
-        let _ = writeln!(
-            xml,
-            "          <Id>urn:uuid:{}-seq{}</Id>",
-            escape_xml(&tr.uuid),
-            idx + 1
-        );
-        let _ = writeln!(
-            xml,
-            "          <TrackId>urn:uuid:{}</TrackId>",
-            escape_xml(&tr.uuid)
-        );
+        let _ = writeln!(xml, "          <Id>urn:uuid:{}-seq{}</Id>", escape_xml(&tr.uuid), idx + 1);
+        let _ = writeln!(xml, "          <TrackId>urn:uuid:{}</TrackId>", escape_xml(&tr.uuid));
         xml.push_str("          <ResourceList>\n");
         xml.push_str("            <Resource xsi:type=\"TrackFileResourceType\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n");
-        let _ = writeln!(
-            xml,
-            "              <Id>urn:uuid:{}-res</Id>",
-            escape_xml(&tr.uuid)
-        );
-        let _ = writeln!(
-            xml,
-            "              <EditRate>{} {}</EditRate>",
-            tr.edit_rate.0.max(1),
-            tr.edit_rate.1.max(1)
-        );
-        let _ = writeln!(
-            xml,
-            "              <IntrinsicDuration>{}</IntrinsicDuration>",
-            tr.intrinsic_duration
-        );
+        let _ = writeln!(xml, "              <Id>urn:uuid:{}-res</Id>", escape_xml(&tr.uuid));
+        let _ = writeln!(xml, "              <EditRate>{} {}</EditRate>", tr.edit_rate.0.max(1), tr.edit_rate.1.max(1));
+        let _ = writeln!(xml, "              <IntrinsicDuration>{}</IntrinsicDuration>", tr.intrinsic_duration);
         let _ = writeln!(xml, "              <EntryPoint>{}</EntryPoint>", tr.entry_point);
-        let _ = writeln!(
-            xml,
-            "              <SourceDuration>{}</SourceDuration>",
-            tr.source_duration
-        );
-        let _ = writeln!(
-            xml,
-            "              <TrackFileId>urn:uuid:{}</TrackFileId>",
-            escape_xml(&tr.uuid)
-        );
+        let _ = writeln!(xml, "              <SourceDuration>{}</SourceDuration>", tr.source_duration);
+        let _ = writeln!(xml, "              <TrackFileId>urn:uuid:{}</TrackFileId>", escape_xml(&tr.uuid));
         xml.push_str("            </Resource>\n");
         xml.push_str("          </ResourceList>\n");
         let _ = writeln!(xml, "        </{tag}>");
@@ -399,11 +317,7 @@ fn build_imf_pkl(spec: &ImfPackageSpec, cpl_size: u64) -> String {
     xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     xml.push_str("<PackingList xmlns=\"http://www.smpte-ra.org/schemas/429-8/2007/PKL\">\n");
     let _ = writeln!(xml, "  <Id>urn:uuid:{}</Id>", escape_xml(&spec.pkl_uuid));
-    let _ = writeln!(
-        xml,
-        "  <AnnotationText>{}</AnnotationText>",
-        escape_xml(&spec.annotation)
-    );
+    let _ = writeln!(xml, "  <AnnotationText>{}</AnnotationText>", escape_xml(&spec.annotation));
     xml.push_str("  <IssueDate>2026-01-01T00:00:00Z</IssueDate>\n");
     let _ = writeln!(xml, "  <Issuer>{}</Issuer>", escape_xml(&spec.issuer));
     let _ = writeln!(xml, "  <Creator>{}</Creator>", escape_xml(&spec.creator));
@@ -412,35 +326,19 @@ fn build_imf_pkl(spec: &ImfPackageSpec, cpl_size: u64) -> String {
     for tr in &spec.tracks {
         xml.push_str("    <Asset>\n");
         let _ = writeln!(xml, "      <Id>urn:uuid:{}</Id>", escape_xml(&tr.uuid));
-        let _ = writeln!(
-            xml,
-            "      <Hash>{}</Hash>",
-            escape_xml(&tr.hash_base64)
-        );
+        let _ = writeln!(xml, "      <Hash>{}</Hash>", escape_xml(&tr.hash_base64));
         let _ = writeln!(xml, "      <Size>{}</Size>", tr.byte_size.max(1));
         let _ = writeln!(xml, "      <Type>{}</Type>", tr.kind.pkl_mime_type());
-        let _ = writeln!(
-            xml,
-            "      <OriginalFileName>{}</OriginalFileName>",
-            escape_xml(&tr.file_path)
-        );
+        let _ = writeln!(xml, "      <OriginalFileName>{}</OriginalFileName>", escape_xml(&tr.file_path));
         xml.push_str("    </Asset>\n");
     }
 
     xml.push_str("    <Asset>\n");
-    let _ = writeln!(
-        xml,
-        "      <Id>urn:uuid:{}</Id>",
-        escape_xml(&spec.cpl_uuid)
-    );
+    let _ = writeln!(xml, "      <Id>urn:uuid:{}</Id>", escape_xml(&spec.cpl_uuid));
     xml.push_str("      <Hash>AAAAAAAAAAAAAAAAAAAAAAAAAAA=</Hash>\n");
     let _ = writeln!(xml, "      <Size>{}</Size>", cpl_size.max(1));
     xml.push_str("      <Type>text/xml</Type>\n");
-    let _ = writeln!(
-        xml,
-        "      <OriginalFileName>CPL_{}.xml</OriginalFileName>",
-        escape_xml(&spec.cpl_uuid)
-    );
+    let _ = writeln!(xml, "      <OriginalFileName>CPL_{}.xml</OriginalFileName>", escape_xml(&spec.cpl_uuid));
     xml.push_str("    </Asset>\n");
     xml.push_str("  </AssetList>\n");
     xml.push_str("</PackingList>\n");
@@ -451,11 +349,7 @@ fn build_imf_assetmap(spec: &ImfPackageSpec) -> String {
     let mut xml = String::with_capacity(1536);
     xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     xml.push_str("<AssetMap xmlns=\"http://www.smpte-ra.org/schemas/429-9/2007/AM\">\n");
-    let _ = writeln!(
-        xml,
-        "  <Id>urn:uuid:{}</Id>",
-        escape_xml(&spec.assetmap_uuid)
-    );
+    let _ = writeln!(xml, "  <Id>urn:uuid:{}</Id>", escape_xml(&spec.assetmap_uuid));
     let _ = writeln!(xml, "  <Creator>{}</Creator>", escape_xml(&spec.creator));
     xml.push_str("  <VolumeCount>1</VolumeCount>\n");
     xml.push_str("  <IssueDate>2026-01-01T00:00:00Z</IssueDate>\n");
@@ -514,10 +408,7 @@ pub enum PostExportAction {
     /// Generate an HLS `.m3u8` media playlist alongside the encoded file.
     GenerateHlsManifest { segment_duration_sec: u32 },
     /// Generate SMPTE ST 2067-2 IMF `CPL.xml` / `PKL.xml` / `ASSETMAP.xml` alongside MXF outputs.
-    GenerateImfPackage {
-        issuer: String,
-        content_kind: String,
-    },
+    GenerateImfPackage { issuer: String, content_kind: String },
     /// Move or copy the rendered output into an archive directory after verification.
     ArchiveCopy { archive_dir: String },
 }
@@ -535,16 +426,7 @@ pub struct DestinationOutput {
 impl DestinationOutput {
     /// Expand `{sequence}`, `{format}`, `{width}`, `{height}` tokens in `filename_template`.
     pub fn expand_filename(&self, sequence_name: &str) -> String {
-        let safe_seq: String = sequence_name
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || matches!(c, '-' | '_') {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
+        let safe_seq: String = sequence_name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_') { c } else { '_' }).collect();
         let (w, h) = self.settings.frame_size.unwrap_or((1920, 1080));
         self.filename_template
             .replace("{sequence}", &safe_seq)
@@ -567,20 +449,9 @@ pub struct DestinationBundle {
 impl DestinationBundle {
     /// Built-in bundle: **ProRes 422 HQ Archival Master + Web H.264 1080p + Broadcast WAV Stem**.
     pub fn broadcast_and_web_bundle() -> Self {
-        let prores = ExportSettings {
-            format: Format::ProRes,
-            frame_size: Some((3840, 2160)),
-            ..ExportSettings::default()
-        };
-        let web_h264 = ExportSettings {
-            format: Format::H264,
-            frame_size: Some((1920, 1080)),
-            ..ExportSettings::default()
-        };
-        let wav_stem = ExportSettings {
-            format: Format::Wav,
-            ..ExportSettings::default()
-        };
+        let prores = ExportSettings { format: Format::ProRes, frame_size: Some((3840, 2160)), ..ExportSettings::default() };
+        let web_h264 = ExportSettings { format: Format::H264, frame_size: Some((1920, 1080)), ..ExportSettings::default() };
+        let wav_stem = ExportSettings { format: Format::Wav, ..ExportSettings::default() };
         Self {
             id: "broadcast_and_web".into(),
             name: "ProRes 4K Master + Web 1080p H.264 + WAV Stem".into(),
@@ -595,9 +466,7 @@ impl DestinationBundle {
                     name: "Web 1080p H.264".into(),
                     settings: web_h264,
                     filename_template: "{sequence}_{width}x{height}_web.mp4".into(),
-                    post_action: PostExportAction::GenerateHlsManifest {
-                        segment_duration_sec: 6,
-                    },
+                    post_action: PostExportAction::GenerateHlsManifest { segment_duration_sec: 6 },
                 },
                 DestinationOutput {
                     name: "Full Mix Stereo WAV".into(),
@@ -631,9 +500,7 @@ impl WatchFolderRule {
         let Some((_, ext)) = candidate_path.rsplit_once('.') else {
             return false;
         };
-        self.extensions
-            .iter()
-            .any(|e| e.trim_start_matches('.').eq_ignore_ascii_case(ext))
+        self.extensions.iter().any(|e| e.trim_start_matches('.').eq_ignore_ascii_case(ext))
     }
 }
 
@@ -679,18 +546,8 @@ mod tests {
         assert!(master.contains("RESOLUTION=3840x2160,FRAME-RATE=23.976,CODECS=\"hvc1.2.4.L150.B0,mp4a.40.2\""));
 
         let segments = vec![
-            HlsSegment {
-                duration_sec: 6.006,
-                uri: "seg_00000.m4s".into(),
-                title: "Segment 0".into(),
-                byte_range: None,
-            },
-            HlsSegment {
-                duration_sec: 4.5045,
-                uri: "seg_00001.m4s".into(),
-                title: "Segment 1".into(),
-                byte_range: Some((524_288, 0)),
-            },
+            HlsSegment { duration_sec: 6.006, uri: "seg_00000.m4s".into(), title: "Segment 0".into(), byte_range: None },
+            HlsSegment { duration_sec: 4.5045, uri: "seg_00001.m4s".into(), title: "Segment 1".into(), byte_range: Some((524_288, 0)) },
         ];
         let media = build_hls_media_playlist(6, 0, &segments, true);
         assert!(media.contains("#EXT-X-TARGETDURATION:7"));
@@ -749,10 +606,7 @@ mod tests {
 
         let bundle = DestinationBundle::broadcast_and_web_bundle();
         assert_eq!(bundle.outputs.len(), 3);
-        assert_eq!(
-            bundle.outputs[0].expand_filename("Reel 1: Final"),
-            "Reel_1__Final_3840x2160_master.mov"
-        );
+        assert_eq!(bundle.outputs[0].expand_filename("Reel 1: Final"), "Reel_1__Final_3840x2160_master.mov");
 
         let watch = WatchFolderRule {
             watch_dir: "/var/watch/ingest".into(),

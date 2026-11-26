@@ -30,6 +30,8 @@ pub(crate) struct AudioOut {
     seq: Sequence,
     pub sr: u32,
     pub channels: usize,
+    /// Total samples per channel in the export range.
+    pub frames: u64,
     gain: f32,
     limiter: Option<Limiter>,
     latency: i64,
@@ -51,6 +53,7 @@ impl AudioOut {
         let sr = r.sample_rate;
         let start = range.start.to_units_floor(sr as i64);
         let end = range.end().to_units_floor(sr as i64);
+        let frames = u64::try_from(end.saturating_sub(start)).unwrap_or(0);
         let ln = &settings.effects.loudness;
         let limiter = ln.enabled.then(|| {
             let mut l = Limiter::new(sr as f32, r.channels as usize);
@@ -61,7 +64,7 @@ impl AudioOut {
             l
         });
         let latency = limiter.as_ref().map(|l| l.latency() as i64).unwrap_or(0);
-        Ok(AudioOut { project, seq, sr, channels: r.channels as usize, gain: 1.0, limiter, latency, next_in: start, out: start, end, loudness: None })
+        Ok(AudioOut { project, seq, sr, channels: r.channels as usize, frames, gain: 1.0, limiter, latency, next_in: start, out: start, end, loudness: None })
     }
 
     /// The loudness pass: measure the integrated loudness of the whole range and set the gain

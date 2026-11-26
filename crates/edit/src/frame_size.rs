@@ -110,11 +110,15 @@ mod tests {
             essential: None,
             multicam: None,
             time_interpolation: Default::default(),
+            maintain_pitch: false,
             hold_filters: false,
             field_options: None,
             source_channels: Vec::new(),
             audio_stream: 0,
             graphic: None,
+            pitch_semitones: 0.0,
+            generative_extend_head: Tick::ZERO,
+            generative_extend_tail: Tick::ZERO,
         }
     }
 

@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use egui::{Align2, Color32, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use filmcraft_engine::sequence_tools::{DuplicateFrames, duplicate_frames};
 use filmcraft_project::{ClipId, ItemId, MarkerId, Sequence, TrackId, TrackItem, TrackKind};
-use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick, TimeDisplay, TimeRange, format_time};
+use filmcraft_time::{FrameRate, TICKS_PER_SECOND, Tick, TimeRange, format_time};
 use serde_json::{Value, json};
 
 use crate::FilmcraftApp;
@@ -59,7 +59,8 @@ pub(crate) use waveforms::request_peaks;
 #[cfg(test)]
 use waveforms::{source_peaks, waveform_display_gain, waveform_zone_height};
 
-const TOP_H: f32 = 58.0; // timecode + toolbar (left) / ruler (right)
+pub(super) const TOP_H: f32 = 58.0; // timecode + toolbar (left) / ruler (right)
+const OVERVIEW_H: f32 = 20.0; // Cut-page full-sequence bird's-eye overview strip
 const RULER_H: f32 = 44.0;
 const SCROLLBAR_H: f32 = 17.0;
 const DIVIDER_H: f32 = 5.0;
@@ -257,6 +258,8 @@ pub enum Drag {
     Marquee {
         start: MarqueeAnchor,
         before: Vec<ClipId>,
+        /// The caption selection when the drag began (the box selects captions too, #1912).
+        before_captions: Vec<ClipId>,
         add: bool,
         individual: bool,
     },
@@ -278,6 +281,75 @@ fn label_color(app: &FilmcraftApp, l: filmcraft_project::Label) -> Color32 {
     crate::panels::settings::label_color(app, l)
 }
 
+/// DaVinci Resolve Cut-page inspired full-sequence bird's-eye overview strip above the time ruler.
+/// Shows all video and audio clips across `0..duration`, highlights the visible zoom window, and
+/// lets the editor click or drag to jump instantly across long timelines without zooming out.
+fn draw_cut_overview(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, seq: &Sequence, layout: &Layout, t: &Tokens) {
+    let p = ui.painter().clone();
+    let band = Rect::from_min_max(rect.min, pos2(rect.max.x, rect.min.y + OVERVIEW_H));
+    p.rect_filled(band, 0.0, t.header_bg);
+    p.line_segment([band.left_bottom(), band.right_bottom()], Stroke::new(1.0, t.separator));
+
+    let head = Rect::from_min_max(rect.min, pos2(layout.content.min.x, band.max.y));
+    let hresp = ui.interact(head, egui::Id::unique("tl-cut-overview-close"), Sense::click()).on_hover_text(tl!("Hide Cut Overview Strip"));
+    app.auto.add("timeline.cutOverview.toggle", head, "Cut Overview");
+    p.text(pos2(head.min.x + 14.0, head.center().y), Align2::LEFT_CENTER, tl!("CUT OVERVIEW"), Tokens::semibold(9.5), t.accent);
+    if hresp.clicked() {
+        app.ui.timeline.cut_overview = false;
+        return;
+    }
+
+    let strip = Rect::from_min_max(pos2(layout.content.min.x, band.min.y + 2.0), pos2(layout.content.max.x, band.max.y - 2.0));
+    if strip.width() <= 8.0 {
+        return;
+    }
+    p.rect_filled(strip, 2.0, t.tl_ruler_bg);
+
+    let view_span_s = (strip.width() as f64 / layout.pps.max(1.0)).max(0.1);
+    let total_s = seq.duration().seconds().max(layout.scroll + view_span_s).max(1.0);
+    let x_for = |s: f64| strip.min.x + ((s / total_s).clamp(0.0, 1.0) as f32) * strip.width();
+
+    let mid_y = strip.center().y;
+    for tr in &seq.video_tracks {
+        for c in &tr.items {
+            let x0 = x_for(c.start.seconds());
+            let x1 = x_for(c.end().seconds()).max(x0 + 1.5);
+            p.rect_filled(Rect::from_min_max(pos2(x0, strip.min.y + 2.0), pos2(x1, mid_y - 0.5)), 1.0, t.accent.gamma_multiply(0.85));
+        }
+    }
+    for tr in &seq.audio_tracks {
+        for c in &tr.items {
+            let x0 = x_for(c.start.seconds());
+            let x1 = x_for(c.end().seconds()).max(x0 + 1.5);
+            p.rect_filled(Rect::from_min_max(pos2(x0, mid_y + 0.5), pos2(x1, strip.max.y - 2.0)), 1.0, t.render_green.gamma_multiply(0.75));
+        }
+    }
+
+    let vx0 = x_for(layout.scroll);
+    let vx1 = x_for(layout.scroll + view_span_s).max(vx0 + 6.0).min(strip.max.x);
+    let vbox = Rect::from_min_max(pos2(vx0, strip.min.y), pos2(vx1, strip.max.y));
+    p.rect_filled(vbox, 2.0, Color32::from_white_alpha(24));
+    p.rect_stroke(vbox, 2.0, Stroke::new(1.0, t.tab_text_active), StrokeKind::Inside);
+
+    let ph_x = x_for(app.shown_playhead().seconds());
+    p.line_segment([pos2(ph_x, strip.min.y), pos2(ph_x, strip.max.y)], Stroke::new(1.5, t.playhead));
+
+    let resp = ui.interact(strip, egui::Id::unique("tl-cut-overview-strip"), Sense::click_and_drag());
+    app.auto.add("timeline.cutOverview", strip, "Cut Overview Strip");
+    if (resp.clicked() || resp.dragged())
+        && let Some(pos) = resp.interact_pointer_pos()
+    {
+        let frac = ((pos.x - strip.min.x) / strip.width()).clamp(0.0, 1.0) as f64;
+        let sec = frac * total_s;
+        let tick = seq.settings.frame_rate.snap(Tick::from_seconds_f64(sec));
+        let _ = app.session.execute("playhead.set", json!({ "time": tick.0 }));
+        let max_s = max_scroll(seq.duration().seconds(), layout.content.width(), layout.pps);
+        let centered = (sec - view_span_s * 0.5).clamp(0.0, max_s);
+        app.ui.timeline.scroll = centered;
+        app.ui.timeline.target_scroll = centered;
+    }
+}
+
 /// Draw the Timeline and run its interaction. A missing or damaged active sequence shows the empty state; `stable_dt` is capped, and a project snapshot is kept
 /// while commands mutate the session.
 pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
@@ -297,8 +369,10 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     };
     let rate = seq.settings.frame_rate;
     let header_w = app.ui.timeline.header_w;
-    let content = Rect::from_min_max(pos2(rect.min.x + header_w, rect.min.y + TOP_H), pos2(rect.max.x - SCROLLBAR_H, rect.max.y - SCROLLBAR_H));
-    let ruler = Rect::from_min_max(pos2(content.min.x, rect.min.y + TOP_H - RULER_H), pos2(content.max.x, rect.min.y + TOP_H));
+    let overview_h = if app.ui.timeline.cut_overview { OVERVIEW_H } else { 0.0 };
+    let top_h = TOP_H + overview_h;
+    let content = Rect::from_min_max(pos2(rect.min.x + header_w, rect.min.y + top_h), pos2(rect.max.x - SCROLLBAR_H, rect.max.y - SCROLLBAR_H));
+    let ruler = Rect::from_min_max(pos2(content.min.x, rect.min.y + top_h - RULER_H), pos2(content.max.x, rect.min.y + top_h));
     app.last_timeline_width = content.width();
     let painter = ui.painter().clone();
     painter.rect_filled(rect, 0.0, t.panel_bg);
@@ -409,13 +483,7 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let master = Rect::from_min_max(pos2(rect.min.x, tracks_area.max.y - MASTER_H), pos2(content.max.x, tracks_area.max.y));
     painter.rect_filled(master, 0.0, t.tl_header_bg);
     painter.text(pos2(rect.min.x + 44.0, master.center().y), Align2::LEFT_CENTER, tl!("Mix"), Tokens::ui(11.5), t.text);
-    painter.text(
-        pos2(rect.min.x + header_w - 12.0, master.center().y),
-        Align2::RIGHT_CENTER,
-        format!("{:.1}", seq.master_volume_db),
-        Tokens::ui(11.5),
-        t.hot_text,
-    );
+    mix_volume(app, ui, seq, Rect::from_min_max(pos2(rect.min.x + header_w - 72.0, master.min.y + 6.0), pos2(rect.min.x + header_w - 8.0, master.max.y - 6.0)));
 
     // ---- caption tracks
     if cap_n > 0 {
@@ -423,18 +491,23 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
         super::timeline_captions::paint(app, ui, seq, caption_area, &layout, &t);
     }
 
-    // ---- top block: timecode + toggles, ruler
+    // ---- top block: timecode + toggles, ruler, and optional Cut-page Dual-Timeline overview
     draw_top(app, ui, rect, seq, &layout, &t, seq_id);
+    if app.ui.timeline.cut_overview {
+        draw_cut_overview(app, ui, rect, seq, &layout, &t);
+    }
 
     // ---- playhead
-    let ph = app.session.playhead();
+    let ph = app.shown_playhead();
     let px = layout.x_of(ph);
     if px >= content.min.x - 1.0 && px <= content.max.x + 1.0 {
         // a short head on the tick row, as in Effect Controls, so it leaves the markers and timecodes clear
         let (top, tip) = (ruler.max.y - 13.0, ruler.max.y);
         let head = [pos2(px - 5.0, top), pos2(px + 5.0, top), pos2(px + 5.0, tip - 5.0), pos2(px, tip), pos2(px - 5.0, tip - 5.0)];
         painter.add(egui::Shape::convex_polygon(head.to_vec(), t.playhead, Stroke::NONE));
-        painter.line_segment([pos2(px, tip), pos2(px, content.max.y)], Stroke::new(1.0, t.playhead));
+        // a path, not a line segment: egui rounds line segments to whole pixels, so while playing
+        // the line would move in uneven pixel steps and part from its head
+        painter.add(egui::Shape::line(vec![pos2(px, tip), pos2(px, content.max.y)], Stroke::new(1.0, t.playhead)));
     }
     // snap indicator
     if let Some(sx) = app.tl.snap_x.take() {
@@ -793,6 +866,36 @@ fn paint_track_edits(
                 x += 8.0;
             }
         }
+    }
+}
+
+/// The Mix track header's level (#3765): the Mix fader at the playhead (its automation, or a
+/// control held in the Audio Track Mixer), as hot text to drag or type, as on an audio track.
+/// Changes go through `mixer.setValue`, so automation is written where the Mix fader has it; the
+/// changes of one press are one undo step, a typed value its own.
+fn mix_volume(app: &mut FilmcraftApp, ui: &mut egui::Ui, seq: &Sequence, r: Rect) {
+    use filmcraft_project::mixer::{FADER_MAX_DB, FADER_MIN_DB, LANE_VOLUME, MASTER_STRIP};
+    let now = app.session.playhead();
+    let db = app.session.previews.live.get(MASTER_STRIP, LANE_VOLUME).map(|o| o.value).unwrap_or_else(|| seq.master_strip().lane_value(LANE_VOLUME, now));
+    let mut vui = ui.new_child(egui::UiBuilder::new().max_rect(r).layout(egui::Layout::right_to_left(egui::Align::Center)).id_salt("timeline-mix"));
+    let (resp, nv) = crate::widgets::hot_number(
+        &mut vui,
+        tl!("Mix"),
+        egui::Id::unique("timeline-mix-volume"),
+        db.max(FADER_MIN_DB),
+        crate::widgets::HotNumberOptions::new(0.1, (FADER_MIN_DB, FADER_MAX_DB), 1, "", &app.tokens),
+    );
+    app.auto.add("timeline.mix.volume", resp.rect, &format!("{db:.1}"));
+    // as the Audio Track Mixer's fader: a drag holds the control and lets go when it ends (one
+    // undo step, or one gesture of an automation pass); a typed value is set at once
+    let (cmd, p) = match nv {
+        Some(v) if resp.dragged() => ("mixer.touch", json!({"strip": "Mix", "lane": LANE_VOLUME, "value": v, "time": now.0})),
+        Some(v) => ("mixer.setValue", json!({"strip": "Mix", "lane": LANE_VOLUME, "value": v})),
+        None if resp.drag_stopped() => ("mixer.release", json!({"strip": "Mix", "lane": LANE_VOLUME, "time": now.0})),
+        None => return,
+    };
+    if let Err(e) = app.session.execute(cmd, p) {
+        app.ui.status = e.to_string();
     }
 }
 

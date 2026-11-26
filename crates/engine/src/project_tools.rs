@@ -45,7 +45,7 @@ fn spec(
     enabled: Enabled,
     run: Run,
 ) -> CommandSpec {
-    CommandSpec { id, label, menu, shortcut, params, enabled, run, journal: true }
+    CommandSpec { id, label, menu, shortcut, params, enabled, run, journal: true, named: crate::commands::NamedKeys::NONE }
 }
 
 fn query(
@@ -57,7 +57,7 @@ fn query(
     enabled: Enabled,
     run: Run,
 ) -> CommandSpec {
-    CommandSpec { id, label, menu, shortcut, params, enabled, run, journal: false }
+    CommandSpec { id, label, menu, shortcut, params, enabled, run, journal: false, named: crate::commands::NamedKeys::NONE }
 }
 
 const FIND_PARAMS: &str = r#"{"scope":"project|timeline"?,"column":str?,"operator":"contains|matches|beginsWith|endsWith|doesNotContain"?,"text":str?,"rows":[{"column":str,"operator":str,"text":str}]?,"matchAll":bool=true,"caseSensitive":bool=false,"in":"all|clips|markers"?}"#;
@@ -147,7 +147,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             "General…",
             &["File", "Project Settings"],
             None,
-            r#"{"renderer":"gpu|software"?,"videoDisplay":"timecode|feet35|feet16|frames"?,"audioDisplay":"samples|milliseconds"?,"captureFormat":"DV|HDV"?,"titleSafe":[h,v]?,"actionSafe":[h,v]?}"#,
+            r#"{"renderer":"gpu|hybrid|software"?,"gpuTextureLimitDownsample":bool?,"videoDisplay":"timecode|feet35|feet16|frames"?,"audioDisplay":"samples|milliseconds"?,"captureFormat":"DV|HDV"?,"titleSafe":[h,v]?,"actionSafe":[h,v]?}"#,
             always,
             project_settings_general,
         ),
@@ -192,6 +192,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             automate_to_sequence,
         ),
         // ---------------- Help ----------------
+        query("help.systemInfoQuery", "System Info", &[], None, "{}", always, |s, _| Ok(system_info(s))),
         query("help.systemReport", "System Compatibility Report", &[], None, "{}", always, |_, _| Ok(system_report())),
     ]
 }
@@ -211,6 +212,7 @@ pub(crate) fn apply_layout(v: &mut Vec<CommandSpec>) {
     let mut pool = commands();
     pool.extend(crate::sequence_extras::commands());
     pool.extend(crate::scene_detect::commands());
+    pool.extend(crate::media_intelligence::commands());
     // Apply Default Transitions to Selection works on selected clips too (⇧D), not only on
     // selected edit points; the Trim Monitor button keeps using the same id.
     if let Some(c) = v.iter_mut().find(|c| c.id == "trim.applyDefaultTransition")
@@ -236,6 +238,7 @@ pub(crate) fn apply_layout(v: &mut Vec<CommandSpec>) {
             vec![
                 "file.mediaPropertiesFile",
                 "file.mediaProperties",
+                "media.checkContentCredentials",
                 "file.projectSettings.general",
                 "file.projectSettings.scratchDisks",
                 "project.ingestSettings",
@@ -247,7 +250,14 @@ pub(crate) fn apply_layout(v: &mut Vec<CommandSpec>) {
         (At::After("clip.speedDuration"), vec!["clip.sceneEditDetection"]),
         (
             At::After("clip.replaceFromBin"),
-            vec!["clip.restoreCaptionsFromSource", "clip.updateMetadata", "clip.generateAudioWaveform", "clip.automateToSequence"],
+            vec![
+                "clip.restoreCaptionsFromSource",
+                "clip.updateMetadata",
+                "project.indexMediaIntelligence",
+                "clip.timecodeToMetadata",
+                "clip.generateAudioWaveform",
+                "clip.automateToSequence",
+            ],
         ),
         (At::After("sequence.applyAudioTransition"), vec!["trim.applyDefaultTransition"]),
         (At::After("sequence.showThroughEdits"), vec!["sequence.normalizeMixTrack"]),
@@ -789,6 +799,8 @@ pub fn project_subset(p: &Project, keep: &BTreeSet<ItemId>) -> Project {
     prune(&mut out.root, keep);
     out.transcripts.retain(|id, _| keep.contains(id));
     out.narrations.retain(|id, _| keep.contains(id));
+    // a source graphic holds its item's text and metadata: it leaves with that item only
+    out.source_graphics.retain(|id, _| keep.contains(id));
     out.search_bins.clear();
     out
 }
@@ -892,12 +904,14 @@ fn pair_p(p: &Value, k: &str) -> Option<(f64, f64)> {
 }
 
 pub const RENDERER_GPU: &str = "FilmCraft GPU Acceleration (wgpu)";
+pub const RENDERER_HYBRID: &str = "FilmCraft Hybrid Rendering (wgpu + CPU)";
 pub const RENDERER_SOFTWARE: &str = "FilmCraft Software Only (CPU)";
 
 fn general_json(st: &filmcraft_project::ProjectSettings) -> Value {
     json!({
         "renderer": st.renderer,
-        "renderers": [RENDERER_GPU, RENDERER_SOFTWARE],
+        "renderers": [RENDERER_GPU, RENDERER_HYBRID, RENDERER_SOFTWARE],
+        "gpuTextureLimitDownsample": st.gpu_texture_limit_downsample,
         "videoDisplay": st.video_display.label(),
         "audioDisplay": if st.audio_display_samples { "Audio Samples" } else { "Milliseconds" },
         "captureFormat": st.capture_format,
@@ -912,10 +926,14 @@ fn project_settings_general(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(r) = str_p(p, "renderer") {
         st.renderer = match r.to_ascii_lowercase().as_str() {
             "gpu" => RENDERER_GPU.into(),
+            "hybrid" => RENDERER_HYBRID.into(),
             "software" | "cpu" => RENDERER_SOFTWARE.into(),
-            _ if r == RENDERER_GPU || r == RENDERER_SOFTWARE => r.into(),
-            _ => return Err(bad(cmd, "`renderer` is gpu or software")),
+            _ if r == RENDERER_GPU || r == RENDERER_HYBRID || r == RENDERER_SOFTWARE => r.into(),
+            _ => return Err(bad(cmd, "`renderer` is gpu, hybrid, or software")),
         };
+    }
+    if let Some(ds) = bool_p(p, "gpuTextureLimitDownsample") {
+        st.gpu_texture_limit_downsample = ds;
     }
     if let Some(d) = str_p(p, "videoDisplay") {
         let k = d.to_ascii_lowercase().replace([' ', '-'], "");
@@ -1128,6 +1146,11 @@ fn edit_original(s: &mut Session, p: &Value) -> Result<Value> {
             paths.push(path.to_string());
         }
     }
+    // the files as media access resolves them: a stored path it refuses is not handed to the system
+    let paths = paths
+        .iter()
+        .map(|path| s.media.follow(path).map_err(|why| bad("edit.editOriginal", format!("{path} is not opened: {why}"))))
+        .collect::<Result<Vec<String>>>()?;
     if paths.is_empty() {
         return Err(EngineError::Other("select a clip with a media file".into()));
     }
@@ -1211,7 +1234,15 @@ fn update_metadata(s: &mut Session, p: &Value) -> Result<Value> {
     for id in targets(s, p) {
         let Some(it) = s.project.item(id) else { continue };
         let Some(path) = media_of(&s.project, id).and_then(|(_, m)| file_path(m)) else { continue };
-        let side = sidecar_path(path);
+        // the media file as media access resolves it: a refused stored path gets no sidecar written beside it
+        let file = match s.media.follow(path) {
+            Ok(file) => file,
+            Err(why) => {
+                skipped.push(json!({"item": id.0, "path": path, "reason": format!("{path} is not opened: {why}")}));
+                continue;
+            }
+        };
+        let side = sidecar_path(&file);
         if let Ok(old) = s.services.read_file(&side)
             && !String::from_utf8_lossy(&old).contains("xmp:CreatorTool=\"FilmCraft\"")
         {
@@ -1415,6 +1446,36 @@ pub fn system_report() -> Value {
             {"name": "Operating system", "ok": true, "detail": format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH)},
             {"name": "CPU", "ok": cpus >= 4, "detail": format!("{cpus} hardware threads{}", if cpus < 4 { " — 4 or more recommended for 1080p playback" } else { "" })},
         ],
+    })
+}
+
+/// Detailed diagnostic snapshot behind Help ▸ System Info… (`help.systemInfo`).
+pub fn system_info(s: &Session) -> Value {
+    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let seq = s.active_sequence().map(|q| {
+        json!({
+            "name": s.state.active_sequence.and_then(|id| s.project.item(id)).map(|i| i.name.clone()).unwrap_or_default(),
+            "resolution": format!("{}×{}", q.settings.width, q.settings.height),
+            "frameRate": q.settings.frame_rate.label(),
+            "workingColorSpace": q.settings.color.working.label(),
+            "videoTracks": q.video_tracks.len(),
+            "audioTracks": q.audio_tracks.len(),
+        })
+    });
+    json!({
+        "app": format!("FilmCraft {}", env!("CARGO_PKG_VERSION")),
+        "parityTarget": "Adobe Premiere Pro 27.0 (27.0.0.88) / Media Encoder 27.0 (27.0.0.72)",
+        "os": std::env::consts::OS,
+        "family": std::env::consts::FAMILY,
+        "arch": std::env::consts::ARCH,
+        "cpuThreads": cpus,
+        "renderer": s.project.settings.renderer,
+        "gpuTextureLimitDownsample": s.project.settings.gpu_texture_limit_downsample,
+        "hevcEncoder": "filmcraft-hevcenc (Main & Main 10, up to 8K 7680×4320)",
+        "prprojInterchange": "Native gzipped XML (.prproj) import & export",
+        "c2paScanner": "JUMBF / APP11 / caBX / XMP Content Credentials",
+        "projectItems": s.project.items.len(),
+        "activeSequence": seq,
     })
 }
 

@@ -219,6 +219,45 @@ pub enum FxOp {
         aspect: f32,
         gpu_capable: bool,
     },
+    ColorSpaceTransform {
+        mat: [[f32; 3]; 3],
+        in_code: u32,
+        out_code: u32,
+        tone_mode: u32,
+        gamut_comp: bool,
+        max_nits: f32,
+        mix: f32,
+    },
+    ColorWarper {
+        target_hue: f32,
+        hue_rot: f32,
+        chroma_push: f32,
+        luma_lift: f32,
+        falloff: f32,
+        sat_center: f32,
+    },
+    Qualifier3d {
+        key_hue: f32,
+        hue_half: f32,
+        hue_soft: f32,
+        sat_lo: f32,
+        sat_hi: f32,
+        lum_lo: f32,
+        lum_hi: f32,
+        soft: f32,
+        in_ev: f32,
+        in_sat: f32,
+        in_temp: f32,
+        out_ev: f32,
+        out_sat: f32,
+        show_matte: bool,
+    },
+    DynamicZoom {
+        inv_s: f32,
+        cx_px: f32,
+        cy_px: f32,
+        identity: bool,
+    },
 }
 
 /// Effect ids [`FxOp::eval`] understands (the GPU-capable standard effects).
@@ -259,6 +298,10 @@ pub const GPU_EFFECTS: &[&str] = &[
     "vignette",
     "video_limiter",
     "lumetri",
+    "color_space_transform",
+    "color_warper",
+    "qualifier_3d",
+    "dynamic_zoom",
 ];
 
 /// `Image::transformed` without the mip path: the destination rectangle it writes and the inverse.
@@ -585,79 +628,178 @@ impl FxOp {
                 let wc = dec([c[0], c[1], c[2]]);
                 FxOp::VideoLimiter { max: 1.0 + clip_level / 100.0, comp: comp_val, axis, warn, warning_color: wc }
             }
-            "lumetri" => {
-                use crate::effects::{curve_param, is_identity_curve, wheel_rgb};
-                let (basic_on, creative_on, vignette_on) = (on(e, "basic_on"), on(e, "creative_on"), on(e, "vignette_on"));
-                let gs = grade_space(e, cx, "hdr_white");
-                let is_hdr = gs.is_hdr();
-                let has_input_lut = basic_on && !text(e, "input_lut").is_empty();
-                let has_look_lut = creative_on && !text(e, "look_lut").is_empty();
-                let look = if creative_on && !has_look_lut { choice(e, "look") } else { 0 };
-                let sharpen = if creative_on { f(e, "sharpen", cx) / 100.0 } else { 0.0 };
+            "lumetri" => Self::eval_lumetri(e, cx, w, h),
+            "color_space_transform" | "color_warper" | "qualifier_3d" | "dynamic_zoom" => return Self::eval_resolve_fx(e, cx, w, h),
+            _ => return None,
+        })
+    }
 
-                let curves_on = on(e, "curves_on");
-                let has_curves = curves_on && {
-                    ["curve_luma", "curve_red", "curve_green", "curve_blue"].iter().any(|id| curve_param(e, id).is_some_and(|c| !is_identity_curve(&c)))
-                        || ["hue_vs_sat", "hue_vs_hue", "hue_vs_luma", "luma_vs_sat", "sat_vs_sat"]
-                            .iter()
-                            .any(|id| curve_param(e, id).is_some_and(|c| !c.is_empty()))
-                };
+    fn eval_lumetri(e: &EffectInstance, cx: &FxCtx, w: usize, h: usize) -> FxOp {
+        use crate::effects::{curve_param, is_identity_curve, wheel_rgb};
+        let (basic_on, creative_on, vignette_on) = (on(e, "basic_on"), on(e, "creative_on"), on(e, "vignette_on"));
+        let gs = grade_space(e, cx, "hdr_white");
+        let is_hdr = gs.is_hdr();
+        let has_input_lut = basic_on && !text(e, "input_lut").is_empty();
+        let has_look_lut = creative_on && !text(e, "look_lut").is_empty();
+        let look = if creative_on && !has_look_lut { choice(e, "look") } else { 0 };
+        let sharpen = if creative_on { f(e, "sharpen", cx) / 100.0 } else { 0.0 };
 
-                let wheels_on = on(e, "wheels_on");
-                let has_wheels = wheels_on && {
-                    let v2 = |id: &str| e.param(id).map(|p| p.vec2_at(cx.t)).unwrap_or_default();
-                    let (ws, wm, wh) = (wheel_rgb(v2("wheel_shadows")), wheel_rgb(v2("wheel_midtones")), wheel_rgb(v2("wheel_highlights")));
-                    let (ls, lm, lh) = (f(e, "wheel_shadows_l", cx) / 100.0, f(e, "wheel_midtones_l", cx) / 100.0, f(e, "wheel_highlights_l", cx) / 100.0);
-                    ws.iter().chain(&wm).chain(&wh).any(|v| v.abs() > 1e-5) || (ls.abs() + lm.abs() + lh.abs() > 1e-5)
-                };
+        let curves_on = on(e, "curves_on");
+        let has_curves = curves_on && {
+            ["curve_luma", "curve_red", "curve_green", "curve_blue"].iter().any(|id| curve_param(e, id).is_some_and(|c| !is_identity_curve(&c)))
+                || ["hue_vs_sat", "hue_vs_hue", "hue_vs_luma", "luma_vs_sat", "sat_vs_sat"].iter().any(|id| curve_param(e, id).is_some_and(|c| !c.is_empty()))
+        };
 
-                let hsl_on = b(e, "hsl_on");
+        let wheels_on = on(e, "wheels_on");
+        let has_wheels = wheels_on && {
+            let v2 = |id: &str| e.param(id).map(|p| p.vec2_at(cx.t)).unwrap_or_default();
+            let (ws, wm, wh) = (wheel_rgb(v2("wheel_shadows")), wheel_rgb(v2("wheel_midtones")), wheel_rgb(v2("wheel_highlights")));
+            let (ls, lm, lh) = (f(e, "wheel_shadows_l", cx) / 100.0, f(e, "wheel_midtones_l", cx) / 100.0, f(e, "wheel_highlights_l", cx) / 100.0);
+            ws.iter().chain(&wm).chain(&wh).any(|v| v.abs() > 1e-5) || (ls.abs() + lm.abs() + lh.abs() > 1e-5)
+        };
 
-                let gpu_capable = !is_hdr && !has_input_lut && !has_look_lut && look == 0 && sharpen.abs() <= 1e-3 && !has_curves && !has_wheels && !hsl_on;
+        let hsl_on = b(e, "hsl_on");
+        let has_gamut_comp = basic_on && choice(e, "gamut_compression") != 0 && f(e, "gamut_compression_amount", cx) > 1e-3;
+        let has_vig_aberr = vignette_on && f(e, "vignette_aberration", cx) > 1e-3;
 
-                let bf = |id: &str| if basic_on { f(e, id, cx) } else { 0.0 };
-                let temp = bf("temperature") / 100.0;
-                let tint = bf("tint") / 100.0;
-                let exposure = 2f32.powf(bf("exposure"));
-                let contrast = bf("contrast") / 100.0;
-                let hl = bf("highlights") / 100.0;
-                let sh = bf("shadows") / 100.0;
-                let wh = bf("whites") / 100.0;
-                let bl = bf("blacks") / 100.0;
-                let sat = if basic_on { f(e, "saturation", cx) / 100.0 } else { 1.0 } * if creative_on { f(e, "creative_sat", cx) / 100.0 } else { 1.0 };
-                let vib = if creative_on { f(e, "vibrance", cx) / 100.0 } else { 0.0 };
-                let faded = if creative_on { f(e, "faded_film", cx) / 100.0 } else { 0.0 };
-                let st = color(e, "shadow_tint", cx);
-                let ht = color(e, "highlight_tint", cx);
-                let va = if vignette_on { f(e, "vignette_amount", cx) } else { 0.0 };
-                let vmid = f(e, "vignette_midpoint", cx) / 100.0;
-                let vround = f(e, "vignette_roundness", cx) / 100.0;
-                let vfeather = f(e, "vignette_feather", cx) / 100.0;
-                let gains = [1.0 + 0.35 * temp, 1.0 - 0.3 * tint, 1.0 - 0.35 * temp];
-                let aspect = if h > 0 { (w as f32 / h as f32).max(1e-4) } else { 1.0 };
+        let gpu_capable = !is_hdr
+            && !has_input_lut
+            && !has_look_lut
+            && look == 0
+            && sharpen.abs() <= 1e-3
+            && !has_curves
+            && !has_wheels
+            && !hsl_on
+            && !has_gamut_comp
+            && !has_vig_aberr;
 
-                FxOp::Lumetri {
-                    gains,
-                    exposure,
-                    contrast,
-                    hl,
-                    sh,
-                    wh,
-                    bl,
-                    sat,
-                    creative_on,
-                    faded,
-                    vib,
-                    st: [st[0], st[1], st[2]],
-                    ht: [ht[0], ht[1], ht[2]],
-                    vignette_on,
-                    va,
-                    vmid,
-                    vround,
-                    vfeather,
-                    aspect,
-                    gpu_capable,
+        let bf = |id: &str| if basic_on { f(e, id, cx) } else { 0.0 };
+        let temp = bf("temperature") / 100.0;
+        let tint = bf("tint") / 100.0;
+        let exposure = 2f32.powf(bf("exposure"));
+        let contrast = bf("contrast") / 100.0;
+        let hl = bf("highlights") / 100.0;
+        let sh = bf("shadows") / 100.0;
+        let wh = bf("whites") / 100.0;
+        let bl = bf("blacks") / 100.0;
+        let sat = if basic_on { f(e, "saturation", cx) / 100.0 } else { 1.0 } * if creative_on { f(e, "creative_sat", cx) / 100.0 } else { 1.0 };
+        let vib = if creative_on { f(e, "vibrance", cx) / 100.0 } else { 0.0 };
+        let faded = if creative_on { f(e, "faded_film", cx) / 100.0 } else { 0.0 };
+        let st = color(e, "shadow_tint", cx);
+        let ht = color(e, "highlight_tint", cx);
+        let va = if vignette_on { f(e, "vignette_amount", cx) } else { 0.0 };
+        let vmid = f(e, "vignette_midpoint", cx) / 100.0;
+        let vround = f(e, "vignette_roundness", cx) / 100.0;
+        let vfeather = f(e, "vignette_feather", cx) / 100.0;
+        let gains = [1.0 + 0.35 * temp, 1.0 - 0.3 * tint, 1.0 - 0.35 * temp];
+        let aspect = if h > 0 { (w as f32 / h as f32).max(1e-4) } else { 1.0 };
+
+        FxOp::Lumetri {
+            gains,
+            exposure,
+            contrast,
+            hl,
+            sh,
+            wh,
+            bl,
+            sat,
+            creative_on,
+            faded,
+            vib,
+            st: [st[0], st[1], st[2]],
+            ht: [ht[0], ht[1], ht[2]],
+            vignette_on,
+            va,
+            vmid,
+            vround,
+            vfeather,
+            aspect,
+            gpu_capable,
+        }
+    }
+
+    fn eval_resolve_fx(e: &EffectInstance, cx: &FxCtx, w: usize, h: usize) -> Option<FxOp> {
+        Some(match e.effect.as_str() {
+            "color_space_transform" => {
+                let in_code = crate::resolve_fx::resolve_input_code(choice(e, "input_space"), cx.working);
+                let out_code = crate::resolve_fx::resolve_output_code(choice(e, "output_space"), cx.working);
+                let tone_mode = choice(e, "tone_mapping");
+                let raw_nits = f(e, "max_input_nits", cx);
+                let max_nits = if raw_nits.is_finite() { raw_nits.clamp(100.0, 10_000.0) } else { raw_nits };
+                let gamut_comp = b(e, "gamut_compression");
+                let raw_mix = f(e, "mix", cx);
+                let mix = if raw_mix.is_finite() { (raw_mix / 100.0).clamp(0.0, 1.0) } else { raw_mix };
+                let mat = crate::resolve_fx::cst_gamut_matrix(in_code, out_code);
+                FxOp::ColorSpaceTransform { mat, in_code, out_code, tone_mode, gamut_comp, max_nits, mix }
+            }
+            "color_warper" => {
+                let raw_th = f(e, "target_hue", cx);
+                let target_hue = if raw_th.is_finite() { raw_th.rem_euclid(360.0) } else { raw_th };
+                let hue_rot = f(e, "hue_rotate", cx);
+                let chroma_push = f(e, "chroma_push", cx) / 100.0;
+                let luma_lift = f(e, "luma_lift", cx) / 100.0;
+                let raw_fo = f(e, "pin_falloff", cx);
+                let falloff = if raw_fo.is_finite() { raw_fo.clamp(5.0, 180.0) } else { raw_fo };
+                let raw_sc = f(e, "sat_center", cx);
+                let sat_center = if raw_sc.is_finite() { (raw_sc / 100.0).clamp(0.0, 1.0) } else { raw_sc };
+                FxOp::ColorWarper { target_hue, hue_rot, chroma_push, luma_lift, falloff, sat_center }
+            }
+            "qualifier_3d" => {
+                let raw_kh = f(e, "key_hue", cx);
+                let key_hue = if raw_kh.is_finite() { raw_kh.rem_euclid(360.0) } else { raw_kh };
+                let raw_hw = f(e, "hue_width", cx);
+                let hue_half = if raw_hw.is_finite() { (raw_hw * 0.5).clamp(0.5, 180.0) } else { raw_hw };
+                let raw_hs = f(e, "hue_soft", cx);
+                let hue_soft = if raw_hs.is_finite() { raw_hs.clamp(0.5, 90.0) } else { raw_hs };
+                let raw_slo = f(e, "sat_low", cx);
+                let sat_lo = if raw_slo.is_finite() { (raw_slo / 100.0).clamp(0.0, 1.0) } else { raw_slo };
+                let raw_shi = f(e, "sat_high", cx);
+                let sat_hi = if raw_shi.is_finite() && sat_lo.is_finite() { (raw_shi / 100.0).clamp(sat_lo, 1.0) } else { raw_shi };
+                let raw_llo = f(e, "luma_low", cx);
+                let lum_lo = if raw_llo.is_finite() { (raw_llo / 100.0).clamp(0.0, 1.0) } else { raw_llo };
+                let raw_lhi = f(e, "luma_high", cx);
+                let lum_hi = if raw_lhi.is_finite() && lum_lo.is_finite() { (raw_lhi / 100.0).clamp(lum_lo, 1.0) } else { raw_lhi };
+                let raw_ms = f(e, "matte_softness", cx);
+                let soft = if raw_ms.is_finite() { (raw_ms / 100.0 * 0.25).max(0.005) } else { raw_ms };
+                let in_ev = f(e, "inside_exposure", cx);
+                let raw_isat = f(e, "inside_sat", cx);
+                let in_sat = if raw_isat.is_finite() { (raw_isat / 100.0).clamp(0.0, 3.0) } else { raw_isat };
+                let raw_itemp = f(e, "inside_temp", cx);
+                let in_temp = if raw_itemp.is_finite() { (raw_itemp / 100.0).clamp(-1.0, 1.0) } else { raw_itemp };
+                let out_ev = f(e, "outside_exposure", cx);
+                let raw_osat = f(e, "outside_sat", cx);
+                let out_sat = if raw_osat.is_finite() { (raw_osat / 100.0).clamp(0.0, 3.0) } else { raw_osat };
+                let show_matte = b(e, "highlight_matte");
+                FxOp::Qualifier3d { key_hue, hue_half, hue_soft, sat_lo, sat_hi, lum_lo, lum_hi, soft, in_ev, in_sat, in_temp, out_ev, out_sat, show_matte }
+            }
+            "dynamic_zoom" => {
+                let mode = choice(e, "mode");
+                let ease = choice(e, "ease");
+                let raw_s0 = f(e, "start_scale", cx);
+                let raw_s1 = f(e, "end_scale", cx);
+                if !raw_s0.is_finite() || !raw_s1.is_finite() {
+                    return Some(FxOp::DynamicZoom { inv_s: f32::NAN, cx_px: 0.0, cy_px: 0.0, identity: false });
                 }
+                let s0 = (raw_s0 / 100.0).clamp(0.25, 4.0);
+                let s1 = (raw_s1 / 100.0).clamp(0.25, 4.0);
+                let img_stub = Image { w, h, px: Vec::new() };
+                let c0 = point(e, "start_center", cx, &img_stub);
+                let c1 = point(e, "end_center", cx, &img_stub);
+                let (dur_s, cur_s) = match cx.env {
+                    Some(env) => (env.clip_seconds().max(0.05), env.clip_offset().max(0.0)),
+                    None => (5.0, cx.seconds.max(0.0)),
+                };
+                let raw_u = (cur_s / dur_s).clamp(0.0, 1.0) as f32;
+                let u = match mode {
+                    1 => 1.0 - crate::resolve_fx::ease_curve(raw_u, ease),
+                    2 => crate::resolve_fx::ease_curve(1.0 - raw_u, ease),
+                    _ => crate::resolve_fx::ease_curve(raw_u, ease),
+                };
+                let scale = s0 + (s1 - s0) * u;
+                let cx_px = c0.x as f32 + (c1.x as f32 - c0.x as f32) * u;
+                let cy_px = c0.y as f32 + (c1.y as f32 - c0.y as f32) * u;
+                let identity = (scale - 1.0).abs() < 1e-4 && (cx_px - w as f32 * 0.5).abs() < 0.5 && (cy_px - h as f32 * 0.5).abs() < 0.5;
+                FxOp::DynamicZoom { inv_s: 1.0 / scale.max(0.05), cx_px, cy_px, identity }
             }
             _ => return None,
         })
@@ -713,6 +855,18 @@ impl FxOp {
                     && fin(st)
                     && fin(ht)
                     && fin(&[*va, *vmid, *vround, *vfeather, *aspect])
+            }
+            FxOp::ColorSpaceTransform { mat, in_code, out_code, tone_mode, max_nits, mix, .. } => {
+                *in_code <= 10 && *out_code <= 10 && *tone_mode <= 2 && mat.iter().all(|r| fin(r)) && fin(&[*max_nits, *mix])
+            }
+            FxOp::ColorWarper { target_hue, hue_rot, chroma_push, luma_lift, falloff, sat_center } => {
+                fin(&[*target_hue, *hue_rot, *chroma_push, *luma_lift, *falloff, *sat_center])
+            }
+            FxOp::Qualifier3d { key_hue, hue_half, hue_soft, sat_lo, sat_hi, lum_lo, lum_hi, soft, in_ev, in_sat, in_temp, out_ev, out_sat, .. } => {
+                fin(&[*key_hue, *hue_half, *hue_soft, *sat_lo, *sat_hi, *lum_lo, *lum_hi, *soft, *in_ev, *in_sat, *in_temp, *out_ev, *out_sat])
+            }
+            FxOp::DynamicZoom { inv_s, cx_px, cy_px, .. } => {
+                fin(&[*inv_s, *cx_px, *cy_px]) && cx_px.abs() < 1e7 && cy_px.abs() < 1e7
             }
         }
     }
@@ -1123,11 +1277,129 @@ impl FxOp {
                     dec(v)
                 });
             }
+            FxOp::ColorSpaceTransform { .. } | FxOp::ColorWarper { .. } | FxOp::Qualifier3d { .. } | FxOp::DynamicZoom { .. } => {
+                self.apply_resolve_fx(img);
+            }
+        }
+    }
+
+    fn apply_resolve_fx(&self, img: &mut Image) {
+        if !self.gpu_ok() {
+            return;
+        }
+        match self {
+            FxOp::ColorSpaceTransform { mat, in_code, out_code, tone_mode, gamut_comp, max_nits, mix } => {
+                let (mat, in_code, out_code, tone_mode, gamut_comp, max_nits, mix) =
+                    (*mat, *in_code, *out_code, *tone_mode, *gamut_comp, *max_nits, *mix);
+                if mix <= 0.0 || (in_code == out_code && tone_mode == 0 && !gamut_comp) {
+                    return;
+                }
+                let w = img.w;
+                img.px.par_chunks_mut(w * 4).for_each(|row| {
+                    for x in 0..w {
+                        let p = &mut row[x * 4..x * 4 + 4];
+                        let a = p[3];
+                        if a <= 1e-6 {
+                            continue;
+                        }
+                        let unpre = [p[0] / a, p[1] / a, p[2] / a];
+                        let dst = crate::resolve_fx::eval_cst_pixel(unpre, &mat, in_code, out_code, tone_mode, max_nits, gamut_comp);
+                        p[0] = p[0] * (1.0 - mix) + dst[0] * a * mix;
+                        p[1] = p[1] * (1.0 - mix) + dst[1] * a * mix;
+                        p[2] = p[2] * (1.0 - mix) + dst[2] * a * mix;
+                    }
+                });
+            }
+            FxOp::ColorWarper { target_hue, hue_rot, chroma_push, luma_lift, falloff, sat_center } => {
+                let (target_hue, hue_rot, chroma_push, luma_lift, falloff, sat_center) =
+                    (*target_hue, *hue_rot, *chroma_push, *luma_lift, *falloff, *sat_center);
+                if hue_rot.abs() < 1e-4 && chroma_push.abs() < 1e-4 && luma_lift.abs() < 1e-4 {
+                    return;
+                }
+                let w = img.w;
+                img.px.par_chunks_mut(w * 4).for_each(|row| {
+                    for x in 0..w {
+                        let p = &mut row[x * 4..x * 4 + 4];
+                        let a = p[3];
+                        if a <= 1e-6 {
+                            continue;
+                        }
+                        let sr = [linear_to_srgb((p[0] / a).max(0.0)), linear_to_srgb((p[1] / a).max(0.0)), linear_to_srgb((p[2] / a).max(0.0))];
+                        let [h01, s, l] = rgb_to_hsl(sr[0].clamp(0.0, 1.0), sr[1].clamp(0.0, 1.0), sr[2].clamp(0.0, 1.0));
+                        let dh = crate::resolve_fx::shortest_hue_deg(h01 * 360.0, target_hue);
+                        let ang_w = (-0.5 * (dh / (falloff * 0.55)).powi(2)).exp();
+                        let sat_w = (s * 4.0).clamp(0.0, 1.0) * (-0.5 * ((s - sat_center) / 0.45).powi(2)).exp();
+                        let weight = ang_w * sat_w;
+                        if weight <= 1e-4 {
+                            continue;
+                        }
+                        let new_h = (h01 + (hue_rot * weight) / 360.0).rem_euclid(1.0);
+                        let new_s = (s + chroma_push * weight * 0.75).clamp(0.0, 1.0);
+                        let new_l = (l + luma_lift * weight * 0.45).clamp(0.0, 1.0);
+                        let warped = hsl_to_rgb(new_h, new_s, new_l);
+                        p[0] = filmcraft_color::srgb_to_linear(warped[0]) * a;
+                        p[1] = filmcraft_color::srgb_to_linear(warped[1]) * a;
+                        p[2] = filmcraft_color::srgb_to_linear(warped[2]) * a;
+                    }
+                });
+            }
+            FxOp::Qualifier3d { key_hue, hue_half, hue_soft, sat_lo, sat_hi, lum_lo, lum_hi, soft, in_ev, in_sat, in_temp, out_ev, out_sat, show_matte } => {
+                let (key_hue, hue_half, hue_soft, sat_lo, sat_hi, lum_lo, lum_hi, soft) =
+                    (*key_hue, *hue_half, *hue_soft, *sat_lo, *sat_hi, *lum_lo, *lum_hi, *soft);
+                let (in_ev, in_sat, in_temp, out_ev, out_sat, show_matte) = (*in_ev, *in_sat, *in_temp, *out_ev, *out_sat, *show_matte);
+                let w = img.w;
+                img.px.par_chunks_mut(w * 4).for_each(|row| {
+                    for x in 0..w {
+                        let p = &mut row[x * 4..x * 4 + 4];
+                        let a = p[3];
+                        if a <= 1e-6 {
+                            continue;
+                        }
+                        let sr = [linear_to_srgb((p[0] / a).max(0.0)), linear_to_srgb((p[1] / a).max(0.0)), linear_to_srgb((p[2] / a).max(0.0))];
+                        let [h01, s, l] = rgb_to_hsl(sr[0].clamp(0.0, 1.0), sr[1].clamp(0.0, 1.0), sr[2].clamp(0.0, 1.0));
+                        let dh = crate::resolve_fx::shortest_hue_deg(h01 * 360.0, key_hue).abs();
+                        let hw = ((hue_half + hue_soft - dh) / hue_soft).clamp(0.0, 1.0);
+                        let sw = crate::resolve_fx::smooth_band(s, sat_lo, sat_hi, soft);
+                        let lw = crate::resolve_fx::smooth_band(l, lum_lo, lum_hi, soft);
+                        let matte = (hw * sw * lw).clamp(0.0, 1.0);
+                        if show_matte {
+                            let gray = filmcraft_color::srgb_to_linear(0.18);
+                            p[0] = (filmcraft_color::srgb_to_linear(sr[0]) * matte + gray * (1.0 - matte)) * a;
+                            p[1] = (filmcraft_color::srgb_to_linear(sr[1]) * matte + gray * (1.0 - matte)) * a;
+                            p[2] = (filmcraft_color::srgb_to_linear(sr[2]) * matte + gray * (1.0 - matte)) * a;
+                        } else {
+                            let inside = crate::resolve_fx::grade_zone(sr, in_ev, in_sat, in_temp);
+                            let outside = crate::resolve_fx::grade_zone(sr, out_ev, out_sat, 0.0);
+                            p[0] = (inside[0] * matte + outside[0] * (1.0 - matte)) * a;
+                            p[1] = (inside[1] * matte + outside[1] * (1.0 - matte)) * a;
+                            p[2] = (inside[2] * matte + outside[2] * (1.0 - matte)) * a;
+                        }
+                    }
+                });
+            }
+            FxOp::DynamicZoom { inv_s, cx_px, cy_px, identity } => {
+                if *identity {
+                    return;
+                }
+                let (inv_s, cx_px, cy_px) = (*inv_s, *cx_px, *cy_px);
+                let src = img.clone();
+                let (w, h) = (img.w, img.h);
+                let (hw, hh) = (w as f32 * 0.5, h as f32 * 0.5);
+                img.px.par_chunks_mut(w * 4).enumerate().for_each(|(y, row)| {
+                    let sy = cy_px + (y as f32 + 0.5 - hh) * inv_s;
+                    for x in 0..w {
+                        let sx = cx_px + (x as f32 + 0.5 - hw) * inv_s;
+                        let s = src.sample_bilinear_clamped(sx, sy);
+                        row[x * 4..x * 4 + 4].copy_from_slice(&s);
+                    }
+                });
+            }
+            _ => {}
         }
     }
 }
 
-/// Horizontal scale of the Lumetri vignette's coordinates for a Roundness of `vround`
+/// Horizontal scale of the Color Grading vignette's coordinates for a Roundness of `vround`
 /// (−1 … 1) on a frame `aspect` wide. At 0 the vignette is an ellipse that follows the
 /// frame; positive values move it towards a circle (1 = a true circle), negative values
 /// stretch it into a wider oval. Non-finite or out-of-range input never yields NaN.
@@ -1229,6 +1501,7 @@ mod tests {
         let cx = FxCtx {
             t: Tick::ZERO,
             px_scale: 1.0,
+            mask_scale: 1.0,
             seconds: 0.0,
             timecode: "",
             clip_name: "",
@@ -1278,6 +1551,7 @@ mod tests {
         let cx = FxCtx {
             t: Tick::ZERO,
             px_scale: 1.0,
+            mask_scale: 1.0,
             seconds: 0.0,
             timecode: "",
             clip_name: "",

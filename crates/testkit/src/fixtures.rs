@@ -71,7 +71,9 @@ pub fn publish(tmp: &Path, out: &Path) -> std::io::Result<()> {
 
 /// Return `out` if it is a non-empty file; otherwise run `make(tmp)` on a [`temp_path`]
 /// and atomically rename the result into place. Concurrent generators race harmlessly.
-/// `None` when `make` reports failure (the temporary file is removed).
+/// `None` when `make` reports failure (the temporary file is removed), or when its result
+/// cannot be published and no complete winner exists (the reason goes to stderr, so a
+/// test that skips on `None` does not hide it).
 pub fn generate(out: &Path, make: impl FnOnce(&Path) -> bool) -> Option<PathBuf> {
     if complete_file(out) {
         return Some(out.to_path_buf());
@@ -80,11 +82,14 @@ pub fn generate(out: &Path, make: impl FnOnce(&Path) -> bool) -> Option<PathBuf>
         let _ = std::fs::create_dir_all(dir);
     }
     let tmp = temp_path(out);
-    if !make(&tmp) || !tmp.exists() {
+    if !make(&tmp) {
         let _ = std::fs::remove_file(&tmp);
         return None;
     }
-    publish(&tmp, out).ok()?;
+    if let Err(error) = publish(&tmp, out) {
+        eprintln!("fixture {}: could not publish: {error}", out.display());
+        return None;
+    }
     Some(out.to_path_buf())
 }
 
@@ -272,6 +277,19 @@ mod tests {
         std::fs::remove_file(tmp.join("child")).unwrap();
         std::fs::remove_dir(&tmp).unwrap();
         std::fs::remove_dir(&dir).unwrap();
+    }
+
+    #[test]
+    fn generate_handles_successful_callback_writing_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("fixture.bin");
+        assert!(generate(&out, |_| true).is_none());
+        assert!(!out.exists());
+        // a concurrent generator published while this one produced nothing: reuse its file
+        let result = generate(&out, |_| std::fs::write(&out, b"complete winner").is_ok());
+        assert_eq!(result.as_deref(), Some(out.as_path()));
+        assert_eq!(std::fs::read(&out).unwrap(), b"complete winner");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "left a temporary file");
     }
 
     #[test]

@@ -41,10 +41,11 @@ pub enum PanelKind {
     ReferenceMonitor,
     Timecode,
     ProjectNotes,
+    Plugins,
 }
 
 impl PanelKind {
-    pub const ALL: [PanelKind; 28] = [
+    pub const ALL: [PanelKind; 29] = [
         PanelKind::Project,
         PanelKind::MediaBrowser,
         PanelKind::Libraries,
@@ -73,6 +74,7 @@ impl PanelKind {
         PanelKind::ReferenceMonitor,
         PanelKind::Timecode,
         PanelKind::ProjectNotes,
+        PanelKind::Plugins,
     ];
     pub fn title(self) -> &'static str {
         match self {
@@ -92,8 +94,8 @@ impl PanelKind {
             PanelKind::Tools => "Tools",
             PanelKind::AudioMeters => "Audio Meters",
             PanelKind::AudioTrackMixer => "Audio Track Mixer",
-            PanelKind::LumetriColor => "Lumetri Color",
-            PanelKind::LumetriScopes => "Lumetri Scopes",
+            PanelKind::LumetriColor => "Color Grading",
+            PanelKind::LumetriScopes => "Video Scopes",
             PanelKind::EssentialGraphics => "Essential Graphics",
             PanelKind::EssentialSound => "Essential Sound",
             PanelKind::TextToSpeech => "Text to Speech",
@@ -104,6 +106,7 @@ impl PanelKind {
             PanelKind::ReferenceMonitor => "Reference Monitor",
             PanelKind::Timecode => "Timecode",
             PanelKind::ProjectNotes => "Project Notes",
+            PanelKind::Plugins => "Plugins",
         }
     }
     pub fn id(self) -> String {
@@ -111,6 +114,15 @@ impl PanelKind {
     }
     pub fn from_name(s: &str) -> Option<PanelKind> {
         let n = s.to_ascii_lowercase().replace([' ', '_', '-'], "");
+        if n == "colorgrade" || n == "lumetricolor" {
+            return Some(PanelKind::LumetriColor);
+        }
+        if n == "videoscopes" || n == "lumetriscopes" {
+            return Some(PanelKind::LumetriScopes);
+        }
+        if n == "pluginhub" || n == "dctlstudio" {
+            return Some(PanelKind::Plugins);
+        }
         Self::ALL.iter().copied().find(|p| format!("{p:?}").to_ascii_lowercase() == n || p.title().to_ascii_lowercase().replace(' ', "") == n)
     }
     /// Window-menu shortcut (Premiere: Shift+1..9).
@@ -996,5 +1008,27 @@ mod tests {
             second: Box::new(effects.root),
         };
         assert_eq!(read(&split), (None, vec![]));
+    }
+}
+
+#[cfg(test)]
+mod naming_tests {
+    use super::PanelKind;
+
+    #[test]
+    fn grading_panel_names_keep_old_aliases_and_serialization() {
+        for name in ["Lumetri Color", "Color Grade", "Color Grading", "LumetriColor"] {
+            assert_eq!(PanelKind::from_name(name), Some(PanelKind::LumetriColor));
+        }
+        for name in ["Lumetri Scopes", "Video Scopes", "LumetriScopes"] {
+            assert_eq!(PanelKind::from_name(name), Some(PanelKind::LumetriScopes));
+        }
+        assert_eq!(PanelKind::LumetriColor.title(), "Color Grading");
+        assert_eq!(PanelKind::LumetriScopes.title(), "Video Scopes");
+        for panel in [PanelKind::LumetriColor, PanelKind::LumetriScopes] {
+            let saved = serde_json::to_value(panel).unwrap();
+            let loaded: PanelKind = serde_json::from_value(saved).unwrap();
+            assert_eq!(loaded, panel);
+        }
     }
 }

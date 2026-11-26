@@ -470,6 +470,43 @@ pub fn interpolate(a: &Image, b: &Image, t: f32) -> Image {
     out
 }
 
+/// Generative Extend optical-flow motion extrapolation: synthesises a frame `step_frames` (≥ 0)
+/// beyond `anchor` along the motion trajectory observed from `inner` → `anchor`, with smooth
+/// exponential velocity damping so extended shots continue fluidly without tearing at boundaries.
+pub fn extrapolate(inner: &Image, anchor: &Image, step_frames: f32) -> Image {
+    if inner.w != anchor.w || inner.h != anchor.h || anchor.w == 0 || anchor.h == 0 || !step_frames.is_finite() || step_frames <= 1e-3 {
+        return anchor.clone();
+    }
+    let s = anchor.w.div_ceil(WORK_W).max(1);
+    let (pi, pa) = (pyramid(work_luma(inner, s)), pyramid(work_luma(anchor, s)));
+    // Flow `f_ai` maps anchor(x) -> inner(x + u), so velocity from inner -> anchor is `-u`.
+    let (Some(f_ai), Some(f_ia)) = (dense_flow(&pa, &pi), dense_flow(&pi, &pa)) else {
+        return anchor.clone();
+    };
+    let tau_max = 6.0f32;
+    let tau = tau_max * (1.0 - (-step_frames / tau_max).exp());
+    let sf = s as f32;
+    let to_work = |v: f32| v / sf - 0.5;
+    let mut out = Image::new(anchor.w, anchor.h);
+    out.px.par_chunks_mut(anchor.w * 4).enumerate().for_each(|(y, row)| {
+        for (x, o) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let u_back = f_ai.sample(to_work(px), to_work(py));
+            // Forward velocity v = -u_back; backward trace from extrapolated frame to anchor is -tau * v = +tau * u_back
+            let (sx, sy) = (px + tau * u_back[0] * sf, py + tau * u_back[1] * sf);
+            let u_fwd = f_ia.sample(to_work(sx), to_work(sy));
+            let fb_err = ((u_back[0] + u_fwd[0]).powi(2) + (u_back[1] + u_fwd[1]).powi(2)).sqrt();
+            let conf = agree(fb_err);
+            let warped = anchor.sample_bilinear_clamped(sx, sy);
+            let base = anchor.sample_bilinear_clamped(px, py);
+            for k in 0..4 {
+                o[k] = base[k] + (warped[k] - base[k]) * conf;
+            }
+        }
+    });
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

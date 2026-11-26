@@ -448,7 +448,169 @@ fn generate_ducking(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn spec(id: &'static str, label: &'static str, params: &'static str, enabled: Enabled, run: Run, journal: bool) -> CommandSpec {
-    CommandSpec { id, label, menu: &[], shortcut: None, params, enabled, run, journal }
+    CommandSpec { id, label, menu: &[], shortcut: None, params, enabled, run, journal, named: crate::commands::NamedKeys::NONE }
+}
+
+fn parse_audio_handles_s(p: &Value) -> Result<f64> {
+    if let Some(v) = f64_p(p, "audioHandles").or_else(|| f64_p(p, "handles")) {
+        return Ok(v.clamp(0.0, 5.0));
+    }
+    match str_p(p, "audioHandles").or_else(|| str_p(p, "handles")) {
+        None => Ok(1.0),
+        Some(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "none" | "0" | "0s" | "off" => Ok(0.0),
+            "1" | "1s" => Ok(1.0),
+            "2" | "2s" => Ok(2.0),
+            "3" | "3s" => Ok(3.0),
+            "4" | "4s" => Ok(4.0),
+            "5" | "5s" => Ok(5.0),
+            other => Err(bad("audio.separateCrosstalk", format!("unknown audioHandles `{other}` (none, 1s, 2s, 3s, 4s, 5s)"))),
+        },
+    }
+}
+
+fn expand_with_handles(it: &TrackItem, handle_ticks: Tick) -> TrackItem {
+    if handle_ticks.0 <= 0 {
+        return it.clone();
+    }
+    let sp = it.speed.abs().max(1e-6);
+    let max_pre =
+        if it.reverse { Tick::ZERO } else { Tick((it.source_in.0.max(0) as f64 / sp).floor() as i64).min(handle_ticks).min(it.start.max(Tick::ZERO)) };
+    let mut exp = it.clone();
+    exp.start = it.start - max_pre;
+    exp.duration = it.duration + max_pre + handle_ticks;
+    if !it.reverse {
+        exp.source_in = (it.source_in - Tick((max_pre.0 as f64 * sp).round() as i64)).max(Tick::ZERO);
+    }
+    exp
+}
+
+fn separate_crosstalk(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "audio.separateCrosstalk";
+    let clips = targets(s, p);
+    if clips.is_empty() {
+        return Err(bad(cmd, "select one or more audio clips"));
+    }
+    let handles_s = parse_audio_handles_s(p)?;
+    let handle_ticks = Tick::from_seconds_f64(handles_s);
+    let suppression_db = f64_p(p, "suppressionDb").unwrap_or(18.0).clamp(0.0, 48.0);
+    let bleed_margin_db = f64_p(p, "bleedMarginDb").unwrap_or(4.0).clamp(0.0, 30.0) as f32;
+    let fade_s = f64_p(p, "fade").unwrap_or(0.06).clamp(0.01, 1.0);
+    let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
+    let sr = seq.settings.sample_rate.max(1);
+    let provider = s.media.provider(s.project.clone(), s.services.clone());
+
+    let track_items: Vec<(usize, &TrackItem)> = seq.audio_tracks.iter().enumerate().flat_map(|(ti, tr)| tr.items.iter().map(move |it| (ti, it))).collect();
+
+    let mut plans: Vec<(ClipId, Vec<(Tick, f64)>, f64)> = Vec::new();
+    let mut report = Vec::new();
+    for &(ti, it) in track_items.iter().filter(|(_, i)| clips.contains(&i.id)) {
+        let exp_self = expand_with_handles(it, handle_ticks);
+        let competing_expanded: Vec<TrackItem> = track_items
+            .iter()
+            .filter(|&&(oti, o)| oti != ti && o.enabled && o.essential.as_ref().is_none_or(|e| !e.mute))
+            .filter(|&&(_, o)| clips.contains(&o.id) || o.essential.as_ref().is_none_or(|e| e.kind == AudioType::Dialogue))
+            .map(|&(_, o)| expand_with_handles(o, handle_ticks))
+            .filter(|eo| eo.range().overlaps(&exp_self.range()))
+            .collect();
+        let (a0, a1) = (exp_self.start.to_units_floor(sr as i64), exp_self.end().to_units_floor(sr as i64));
+        let self_env = trigger_envelope(&[&exp_self], a0, a1, sr, &provider);
+        let other_refs: Vec<&TrackItem> = competing_expanded.iter().collect();
+        let other_env = trigger_envelope(&other_refs, a0, a1, sr, &provider);
+        let regions = filmcraft_audio_dsp::ducking::crosstalk_regions(&self_env, &other_env, DUCK_HOP_S as f32, -55.0, bleed_margin_db);
+        let start_s = a0 as f64 / sr as f64;
+        let end_s = a1 as f64 / sr as f64;
+        let abs: Vec<(f64, f64)> = regions.iter().map(|(x, y)| (start_s + x, start_s + y)).collect();
+        let lvl = it.effect("volume").and_then(|e| e.param("level"));
+        let base = match lvl {
+            Some(par) if par.is_animated() => par.keyframes.iter().filter_map(|k| k.value.as_f64()).fold(f64::NEG_INFINITY, f64::max),
+            Some(par) => par.value.as_f64().unwrap_or(0.0),
+            None => 0.0,
+        };
+        let kfs = filmcraft_audio_dsp::ducking::duck_keyframes(&abs, start_s, end_s, base, suppression_db, fade_s);
+        let ticks: Vec<(Tick, f64)> = kfs.iter().map(|(t, v)| (it.moving_source_time_at(Tick::from_seconds_f64(*t)).max(Tick::ZERO), *v)).collect();
+        report.push(json!({
+            "clip": it.id.0,
+            "audioHandlesSeconds": handles_s,
+            "competingClips": competing_expanded.iter().map(|o| o.id.0).collect::<Vec<_>>(),
+            "bleedRegions": abs.iter().map(|(a, b)| json!([a, b])).collect::<Vec<_>>(),
+            "keyframes": ticks.len(),
+        }));
+        plans.push((it.id, ticks, base));
+    }
+    let seq_id = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
+    s.edit("Separate Crosstalk", |pr, _| {
+        let seq = pr.sequence_mut(seq_id).ok_or(EngineError::NoSequence)?;
+        for (c, mt_kfs, base) in &plans {
+            let Some((_, it)) = seq.find_item_mut(*c) else { continue };
+            let Some(par) = it.effect_mut("volume").and_then(|e| e.param_mut("level")) else { continue };
+            par.keyframes.clear();
+            par.value = ParamValue::Float(*base);
+            for &(mt, v) in mt_kfs {
+                par.put_keyframe(mt, ParamValue::Float(v));
+            }
+        }
+        Ok(())
+    })?;
+    Ok(json!({"clips": report, "audioHandlesSeconds": handles_s}))
+}
+
+fn enhance_stem_split(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "audio.enhanceStemSplit";
+    let clips = targets(s, p);
+    if clips.is_empty() {
+        return Err(bad(cmd, "select one or more audio clips"));
+    }
+    let enabled = bool_p(p, "enabled");
+    let dialogue = f64_p(p, "dialogue").map(|v| v.clamp(0.0, 200.0));
+    let music = f64_p(p, "music").map(|v| v.clamp(0.0, 200.0));
+    let ambience = f64_p(p, "ambience").map(|v| v.clamp(0.0, 200.0));
+    let sfx = f64_p(p, "sfx").map(|v| v.clamp(0.0, 200.0));
+    let seq_id = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
+    let ph = s.playhead();
+    let updated = s.edit("Enhance Audio Stem Split", |pr, _| {
+        let seq = pr.sequence_mut(seq_id).ok_or(EngineError::NoSequence)?;
+        let mut count = 0usize;
+        for it in seq.audio_tracks.iter_mut().flat_map(|t| t.items.iter_mut()).filter(|i| clips.contains(&i.id)) {
+            if it.essential.is_some() {
+                let old = it.essential.clone();
+                if let Some(st) = it.essential.as_mut() {
+                    st.stems.enabled = enabled.unwrap_or(true);
+                    if let Some(v) = dialogue {
+                        st.stems.dialogue = v;
+                    }
+                    if let Some(v) = music {
+                        st.stems.music = v;
+                    }
+                    if let Some(v) = ambience {
+                        st.stems.ambience = v;
+                    }
+                    if let Some(v) = sfx {
+                        st.stems.sfx = v;
+                    }
+                }
+                let mt = mt_of(it, ph);
+                es::apply(it, old.as_ref(), mt);
+            } else {
+                if it.effect("enhance_stems").is_none()
+                    && let Some(def) = filmcraft_project::find_effect("enhance_stems")
+                {
+                    it.effects.push(def.instance());
+                }
+                if let Some(fx) = it.effect_mut("enhance_stems") {
+                    fx.enabled = enabled.unwrap_or(true);
+                    for (id, val) in [("dialogue", dialogue), ("music", music), ("ambience", ambience), ("sfx", sfx)] {
+                        if let (Some(v), Some(par)) = (val, fx.param_mut(id)) {
+                            par.value = ParamValue::Float(v);
+                        }
+                    }
+                }
+            }
+            count += 1;
+        }
+        Ok(count)
+    })?;
+    Ok(json!({"clips": updated}))
 }
 
 pub fn commands() -> Vec<CommandSpec> {
@@ -459,7 +621,7 @@ pub fn commands() -> Vec<CommandSpec> {
         spec(
             "essentialSound.set",
             "Essential Sound Setting",
-            r#"{"clips":[id]?,"key":"repair.noise.on|repair.noise.amount|repair.humHz|clarity.eqPreset|creative.reverbPreset|ducking.reduceDb|volume.levelDb|mute|…","value":any,"values":{key:value}?,"begin":bool?}"#,
+            r#"{"clips":[id]?,"key":"repair.noise.on|repair.noise.amount|repair.humHz|clarity.eqPreset|creative.reverbPreset|ducking.reduceDb|loudness.leveling.on|stems.dialogue|volume.levelDb|mute|…","value":any,"values":{key:value}?,"begin":bool?}"#,
             has_seq,
             set,
             true,
@@ -476,5 +638,24 @@ pub fn commands() -> Vec<CommandSpec> {
         spec("essentialSound.deletePreset", "Delete Sound Preset", r#"{"name":str,"type":"dialogue|music|sfx|ambience"?}"#, always, delete_preset, true),
         spec("essentialSound.autoMatch", "Auto-Match Loudness", r#"{"clips":[id]?,"target":lufs?}"#, has_seq, auto_match, true),
         spec("essentialSound.generateDucking", "Generate Ducking Keyframes", r#"{"clips":[id]?}"#, has_seq, generate_ducking, true),
+        CommandSpec {
+            id: "audio.separateCrosstalk",
+            label: "Separate Crosstalk",
+            menu: &["Clip", "Audio Options"],
+            shortcut: None,
+            params: r#"{"clips":[id]?,"audioHandles":"none|1s|2s|3s|4s|5s"?,"suppressionDb":f64?,"bleedMarginDb":f64?}"#,
+            enabled: crate::commands::has_selection,
+            run: separate_crosstalk,
+            journal: true,
+            named: crate::commands::NamedKeys::NONE,
+        },
+        spec(
+            "audio.enhanceStemSplit",
+            "Enhance Audio Stem Split",
+            r#"{"clips":[id]?,"enabled":bool?,"dialogue":pct?,"music":pct?,"ambience":pct?,"sfx":pct?}"#,
+            has_seq,
+            enhance_stem_split,
+            true,
+        ),
     ]
 }

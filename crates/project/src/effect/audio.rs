@@ -275,6 +275,18 @@ pub(super) fn defs() -> Vec<EffectDef> {
                 db("output", "Output Gain", 0.0, -30.0, 30.0),
             ],
         ),
+        audio(
+            "audio_leveling",
+            "Audio Leveling",
+            A_AMP,
+            vec![
+                db("target_lufs", "Target Level", -23.0, -60.0, 0.0),
+                pct("amount", "Amount", 75.0, 0.0, 100.0),
+                pct("speed", "Speed", 50.0, 0.0, 100.0),
+                db("max_gain", "Max Gain", 12.0, 0.0, 24.0),
+                db("gate_threshold", "Noise Gate", -55.0, -80.0, -20.0),
+            ],
+        ),
         // ---- Delay and Echo ----
         audio(
             "analog_delay",
@@ -541,6 +553,17 @@ pub(super) fn defs() -> Vec<EffectDef> {
         ),
         audio("swap_channels", "Swap Channels", A_SPECIAL, vec![]),
         audio("vocal_enhancer", "Vocal Enhancer", A_SPECIAL, vec![ch("mode", "Mode", &["Male", "Female", "Music"], 0)]),
+        audio(
+            "enhance_stems",
+            "Enhance Audio Stems",
+            A_SPECIAL,
+            vec![
+                pct("dialogue", "Dialogue", 100.0, 0.0, 200.0),
+                pct("music", "Music", 100.0, 0.0, 200.0),
+                pct("ambience", "Ambience", 100.0, 0.0, 200.0),
+                pct("sfx", "SFX", 100.0, 0.0, 200.0),
+            ],
+        ),
         // ---- Stereo Imagery ----
         audio(
             "stereo_expander",
@@ -560,6 +583,22 @@ pub(super) fn defs() -> Vec<EffectDef> {
         audio("balance_a", "Balance", A_ROOT, vec![num("balance", "Balance", 0.0, -100.0, 100.0, "", 1)]),
         audio("mute", "Mute", A_ROOT, vec![mute_param()]),
         audio("volume_a", "Volume", A_ROOT, vec![b("bypass", "Bypass", false), fs("level", "Level", 0.0, (-96.0, 15.0), (-60.0, 15.0), "dB", 1)]),
+        audio(
+            "dialogue_leveler",
+            "Dialogue Leveler",
+            A_AMP,
+            vec![
+                db("target_lufs", "Target Level", -20.0, -48.0, -6.0),
+                ch(
+                    "mode",
+                    "Dynamics Profile",
+                    &["Optimize Moderate Levels", "Allow Wider Dynamics", "More Lift for Low Levels", "Lift Soft Whispery Sources"],
+                    0,
+                ),
+                pct("background_protect", "Background Noise Protection", 60.0, 0.0, 100.0),
+                db("output_gain", "Output Trim", 0.0, -18.0, 18.0),
+            ],
+        ),
     ]
 }
 

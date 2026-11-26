@@ -1,34 +1,41 @@
 //! Audio effects and their registry.
 
-pub mod channel;
-pub mod declick;
-pub mod dynamics;
-pub mod eq;
-pub mod essential;
-pub mod filters;
-pub mod modulation;
-pub mod multiband;
-pub mod pitch;
-pub mod restoration;
-pub mod reverbs;
-pub mod special;
+pub(crate) mod channel;
+pub(crate) mod declick;
+pub(crate) mod dynamics;
+pub(crate) mod eq;
+pub(crate) mod essential;
+pub(crate) mod fairlight;
+pub(crate) mod filters;
+pub(crate) mod modulation;
+pub(crate) mod multiband;
+pub(crate) mod pitch;
+pub(crate) mod premiere27;
+pub(crate) mod restoration;
+pub(crate) mod reverbs;
+pub(crate) mod special;
 mod stft;
-pub mod time;
+pub(crate) mod time;
 pub(crate) mod util;
 
-pub use channel::{Amplify, Balance, ChannelVolume, Invert, Route, Routing};
-pub use declick::ClickRemover;
-pub use dynamics::{Compressor, Gate, Limiter};
-pub use eq::{ParametricEq, SimpleEq};
-pub use essential::{DeEsser, DeReverb, SpeechEnhance, StereoWidth};
-pub use filters::{FftFilter, FullParametricEq, GraphicEq, NotchFilter, ScientificFilter};
-pub use modulation::{AnalogDelay, ChorusFlanger, Flanger, MultitapDelay, Phaser};
-pub use multiband::{DynamicsRack, MultibandCompressor, TubeCompressor};
+pub(crate) use channel::{Amplify, Balance, ChannelVolume, Invert, Route, Routing};
+pub(crate) use declick::ClickRemover;
+pub(crate) use dynamics::Gate;
+pub use dynamics::{Compressor, Limiter};
+pub(crate) use eq::{ParametricEq, SimpleEq};
+pub use essential::DeEsser;
+pub(crate) use essential::{DeReverb, SpeechEnhance, StereoWidth};
+pub use fairlight::DialogueLeveler;
+pub(crate) use filters::{FftFilter, FullParametricEq, GraphicEq, NotchFilter, ScientificFilter};
+pub(crate) use modulation::{AnalogDelay, ChorusFlanger, Flanger, MultitapDelay, Phaser};
+pub(crate) use multiband::{DynamicsRack, MultibandCompressor, TubeCompressor};
 pub use pitch::PitchShifter;
-pub use restoration::{DeHum, DeNoise};
-pub use reverbs::{ConvolutionReverb, SurroundReverb};
-pub use special::{AmbisonicsPanner, Binauralizer, ChannelMixer, Distortion, GuitarSuite, LoudnessMeterFx, Mastering, Mute, StereoExpander, VocalEnhancer};
-pub use time::{Delay, Reverb};
+pub use premiere27::{AudioLeveling, EnhanceStems};
+pub(crate) use restoration::{DeHum, DeNoise};
+pub(crate) use reverbs::{ConvolutionReverb, SurroundReverb};
+pub use special::LoudnessMeterFx;
+pub(crate) use special::{AmbisonicsPanner, Binauralizer, ChannelMixer, Distortion, GuitarSuite, Mastering, Mute, StereoExpander, VocalEnhancer};
+pub(crate) use time::{Delay, Reverb};
 
 use crate::{AudioEffect, ParamSpec};
 
@@ -143,6 +150,9 @@ static REGISTRY: &[EffectInfo] = &[
     entry!("ambisonics_panner", "Panner - Ambisonics", Special, AmbisonicsPanner),
     entry!("loudness_meter", "Loudness Meter", Special, LoudnessMeterFx),
     entry!("mute", "Mute", Channel, Mute),
+    entry!("audio_leveling", "Audio Leveling", Dynamics, AudioLeveling),
+    entry!("dialogue_leveler", "Dialogue Leveler", Dynamics, DialogueLeveler),
+    entry!("enhance_stems", "Enhance Audio Stems", Special, EnhanceStems),
 ];
 
 /// All registered effects.

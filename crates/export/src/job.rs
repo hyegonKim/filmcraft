@@ -72,10 +72,10 @@ use rayon::prelude::*;
 use crate::audio_out::AudioOut;
 use crate::mxf_out::{MxfMux, MxfSetup};
 use crate::pipeline::Pipeline;
-use crate::settings::{AudioCodec, BitrateMode};
+use crate::settings::{AudioCodec, BitrateMode, HardwareEncoding};
 use crate::{
     AudioEncoder, ColorSignal, EncodedPacket, EncoderFactory, EncoderFrame, ExportError, ExportSettings, Format, H264Pass, Out, PrepareAhead, Progress, Report,
-    Result, Stage, VideoEncoder, audio_factories, export_range, frame_span, note_stage, timed, video_factories,
+    Result, Stage, VideoEncoder, aac_out, audio_factories, export_range, frame_span, note_stage, take_hw_encode_decline, timed, video_factories,
 };
 
 /// Output frames per interleaved group: the video packets of these frames, then the audio up to
@@ -177,6 +177,8 @@ pub struct Exporter {
     measured: bool,
     /// The first pass of a two-pass encode is running.
     first_pass: bool,
+    /// For the report: the software encoder ran where a hardware one was asked for ([`software_fallback`]).
+    warnings: Vec<String>,
     /// Encoded video packets not written yet (the current [`INTERLEAVE`] group).
     queued: Vec<EncodedPacket>,
     /// Created after the first group was encoded (encoders may finalise their codec config then).
@@ -204,23 +206,50 @@ pub(crate) fn hdr_output(working_hdr: bool, sdr: bool, format: Format) -> bool {
     working_hdr && !sdr && matches!(format, Format::H264 | Format::Hevc | Format::ProRes | Format::DnxHr | Format::Apv)
 }
 
-fn make_venc(settings: &ExportSettings, w: u32, h: u32, rate: FrameRate) -> Result<Box<dyn VideoEncoder>> {
+fn make_venc(settings: &ExportSettings, w: u32, h: u32, rate: FrameRate) -> Result<(Box<dyn VideoEncoder>, Option<String>)> {
     pick_encoder(&video_factories().read().unwrap_or_else(|e| e.into_inner()).clone(), settings.video_format(), w, h, rate, settings)
 }
 
-/// Pick the encoder for an export: the first registered factory that takes it.
+/// What the report says when FilmCraft's own encoder runs where a hardware one was asked for (H.264
+/// with Hardware encoding Auto) or declined the export (`declined`: which one and why). `None` when
+/// a hardware encoder runs, or none was asked for.
+fn software_fallback(settings: &ExportSettings, venc: &dyn VideoEncoder, declined: Option<String>) -> Option<String> {
+    if venc.hardware().is_some() {
+        return None;
+    }
+    let format = settings.video_format();
+    match declined {
+        Some(why) => Some(format!("hardware encoding declined ({why}); the software {} encoder ran", format.label())),
+        None if format == Format::H264 && settings.hardware_encoding == HardwareEncoding::Auto => {
+            Some("hardware encoding is Auto, but no hardware H.264 encoder is available here; the software encoder ran".into())
+        }
+        None => None,
+    }
+}
+
+/// Pick the encoder for an export: the first registered factory that takes it, and which hardware
+/// encoder declined the export before it and why, if one did ([`crate::note_hw_encode_declined_by`]).
 ///
 /// A factory answers in one of three ways: it takes the export (`Some(Ok(..))`), it is not its
 /// job (`None`), or it is its job and it failed (`Some(Err(..))`). **A failure must not stop the
 /// walk.** For H.264 the software encoder is the documented fallback ("Hardware encoding: Auto …
-/// otherwise the software encoder"), and for H.265 the hardware encoders come first and the
-/// software encoder takes what they cannot. When no factory takes it, the first failure is what
-/// the user is told — the same message as before.
-fn pick_encoder(factories: &[EncoderFactory], format: Format, w: u32, h: u32, rate: FrameRate, settings: &ExportSettings) -> Result<Box<dyn VideoEncoder>> {
+/// otherwise the software encoder"), and for H.265 there is no software encoder at all, so the
+/// next factory may be the only one that can take the export. When no factory takes it, the
+/// first failure is what the user is told — the same message as before.
+fn pick_encoder(
+    factories: &[EncoderFactory],
+    format: Format,
+    w: u32,
+    h: u32,
+    rate: FrameRate,
+    settings: &ExportSettings,
+) -> Result<(Box<dyn VideoEncoder>, Option<String>)> {
+    // a reason left on this thread by an earlier request is not this export's
+    let _ = take_hw_encode_decline();
     let mut first_failure: Option<ExportError> = None;
     for fac in factories {
         match fac(format, w, h, rate, settings) {
-            Some(Ok(enc)) => return Ok(enc),
+            Some(Ok(enc)) => return Ok((enc, take_hw_encode_decline())),
             Some(Err(e)) if first_failure.is_none() => first_failure = Some(e),
             Some(Err(_)) => {}
             None => {}
@@ -266,7 +295,12 @@ impl Exporter {
             progress.total.store(nframes * if two_pass { 2 } else { 1 }, Ordering::Relaxed);
             progress.set_status(format!("Exporting {} frames ({})", nframes, settings.format.label()));
         }
-        let venc = make_venc(&settings, pipe.w, pipe.h, pipe.rate)?;
+        let (venc, declined) = make_venc(&settings, pipe.w, pipe.h, pipe.rate)?;
+        log::info!("{} export: {} encoder", settings.video_format().label(), venc.hardware().unwrap_or("software"));
+        let warnings: Vec<String> = software_fallback(&settings, venc.as_ref(), declined).into_iter().collect();
+        for w in &warnings {
+            log::warn!("{w}");
+        }
         let brand = if settings.format.is_mp4_with(settings.multiplexer) { Brand::Mp4 } else { Brand::Mov };
         let audio = if settings.has_audio() { Some(AudioOut::new(project.clone(), seq, &settings, range)?) } else { None };
         let aenc: Option<Box<dyn AudioEncoder>> = match (&audio, settings.audio_codec()) {
@@ -295,6 +329,7 @@ impl Exporter {
             audio,
             measured,
             first_pass: two_pass,
+            warnings,
             queued: Vec::new(),
             mux: None,
             mxf: None,
@@ -424,16 +459,13 @@ impl Exporter {
         let file = Out::create(&self.settings)?;
         let mut opts = WriterOptions::new(self.brand);
         opts.metadata = self.settings.metadata.udta();
-        let mut mux = Mp4Writer::new(file, opts).map_err(|e| ExportError::Io(e.to_string()))?;
-        let mut vcfg = TrackConfig::new(self.venc.sample_entry(), self.venc.timescale());
-        vcfg.media_start = self.venc.media_start();
-        self.vt = mux.add_track(vcfg).map_err(|e| ExportError::Io(e.to_string()))?;
-        self.at = match (&self.audio, &self.aenc) {
+        let audio_track = match (&self.audio, &self.aenc) {
             (None, _) => None,
+            (Some(a), Some(enc)) if self.settings.audio_codec() == AudioCodec::Aac => Some(aac_out::mp4_track(&mut opts, a, enc.sample_entry(), enc.priming())),
             (Some(a), Some(enc)) => {
                 let mut c = TrackConfig::new(enc.sample_entry(), a.sr);
                 c.media_start = Some(enc.priming() as i64);
-                Some(mux.add_track(c).map_err(|e| ExportError::Io(e.to_string()))?)
+                Some(c)
             }
             (Some(a), None) => {
                 let f = self.settings.audio.sample_format();
@@ -445,9 +477,14 @@ impl Exporter {
                     channels: a.channels as _,
                     sample_rate: a.sr as f64,
                 };
-                Some(mux.add_track(TrackConfig::new(SampleEntry::pcm(pcm), a.sr)).map_err(|e| ExportError::Io(e.to_string()))?)
+                Some(TrackConfig::new(SampleEntry::pcm(pcm), a.sr))
             }
         };
+        let mut mux = Mp4Writer::new(file, opts).map_err(|e| ExportError::Io(e.to_string()))?;
+        let mut vcfg = TrackConfig::new(self.venc.sample_entry(), self.venc.timescale());
+        vcfg.media_start = self.venc.media_start();
+        self.vt = mux.add_track(vcfg).map_err(|e| ExportError::Io(e.to_string()))?;
+        self.at = audio_track.map(|track| mux.add_track(track)).transpose().map_err(|e| ExportError::Io(e.to_string()))?;
         self.mux = Some(mux);
         Ok(())
     }
@@ -487,7 +524,8 @@ impl Exporter {
             let _ = self.venc.flush()?;
             let stats = self.venc.pass_stats().ok_or_else(|| ExportError::Encode("two-pass statistics missing".into()))?;
             self.settings.h264_pass = H264Pass::Second(stats);
-            self.venc = make_venc(&self.settings, self.pipe.w, self.pipe.h, self.pipe.rate)?;
+            // the same request as the analysis pass's: a hardware encoder declines it again, already reported
+            self.venc = make_venc(&self.settings, self.pipe.w, self.pipe.h, self.pipe.rate)?.0;
             self.first_pass = false;
             self.next = self.f0;
             return Ok(Step::Progress);
@@ -537,6 +575,8 @@ impl Exporter {
             bytes,
             render_fps: nframes as f64 / secs.max(1e-6),
             extra_files,
+            encoder: Some(self.venc.hardware().unwrap_or("software").to_string()),
+            warnings: std::mem::take(&mut self.warnings),
         }))
     }
 
@@ -691,11 +731,22 @@ mod tests {
     }
 
     fn takes(_: Format, _: u32, _: u32, _: FrameRate, _: &ExportSettings) -> Option<Result<Box<dyn VideoEncoder>>> {
-        Some(Ok(Box::new(Dummy)))
+        Some(Ok(Box::new(Dummy(None))))
     }
 
-    /// An encoder that writes nothing; the walk only needs something that can be handed back.
-    struct Dummy;
+    fn takes_in_hardware(_: Format, _: u32, _: u32, _: FrameRate, _: &ExportSettings) -> Option<Result<Box<dyn VideoEncoder>>> {
+        Some(Ok(Box::new(Dummy(Some("NVENC")))))
+    }
+
+    /// A hardware encoder that does not take the export, as NVENC declines a two-pass one.
+    fn declines(_: Format, _: u32, _: u32, _: FrameRate, _: &ExportSettings) -> Option<Result<Box<dyn VideoEncoder>>> {
+        crate::note_hw_encode_declined_by("NVENC", "two-pass VBR");
+        None
+    }
+
+    /// An encoder that writes nothing; the walk only needs something that can be handed back. It
+    /// says it is the hardware encoder it names, if any.
+    struct Dummy(Option<&'static str>);
 
     impl VideoEncoder for Dummy {
         fn sample_entry(&self) -> SampleEntry {
@@ -710,11 +761,22 @@ mod tests {
         fn flush(&mut self) -> Result<Vec<EncodedPacket>> {
             Ok(Vec::new())
         }
+        fn hardware(&self) -> Option<&'static str> {
+            self.0
+        }
+    }
+
+    /// The encoder a walk took, and the decline it reported.
+    fn taken(r: Result<(Box<dyn VideoEncoder>, Option<String>)>) -> (Box<dyn VideoEncoder>, Option<String>) {
+        match r {
+            Ok(t) => t,
+            Err(e) => panic!("the walk took no encoder: {e}"),
+        }
     }
 
     /// The error of a walk that took no encoder. `Box<dyn VideoEncoder>` is not `Debug`, so this
     /// is not `expect_err`.
-    fn error_of(r: Result<Box<dyn VideoEncoder>>) -> ExportError {
+    fn error_of(r: Result<(Box<dyn VideoEncoder>, Option<String>)>) -> ExportError {
         match r {
             Ok(_) => panic!("the walk took an encoder"),
             Err(e) => e,
@@ -742,6 +804,40 @@ mod tests {
         // a factory that declined is not a failure: the message is the "not available" one
         let e = error_of(pick_encoder(&[factory(never), factory(never)], Format::Hevc, 64, 64, FrameRate::FPS_24, &s));
         assert!(e.to_string().contains("encoder not available yet"), "{e}");
+    }
+
+    /// NVENC declined a two-pass H.264 export with Hardware encoding Auto and the software encoder
+    /// took it: the export said nothing, so its file read as NVENC's. Now the walk hands back the
+    /// reason, once, and the report says the software encoder ran and why.
+    #[test]
+    fn a_hardware_encoder_that_declines_is_reported_with_its_reason() {
+        let auto = ExportSettings { format: Format::H264, hardware_encoding: HardwareEncoding::Auto, ..Default::default() };
+        let (venc, declined) = taken(pick_encoder(&[factory(declines), factory(takes)], Format::H264, 64, 64, FrameRate::FPS_24, &auto));
+        assert_eq!(venc.hardware(), None, "the software encoder took it");
+        assert_eq!(declined.as_deref(), Some("NVENC: two-pass VBR"));
+        let warning = software_fallback(&auto, venc.as_ref(), declined);
+        assert_eq!(warning.as_deref(), Some("hardware encoding declined (NVENC: two-pass VBR); the software H.264 encoder ran"));
+        // the reason belonged to that walk: the next one starts without it
+        let (venc, declined) = taken(pick_encoder(&[factory(takes)], Format::H264, 64, 64, FrameRate::FPS_24, &auto));
+        assert_eq!(declined, None);
+        // and with no hardware encoder at all (no driver), Auto still says the software encoder ran
+        let warning = software_fallback(&auto, venc.as_ref(), declined);
+        assert_eq!(warning.as_deref(), Some("hardware encoding is Auto, but no hardware H.264 encoder is available here; the software encoder ran"));
+    }
+
+    /// A hardware encoder that runs, or an export that asked for none, has nothing to warn about.
+    #[test]
+    fn no_warning_when_hardware_runs_or_was_not_asked_for() {
+        let auto = ExportSettings { format: Format::H264, hardware_encoding: HardwareEncoding::Auto, ..Default::default() };
+        let (venc, declined) = taken(pick_encoder(&[factory(takes_in_hardware), factory(takes)], Format::H264, 64, 64, FrameRate::FPS_24, &auto));
+        assert_eq!(venc.hardware(), Some("NVENC"));
+        assert_eq!(software_fallback(&auto, venc.as_ref(), declined), None);
+        // Hardware encoding Off (the default), or Auto on a format no hardware encoder takes
+        let (venc, _) = taken(pick_encoder(&[factory(takes)], Format::H264, 64, 64, FrameRate::FPS_24, &auto));
+        let off = ExportSettings { format: Format::H264, ..Default::default() };
+        let prores = ExportSettings { format: Format::ProRes, hardware_encoding: HardwareEncoding::Auto, ..Default::default() };
+        assert_eq!(software_fallback(&off, venc.as_ref(), None), None);
+        assert_eq!(software_fallback(&prores, venc.as_ref(), None), None);
     }
 
     #[test]

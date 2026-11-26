@@ -167,6 +167,30 @@ pub fn effect_controls(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect, id
             ui.end_row();
             row_line(ui);
 
+            if def.is_some_and(|d| d.kind == filmcraft_project::EffectKind::AudioTransition) {
+                ui.label(tl!("Fade Curve"));
+                let curves =
+                    [("constant_power", tl!("Constant Power")), ("constant_gain", tl!("Constant Gain")), ("exponential_fade", tl!("Exponential Fade"))];
+                let cur_id = x.effect.effect.as_str();
+                let shown_curve = curves.iter().find(|(cid, _)| *cid == cur_id).map_or(cur_id, |(_, l)| *l);
+                let r = craft_ui::ComboBox::from_id_salt(("tr-curve", id.0))
+                    .selected_text(shown_curve)
+                    .width(170.0)
+                    .show_ui(ui, |ui| {
+                        for (cid, label) in curves {
+                            let o = ui.selectable_label(cid == cur_id, label);
+                            if o.clicked() && cid != cur_id {
+                                changes.push(json!({"curve": cid}));
+                            }
+                            elems.push((format!("effectControls.transition.curve.option.{cid}"), o.rect, label.to_string()));
+                        }
+                    })
+                    .response;
+                elems.push(("effectControls.transition.curve".into(), r.rect, shown_curve.to_string()));
+                ui.end_row();
+                row_line(ui);
+            }
+
             for pd in def.map(|d| d.params.as_slice()).unwrap_or(&[]) {
                 let value = x.effect.params.get(pd.id).map_or(&pd.default, |p| &p.value);
                 let label = crate::i18n::t(pd.label);

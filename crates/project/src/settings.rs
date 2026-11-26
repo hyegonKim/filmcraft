@@ -26,6 +26,17 @@ pub struct ProjectSettings {
     /// Project Settings ▸ Scratch Disks. Schema v11.
     #[serde(default)]
     pub scratch: ScratchDisks,
+    /// Auto-downsample frames exceeding GPU max texture dimension (`텍스처 제한 다운샘플링`).
+    #[serde(default = "gpu_tex_downsample_default", skip_serializing_if = "is_true")]
+    pub gpu_texture_limit_downsample: bool,
+}
+
+fn gpu_tex_downsample_default() -> bool {
+    true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
 }
 
 fn title_safe_default() -> (f64, f64) {
@@ -95,6 +106,7 @@ impl Default for ProjectSettings {
             action_safe: action_safe_default(),
             capture_format: capture_format_default(),
             scratch: ScratchDisks::default(),
+            gpu_texture_limit_downsample: true,
         }
     }
 }

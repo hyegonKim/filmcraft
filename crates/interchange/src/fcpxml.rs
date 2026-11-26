@@ -162,6 +162,9 @@ struct Asset {
     has_audio: bool,
 }
 
+/// Most times truncated media is imported again at a shallower depth.
+const MAX_REIMPORTS: usize = 4096;
+
 struct Imp<'a, 'i, 'r> {
     b: Builder,
     opts: &'a ImportOptions,
@@ -172,6 +175,13 @@ struct Imp<'a, 'i, 'r> {
     media_nodes: HashMap<String, Node<'a, 'i>>,
     media_items: HashMap<String, ItemId>,
     media_active: HashSet<String>,
+    /// Compound clips left out because the chain was too deep.
+    depth_hits: usize,
+    /// Media imported incomplete (a nested one below it was left out), by id: the nesting depth
+    /// it was imported at. Reached again at a shallower depth it is imported again.
+    media_truncated_at: HashMap<String, usize>,
+    /// Re-imports of truncated media still allowed.
+    reimports_left: usize,
     mc_angles: HashMap<(String, String), usize>,
     effects: HashMap<String, String>,
 }
@@ -222,6 +232,9 @@ pub(crate) fn import(text: &str, opts: &ImportOptions, report: &mut Report) -> R
         media_nodes: HashMap::new(),
         media_items: HashMap::new(),
         media_active: HashSet::new(),
+        depth_hits: 0,
+        media_truncated_at: HashMap::new(),
+        reimports_left: MAX_REIMPORTS,
         mc_angles: HashMap::new(),
         effects: HashMap::new(),
     };
@@ -266,7 +279,7 @@ pub(crate) fn import(text: &str, opts: &ImportOptions, report: &mut Report) -> R
                 "project" => {
                     if let Some(s) = child(c, "sequence") {
                         let name = c.attribute("name").unwrap_or("Project");
-                        let id = imp.sequence(s, name, Some(bin));
+                        let id = imp.sequence(s, name, Some(bin), None);
                         imp.b.top.push(id);
                     }
                 }
@@ -286,7 +299,7 @@ pub(crate) fn import(text: &str, opts: &ImportOptions, report: &mut Report) -> R
     }
     for p in children(root, "project") {
         if let Some(s) = child(p, "sequence") {
-            let id = imp.sequence(s, p.attribute("name").unwrap_or("Project"), None);
+            let id = imp.sequence(s, p.attribute("name").unwrap_or("Project"), None, None);
             imp.b.top.push(id);
         }
     }
@@ -360,13 +373,29 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
 
     /// Nested sequence or multi-camera source sequence from a `<media>` resource.
     fn media(&mut self, id: &str) -> Option<ItemId> {
+        let depth = self.media_active.len();
+        let mut again = None;
         if let Some(i) = self.media_items.get(id) {
-            return Some(*i);
+            // Imported with a nested one cut off: import it again (into the same item) where that
+            // one now fits.
+            let shallower = self.media_truncated_at.get(id).is_some_and(|d| depth < *d) && !self.media_active.contains(id);
+            if !shallower || self.reimports_left == 0 {
+                return Some(*i);
+            }
+            self.reimports_left -= 1;
+            again = Some(*i);
         }
         let n = *self.media_nodes.get(id)?;
         let seq_node = child(n, "sequence");
         let mc_node = child(n, "multicam");
         if seq_node.is_none() && mc_node.is_none() {
+            return None;
+        }
+        // The active set is the current nesting chain: a long acyclic chain of compound clips
+        // would otherwise recurse once per resource.
+        if depth >= crate::MAX_NESTING_DEPTH {
+            self.depth_hits += 1;
+            self.report.warn(format!("FCPXML media resource {id:?} is nested too deeply; imported as a gap"));
             return None;
         }
         if !self.media_active.insert(id.into()) {
@@ -376,27 +405,33 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
         // Mark the resource before descending: a compound clip can reference itself through a
         // ref-clip before a completed sequence is available to cache.
         let name = n.attribute("name").unwrap_or("Compound Clip").to_string();
+        let hits_before = self.depth_hits;
         let item = if let Some(s) = seq_node {
-            self.sequence(s, &name, None)
+            self.sequence(s, &name, None, again)
         } else if let Some(mc) = mc_node {
-            self.multicam(id, mc, &name, None)
+            self.multicam(id, mc, &name, None, again)
         } else {
             self.media_active.remove(id);
             return None;
         };
         self.media_active.remove(id);
         self.media_items.insert(id.into(), item);
+        if self.depth_hits > hits_before {
+            self.media_truncated_at.insert(id.into(), depth);
+        } else {
+            self.media_truncated_at.remove(id);
+        }
         Some(item)
     }
 
-    fn multicam(&mut self, media_id: &str, mc: Node<'a, 'i>, name: &str, bin: Option<BinId>) -> ItemId {
+    fn multicam(&mut self, media_id: &str, mc: Node<'a, 'i>, name: &str, bin: Option<BinId>, reuse: Option<ItemId>) -> ItemId {
         let (rate, w, h) = mc.attribute("format").and_then(|f| self.formats.get(f)).copied().unwrap_or((FrameRate::default(), 1920, 1080));
         let df = mc.attribute("tcFormat") == Some("DF");
         let mut settings = settings_for(rate, w, h, df);
         if let Some(sr) = mc.attribute("audioRate").and_then(parse_audio_rate) {
             settings.sample_rate = sr;
         }
-        let id = self.b.reserve_sequence(name, settings.clone(), bin);
+        let id = reuse.unwrap_or_else(|| self.b.reserve_sequence(name, settings.clone(), bin));
         let mut seq = empty_sequence(settings.clone());
         let tc_start = attr_time(mc, "tcStart").unwrap_or(Tick::ZERO);
         seq.start_timecode = rate.frame_at(tc_start);
@@ -407,11 +442,7 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
         self.b.ensure_tracks(&mut seq, TrackKind::Audio, num_angles);
         let mut cameras = Vec::with_capacity(angles.len());
         for (idx, angle_el) in angles.into_iter().take(MAX_IMPORTED_TRACKS).enumerate() {
-            let angle_name = angle_el
-                .attribute("name")
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("Angle {}", idx + 1));
+            let angle_name = angle_el.attribute("name").filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(|| format!("Angle {}", idx + 1));
             if let Some(aid) = angle_el.attribute("angleID") {
                 self.mc_angles.insert((media_id.to_string(), aid.to_string()), idx);
             }
@@ -451,23 +482,19 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
                 source: first_source,
             });
         }
-        seq.multicam = Some(filmcraft_project::MulticamSource {
-            cameras,
-            audio: filmcraft_project::MulticamAudio::SwitchAudio,
-            sync: "timecode".into(),
-        });
+        seq.multicam = Some(filmcraft_project::MulticamSource { cameras, audio: filmcraft_project::MulticamAudio::SwitchAudio, sync: "timecode".into() });
         self.b.put_sequence(id, seq);
         id
     }
 
-    fn sequence(&mut self, s: Node<'a, 'i>, name: &str, bin: Option<BinId>) -> ItemId {
+    fn sequence(&mut self, s: Node<'a, 'i>, name: &str, bin: Option<BinId>, reuse: Option<ItemId>) -> ItemId {
         let (rate, w, h) = s.attribute("format").and_then(|f| self.formats.get(f)).copied().unwrap_or((FrameRate::default(), 1920, 1080));
         let df = s.attribute("tcFormat") == Some("DF");
         let mut settings = settings_for(rate, w, h, df);
         if let Some(sr) = s.attribute("audioRate").and_then(parse_audio_rate) {
             settings.sample_rate = sr;
         }
-        let id = self.b.reserve_sequence(name, settings.clone(), bin);
+        let id = reuse.unwrap_or_else(|| self.b.reserve_sequence(name, settings.clone(), bin));
         let mut seq = empty_sequence(settings);
         let tc_start = attr_time(s, "tcStart").unwrap_or(Tick::ZERO);
         seq.start_timecode = rate.frame_at(tc_start);
@@ -614,9 +641,7 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
     fn resolve_wrapped_clip(&mut self, el: Node<'a, 'i>, tag: &str, out: &mut ResolvedElementMedia<'a, 'i>) -> Option<(ItemId, Tick, bool, bool)> {
         let inner = elements(el)
             .find(|c| {
-                matches!(c.tag_name().name(), "video" | "audio" | "asset-clip")
-                    && c.attribute("ref").is_some()
-                    && c.attribute("lane").is_none_or(|l| l == "0")
+                matches!(c.tag_name().name(), "video" | "audio" | "asset-clip") && c.attribute("ref").is_some() && c.attribute("lane").is_none_or(|l| l == "0")
             })
             .or_else(|| elements(el).find(|c| matches!(c.tag_name().name(), "video" | "audio" | "asset-clip") && c.attribute("ref").is_some()))?;
         out.inner_primary = Some(inner);
@@ -631,8 +656,7 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
                 && x.attribute("lane").and_then(|l| l.parse::<i32>().ok()).is_some_and(|l| l < 0)
                 && x.attribute("ref") != Some(cref)
         });
-        let sync_role_disabled =
-            children(el, "sync-source").flat_map(|s| children(s, "audio-role-source")).any(|r| flag(r, "active") == Some(false));
+        let sync_role_disabled = children(el, "sync-source").flat_map(|s| children(s, "audio-role-source")).any(|r| flag(r, "active") == Some(false));
         let au = if tag == "sync-clip" {
             a.has_audio && c_src_enable != "video" && !sync_role_disabled && !has_connected_audio
         } else {
@@ -793,10 +817,7 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
         let mut connected_audio_clips: Vec<filmcraft_project::ClipId> = Vec::new();
         for c in elements(el) {
             let Some(l) = c.attribute("lane").and_then(|l| l.parse::<i32>().ok()) else { continue };
-            if c.has_tag_name("audio")
-                && l < 0
-                && merged_clip_audio_ref.as_deref().is_some_and(|r| c.attribute("ref") == Some(r))
-            {
+            if c.has_tag_name("audio") && l < 0 && merged_clip_audio_ref.as_deref().is_some_and(|r| c.attribute("ref") == Some(r)) {
                 // Audio half of a <clip> already created above.
                 continue;
             }
@@ -813,10 +834,8 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
                 if tag == "sync-clip" && clane < 0 {
                     let after_a_count: usize = seq.audio_tracks.iter().map(|t| t.items.len()).sum();
                     if after_a_count == before_a_count + 1
-                        && let Some(aid) = seq
-                            .audio_tracks
-                            .get(clane.unsigned_abs() as usize - 1)
-                            .and_then(|t| t.items.iter().find(|it| it.start == ct0).map(|it| it.id))
+                        && let Some(aid) =
+                            seq.audio_tracks.get(clane.unsigned_abs() as usize - 1).and_then(|t| t.items.iter().find(|it| it.start == ct0).map(|it| it.id))
                     {
                         connected_audio_clips.push(aid);
                     }
@@ -825,11 +844,7 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
         }
         // In a <sync-clip> where the primary clip supplied video and a single connected clip supplied
         // the synchronized external audio, link them into an AV pair.
-        if tag == "sync-clip"
-            && placed.len() == 1
-            && placed[0].0 == TrackKind::Video
-            && connected_audio_clips.len() == 1
-        {
+        if tag == "sync-clip" && placed.len() == 1 && placed[0].0 == TrackKind::Video && connected_audio_clips.len() == 1 {
             self.link_av_pair(seq, placed[0].1, connected_audio_clips[0]);
         }
         (t0 + dur, vclip)
@@ -920,9 +935,7 @@ impl<'a, 'i> Imp<'a, 'i, '_> {
                     }
                 }
                 ("adjust-panner", TrackKind::Audio) => {
-                    if let Some(p) = self.kparam(a, "amount", &kt, |v| {
-                        ParamValue::Float(v.trim().parse::<f64>().unwrap_or(0.0).clamp(-100.0, 100.0))
-                    }) {
+                    if let Some(p) = self.kparam(a, "amount", &kt, |v| ParamValue::Float(v.trim().parse::<f64>().unwrap_or(0.0).clamp(-100.0, 100.0))) {
                         set_param(ti, "panner", "balance", p);
                     }
                 }
@@ -1158,18 +1171,11 @@ impl Exp<'_, '_> {
         let df = seq.settings.drop_frame && rate.supports_drop_frame();
         let tc0 = rate.tick_of(seq.start_timecode);
         let pad = "  ".repeat(indent);
-        let mut o = format!(
-            "{pad}<multicam format=\"{fmt}\" tcStart=\"{}\" tcFormat=\"{}\">\n",
-            fmt_time(tc0, rate),
-            if df { "DF" } else { "NDF" },
-        );
+        let mut o = format!("{pad}<multicam format=\"{fmt}\" tcStart=\"{}\" tcFormat=\"{}\">\n", fmt_time(tc0, rate), if df { "DF" } else { "NDF" },);
         let mc = seq.cameras();
         for (i, cam) in mc.cameras.iter().enumerate() {
             let angle_id = format!("angle_{i}");
-            o.push_str(&format!(
-                "{pad}  <mc-angle name=\"{}\" angleID=\"{angle_id}\">\n",
-                crate::xml::escape_attr(&cam.name)
-            ));
+            o.push_str(&format!("{pad}  <mc-angle name=\"{}\" angleID=\"{angle_id}\">\n", crate::xml::escape_attr(&cam.name)));
             let mut single = empty_sequence(seq.settings.clone());
             single.start_timecode = seq.start_timecode;
             if let Some(vt) = seq.video_tracks.get(i) {
@@ -1462,15 +1468,7 @@ impl Exp<'_, '_> {
             ));
         }
         if param_modified(a, "panner", "balance") {
-            children.push(kparam_xml(
-                "adjust-panner",
-                "amount",
-                param(a, "panner", "balance"),
-                rate,
-                to_local,
-                |v| num(v.as_f64().unwrap_or(0.0)),
-                "0",
-            ));
+            children.push(kparam_xml("adjust-panner", "amount", param(a, "panner", "balance"), rate, to_local, |v| num(v.as_f64().unwrap_or(0.0)), "0"));
         }
         if param_modified(a, "channel_volume", "left") || param_modified(a, "channel_volume", "right") {
             self.report.warn("channel volume is not exported to FCPXML");
@@ -1480,7 +1478,7 @@ impl Exp<'_, '_> {
     /// Append `<filter-video>` / `<filter-audio>` elements for standard effects on `it`.
     fn effects_children(&mut self, it: &TrackItem, kind: TrackKind, children: &mut Vec<String>) {
         for e in standard_effects(it) {
-            let n = e.def().map(|d| d.name).unwrap_or(&e.effect).to_string();
+            let n = e.def().map(|d| filmcraft_project::interchange_name(d).to_string()).unwrap_or_else(|| e.effect.clone());
             let r = self.effect(&n, &e.effect);
             let tag = if kind == TrackKind::Video { "filter-video" } else { "filter-audio" };
             let mut s = format!("<{tag} ref=\"{r}\" name=\"{}\"", crate::xml::escape_attr(&n));
@@ -1619,9 +1617,7 @@ impl Exp<'_, '_> {
             format!("{} {}", num(x), num(y))
         };
         let uniform = param(it, "motion", "uniform_scale").and_then(|p| p.value.as_bool()).unwrap_or(true);
-        let scale_changed = param_modified(it, "motion", "scale")
-            || (!uniform && param_modified(it, "motion", "scale_width"))
-            || !uniform;
+        let scale_changed = param_modified(it, "motion", "scale") || (!uniform && param_modified(it, "motion", "scale_width")) || !uniform;
         let changed = scale_changed || ["position", "rotation", "anchor"].iter().any(|p| param_modified(it, "motion", p));
         if changed {
             let mut attrs = Vec::new();
@@ -1699,9 +1695,7 @@ impl Exp<'_, '_> {
         if op_changed || blend_mode.is_some() {
             let mut attrs = String::new();
             let mut params = Vec::new();
-            if op_changed
-                && let Some(p) = param(it, "opacity", "opacity")
-            {
+            if op_changed && let Some(p) = param(it, "opacity", "opacity") {
                 let f = |v: &ParamValue| num(v.as_f64().unwrap_or(100.0) / 100.0);
                 attrs.push_str(&format!(" amount=\"{}\"", f(&p.value)));
                 if p.is_animated() {

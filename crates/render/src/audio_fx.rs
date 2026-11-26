@@ -234,6 +234,9 @@ pub const DIRECT: &[(&str, &str, f64)] = &[
     ("multitap_delay", "multitap_delay", 0.0),
     ("convolution_reverb", "convolution_reverb", 0.0),
     ("surround_reverb", "surround_reverb", 0.0),
+    ("audio_leveling", "audio_leveling", 0.5),
+    ("dialogue_leveler", "dialogue_leveler", 0.4),
+    ("enhance_stems", "enhance_stems", 0.05),
 ];
 
 /// Pre-roll of a direct mapping: its own tail, and at least long enough for the DSP's
@@ -298,9 +301,14 @@ fn active(item: &TrackItem) -> Vec<(&EffectInstance, Mapping)> {
     item.effects.iter().filter(|e| e.enabled && !e.def().is_some_and(|d| d.intrinsic)).filter_map(|e| mapping(&e.effect).map(|m| (e, m))).collect()
 }
 
-/// Whether the item has audio effects that change its signal.
+fn item_pitch(item: &TrackItem) -> Option<f32> {
+    let st = item.pitch_semitones as f32;
+    (st.is_finite() && st.abs() >= 1e-4).then(|| st.clamp(-12.0, 12.0))
+}
+
+/// Whether the item has audio effects (or clip semitone pitch shift) that change its signal.
 pub fn has_effects(item: &TrackItem) -> bool {
-    !active(item).is_empty()
+    !active(item).is_empty() || item_pitch(item).is_some()
 }
 
 struct Chain {
@@ -324,6 +332,7 @@ fn structure_hash(item: &TrackItem) -> u64 {
         e.effect.hash(&mut h);
         m.dsp.hash(&mut h);
     }
+    item_pitch(item).map(f32::to_bits).hash(&mut h);
     h.finish()
 }
 
@@ -333,6 +342,7 @@ const BLOCK: usize = 256;
 /// chain, setting keyframed parameters per block.
 fn run(chain: &mut Chain, item: &TrackItem, in0: i64, input: &mut [Vec<f32>], sr: u32) {
     let act = active(item);
+    let pitch = item_pitch(item);
     let n = input[0].len();
     let mut i = 0;
     while i < n {
@@ -342,6 +352,12 @@ fn run(chain: &mut Chain, item: &TrackItem, in0: i64, input: &mut [Vec<f32>], sr
         let mt = item.source_time_at(Tick::from_units(pos.div_euclid(BLOCK as i64) * BLOCK as i64, sr as i64));
         for ((e, m), d) in act.iter().zip(chain.fx.iter_mut()) {
             (m.apply)(d.as_mut(), e, mt);
+        }
+        if let Some(st) = pitch
+            && chain.fx.len() > act.len()
+            && let Some(d) = chain.fx.last_mut()
+        {
+            set_if_changed(d.as_mut(), "semitones", st);
         }
         let mut chans: Vec<&mut [f32]> = input.iter_mut().map(|c| &mut c[i..end]).collect();
         for d in chain.fx.iter_mut() {
@@ -368,14 +384,24 @@ pub fn process(item: &TrackItem, a0: i64, n: usize, sr: u32, read: &dyn Fn(i64, 
         }
         None => {
             let act = active(item);
+            let pitch = item_pitch(item);
             let mt = item.source_time_at(Tick::from_units(a0, sr as i64));
-            let pre_s = act.iter().map(|(e, m)| (m.preroll)(e, mt)).fold(0.0, f64::max);
+            let mut pre_s = act.iter().map(|(e, m)| (m.preroll)(e, mt)).fold(0.0, f64::max);
+            if pitch.is_some() {
+                pre_s = pre_s.max(0.1);
+            }
             let pre = (pre_s * sr as f64).ceil() as usize;
             let mut fx: Vec<Box<dyn AudioEffect>> = Vec::new();
             for (_, m) in &act {
                 if let Some(d) = filmcraft_audio_dsp::create_effect(m.dsp, sr as f32, width) {
                     fx.push(d);
                 }
+            }
+            if let Some(st) = pitch
+                && let Some(mut d) = filmcraft_audio_dsp::create_effect("pitch_shifter", sr as f32, width)
+            {
+                d.set_param("semitones", st);
+                fx.push(d);
             }
             let latency = fx.iter().map(|d| d.latency()).sum::<usize>();
             let chain = Chain { fx, latency, next_out: a0 - pre as i64 };

@@ -133,11 +133,30 @@ pub struct Loudness {
     pub target_lufs: Option<f64>,
     /// Gain the match applied (dB); part of the clip gain while the section is on.
     pub gain_db: f64,
+    /// Premiere Pro 27.0 Audio Leveling (replaces VolumeRider).
+    pub leveling: Slot,
 }
 
 impl Default for Loudness {
     fn default() -> Self {
-        Loudness { enabled: true, measured_lufs: None, target_lufs: None, gain_db: 0.0 }
+        Loudness { enabled: true, measured_lufs: None, target_lufs: None, gain_db: 0.0, leveling: Slot::off(5.0) }
+    }
+}
+
+/// Premiere Pro 27.0 Enhance Audio 4-stem mix controls (0…200 %, 100 % = unity).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StemSplit {
+    pub enabled: bool,
+    pub dialogue: f64,
+    pub music: f64,
+    pub ambience: f64,
+    pub sfx: f64,
+}
+
+impl Default for StemSplit {
+    fn default() -> Self {
+        Self { enabled: false, dialogue: 100.0, music: 100.0, ambience: 100.0, sfx: 100.0 }
     }
 }
 
@@ -264,6 +283,8 @@ pub struct EssentialSound {
     pub volume: ClipVolume,
     #[serde(default)]
     pub mute: bool,
+    #[serde(default)]
+    pub stems: StemSplit,
 }
 
 pub const DEFAULT_PRESET: &str = "(Default)";
@@ -286,6 +307,7 @@ impl EssentialSound {
             pan: Pan::default(),
             volume: ClipVolume::default(),
             mute: false,
+            stems: StemSplit::default(),
         }
     }
 
@@ -312,6 +334,14 @@ impl EssentialSound {
         if parts.first().map(String::as_str) == Some("kind") {
             return Err("the audio type is changed with essentialSound.setType".into());
         }
+        // `ducking.against` takes the type names essentialSound.setType takes (`dialogue`) as well as
+        // the labels the settings store (`Dialogue`)
+        let value = &match (parts.as_slice(), value) {
+            ([section, name], Value::Array(types)) if section == "ducking" && name == "against" => {
+                Value::Array(types.iter().map(|t| t.as_str().and_then(AudioType::parse).map_or_else(|| t.clone(), |k| Value::from(k.label()))).collect())
+            }
+            _ => value.clone(),
+        };
         let mut v = self.to_value();
         {
             let mut cur = &mut v;
@@ -355,6 +385,7 @@ impl EssentialSound {
     fn clamp(&mut self) {
         let c = |v: &mut f64, lo: f64, hi: f64, def: f64| *v = if v.is_finite() { v.clamp(lo, hi) } else { def };
         for s in [
+            &mut self.loudness.leveling,
             &mut self.repair.noise,
             &mut self.repair.rumble,
             &mut self.repair.dehum,
@@ -367,6 +398,9 @@ impl EssentialSound {
             &mut self.creative.width,
         ] {
             c(&mut s.amount, 0.0, 10.0, 5.0);
+        }
+        for stem in [&mut self.stems.dialogue, &mut self.stems.music, &mut self.stems.ambience, &mut self.stems.sfx] {
+            c(stem, 0.0, 200.0, 100.0);
         }
         self.repair.hum_hz = if self.repair.hum_hz < 55 { 50 } else { 60 };
         self.clarity.enhance_tone = self.clarity.enhance_tone.min(1);
@@ -410,6 +444,20 @@ impl EssentialSound {
             }
         };
         let f = ParamValue::Float;
+        if self.loudness.leveling.on {
+            push(
+                "audio_leveling",
+                self.loudness.enabled,
+                &[("target_lufs", f(self.loudness.target_lufs.unwrap_or(-23.0).clamp(-60.0, 0.0))), ("amount", f(self.loudness.leveling.amount * 10.0))],
+            );
+        }
+        if self.stems.enabled {
+            push(
+                "enhance_stems",
+                true,
+                &[("dialogue", f(self.stems.dialogue)), ("music", f(self.stems.music)), ("ambience", f(self.stems.ambience)), ("sfx", f(self.stems.sfx))],
+            );
+        }
         if k.has(Section::Repair) {
             let r = &self.repair;
             if r.rumble.on {
@@ -781,11 +829,15 @@ mod tests {
             essential: None,
             multicam: None,
             time_interpolation: Default::default(),
+            maintain_pitch: false,
             hold_filters: false,
             field_options: None,
             source_channels: Vec::new(),
             audio_stream: 0,
             graphic: None,
+            pitch_semitones: 0.0,
+            generative_extend_head: Tick::ZERO,
+            generative_extend_tail: Tick::ZERO,
         }
     }
 
@@ -808,6 +860,10 @@ mod tests {
         assert!(s.preset.is_empty(), "a manual change leaves the preset");
         s.set("ducking.against", &json!(["Dialogue", "SFX"])).unwrap();
         assert_eq!(s.ducking.against, vec![AudioType::Dialogue, AudioType::Sfx]);
+        // the type names essentialSound.setType takes work too
+        s.set("ducking.against", &json!(["ambience", "music"])).unwrap();
+        assert_eq!(s.ducking.against, vec![AudioType::Ambience, AudioType::Music]);
+        assert!(s.set("ducking.against", &json!(["speech"])).is_err());
     }
 
     #[test]

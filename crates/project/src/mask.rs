@@ -373,6 +373,41 @@ impl TrackMethod {
     }
 }
 
+/// Object/mask tracker quality tier (`최상` Best vs `빠름` Fast).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TrackerQuality {
+    #[default]
+    Best,
+    Fast,
+}
+
+impl TrackerQuality {
+    pub const ALL: [TrackerQuality; 2] = [TrackerQuality::Best, TrackerQuality::Fast];
+    pub fn is_default(&self) -> bool {
+        *self == TrackerQuality::Best
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            TrackerQuality::Best => "Best",
+            TrackerQuality::Fast => "Fast",
+        }
+    }
+    pub fn id(self) -> &'static str {
+        match self {
+            TrackerQuality::Best => "best",
+            TrackerQuality::Fast => "fast",
+        }
+    }
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "best" | "최상" | "high" => Some(TrackerQuality::Best),
+            "fast" | "빠름" | "draft" => Some(TrackerQuality::Fast),
+            _ => None,
+        }
+    }
+}
+
 /// A mask on an effect instance.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Mask {
@@ -391,6 +426,10 @@ pub struct Mask {
     pub mode: MaskMode,
     #[serde(default)]
     pub track_method: TrackMethod,
+    #[serde(default, skip_serializing_if = "TrackerQuality::is_default")]
+    pub tracker_quality: TrackerQuality,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub object_mask: bool,
 }
 
 /// Mask parameter ids (keyframe commands address them with `"mask": n`).
@@ -407,6 +446,8 @@ impl Mask {
             inverted: false,
             mode: MaskMode::Add,
             track_method: TrackMethod::default(),
+            tracker_quality: TrackerQuality::default(),
+            object_mask: false,
         }
     }
     pub fn param(&self, id: &str) -> Option<&Param> {

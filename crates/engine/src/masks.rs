@@ -10,7 +10,7 @@
 //! key folds a continuous drag into one step).
 
 use filmcraft_geom::{Affine, Vec2};
-use filmcraft_project::{ClipId, EffectInstance, Mask, MaskMode, MaskPath, MaskVertex, ParamValue, TrackKind, TrackMethod};
+use filmcraft_project::{ClipId, EffectInstance, Mask, MaskMode, MaskPath, MaskVertex, ParamValue, TrackKind, TrackMethod, TrackerQuality};
 use filmcraft_time::Tick;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -30,7 +30,7 @@ pub struct MaskSel {
 }
 
 fn spec(id: &'static str, label: &'static str, params: &'static str, run: Run) -> CommandSpec {
-    CommandSpec { id, label, menu: &[], shortcut: None, params, enabled: has_seq, run, journal: true }
+    CommandSpec { id, label, menu: &[], shortcut: None, params, enabled: has_seq, run, journal: true, named: crate::commands::NamedKeys::NONE }
 }
 
 pub(crate) fn commands() -> Vec<CommandSpec> {
@@ -38,7 +38,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
         spec(
             "masks.add",
             "Create Mask",
-            r#"{"clip":id?,"effect":index|id?="opacity","shape":"ellipse"|"polygon"|"rectangle"|"bezier"|"colorRegion","path":[[x,y]…]|{vertices}?,"center":[x,y]?,"size":[w,h]?,"cornerRadius":px?,"seed":[x,y]?,"tolerance":f64?,"vertices":n?}"#,
+            r#"{"clip":id?,"effect":index|id?="opacity","shape":"ellipse"|"polygon"|"rectangle"|"bezier"|"colorRegion"|"object","path":[[x,y]…]|{vertices}?,"center":[x,y]?,"size":[w,h]?,"cornerRadius":px?,"seed":[x,y]?,"box":[x0,y0,x1,y1]?,"quality":"best"|"fast"?,"tolerance":f64?,"vertices":n?}"#,
             add,
         ),
         spec(
@@ -47,11 +47,23 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             r#"{"clip":id?,"effect":index|id?="opacity","seed":[x,y]?,"tolerance":f64?,"vertices":n?,"time":ticks?}"#,
             color_region_mask,
         ),
+        spec(
+            "masks.objectMask",
+            "Create Object Mask",
+            r#"{"clip":id?,"effect":index|id?="opacity","box":[x0,y0,x1,y1]?,"quality":"best"|"fast"?,"vertices":n?,"time":ticks?}"#,
+            object_mask,
+        ),
+        spec(
+            "masks.generativeRemove",
+            "Generative Object Removal",
+            r#"{"clip":id?,"box":[x0,y0,x1,y1]?,"radius":px?,"temporalWindow":n?,"quality":"best"|"fast"?,"time":ticks?}"#,
+            generative_remove,
+        ),
         spec("masks.remove", "Delete Mask", r#"{"clip":id?,"effect":index|id?,"mask":n?}"#, remove),
         spec(
             "masks.set",
             "Change Mask",
-            r#"{"clip":id?,"effect":index|id?,"mask":n?,"name":str?,"inverted":bool?,"mode":"none|add|subtract|intersect|lighten|darken|difference"?,"trackMethod":"position|positionRotation|positionScaleRotation"?,"feather":px?,"opacity":pct?,"expansion":px?,"path":path?,"time":ticks?,"merge":key?}"#,
+            r#"{"clip":id?,"effect":index|id?,"mask":n?,"name":str?,"inverted":bool?,"mode":"none|add|subtract|intersect|lighten|darken|difference"?,"trackMethod":"position|positionRotation|positionScaleRotation"?,"trackerQuality":"best|fast"?,"feather":px?,"opacity":pct?,"expansion":px?,"path":path?,"time":ticks?,"merge":key?}"#,
             set,
         ),
         spec(
@@ -66,7 +78,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
         spec(
             "masks.track",
             "Track Selected Mask",
-            r#"{"clip":id?,"effect":index|id?,"mask":n?,"direction":"forward"|"backward"|"bidirectional"?,"frames":n?,"method":"position|positionRotation|positionScaleRotation"?,"keyframeInterval":n?,"wait":bool?}"#,
+            r#"{"clip":id?,"effect":index|id?,"mask":n?,"direction":"forward"|"backward"|"bidirectional"?,"frames":n?,"method":"position|positionRotation|positionScaleRotation"?,"quality":"best"|"fast"?,"keyframeInterval":n?,"wait":bool?}"#,
             track,
         ),
         spec("masks.toggleVertexSmooth", "Convert Mask Vertex", r#"{"clip":id?,"effect":index|id?,"mask":n?,"vertex":n}"#, toggle_smooth),
@@ -80,6 +92,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             enabled: has_seq,
             run: select,
             journal: false,
+            named: crate::commands::NamedKeys::NONE,
         },
         CommandSpec {
             id: "masks.list",
@@ -90,6 +103,7 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
             enabled: has_seq,
             run: list,
             journal: false,
+            named: crate::commands::NamedKeys::NONE,
         },
     ]
 }
@@ -255,10 +269,109 @@ fn color_region_mask(s: &mut Session, p: &Value) -> Result<Value> {
     add(s, &q)
 }
 
+fn parse_box_p(p: &Value) -> Option<[f64; 4]> {
+    let arr = p.get("box")?.as_array()?;
+    if arr.len() < 4 {
+        return None;
+    }
+    let b = [arr[0].as_f64()?, arr[1].as_f64()?, arr[2].as_f64()?, arr[3].as_f64()?];
+    b.iter().all(|v| v.is_finite()).then_some(b)
+}
+
+fn parse_quality_p(p: &Value, cmd: &str) -> Result<Option<TrackerQuality>> {
+    match str_p(p, "trackerQuality").or_else(|| str_p(p, "quality")) {
+        Some(q) => Ok(Some(TrackerQuality::from_name(q).ok_or_else(|| bad(cmd, format!("unknown tracker quality `{q}`")))?)),
+        None => Ok(None),
+    }
+}
+
+fn object_mask_path(s: &Session, clip: ClipId, p: &Value, w: f64, h: f64) -> Result<MaskPath> {
+    let seed_box = parse_box_p(p);
+    let vertex_count = u64_p(p, "vertices").map_or(20, |n| n.clamp(8, 64) as usize);
+    let ph = time_p(s, p, "").unwrap_or(s.playhead());
+    let seq = s.active_sequence().ok_or(EngineError::NoSequence)?;
+    let (_, it) = seq.find_item(clip).ok_or_else(|| bad("masks.objectMask", "no such clip"))?;
+    let mt = it.source_time_at(ph.clamp(it.start, (it.end() - Tick(1)).max(it.start)));
+    if let Some(src) = s.source(it.item) {
+        let scale = (TRACK_MAX_WIDTH / w.max(1.0)).min(1.0) as f32;
+        if let Ok(f) = src.video_frame(filmcraft_media::FrameRequest { time: mt, scale }) {
+            let (fw, fh) = (f.width as usize, f.height as usize);
+            let scaled_box = seed_box.map(|b| {
+                let sx = fw as f64 / w.max(1.0);
+                let sy = fh as f64 / h.max(1.0);
+                [b[0] * sx, b[1] * sy, b[2] * sx, b[3] * sy]
+            });
+            if let Some(raw) = filmcraft_render::track::segment_object_mask(&f.to_rgba8(), fw, fh, scaled_box, vertex_count) {
+                return Ok(raw.transformed(&Affine::scale(w / fw.max(1) as f64, h / fh.max(1) as f64)));
+            }
+        }
+    }
+    let b = seed_box.unwrap_or([w * 0.28, h * 0.22, w * 0.72, h * 0.78]);
+    let cx = 0.5 * (b[0] + b[2]);
+    let cy = 0.5 * (b[1] + b[3]);
+    let rx = (0.5 * (b[2] - b[0]).abs()).max(8.0);
+    let ry = (0.5 * (b[3] - b[1]).abs()).max(8.0);
+    Ok(MaskPath::ellipse(Vec2::new(cx, cy), Vec2::new(rx, ry)))
+}
+
+fn object_mask(s: &mut Session, p: &Value) -> Result<Value> {
+    let mut q = if p.is_object() { p.clone() } else { json!({}) };
+    q["shape"] = json!("object");
+    add(s, &q)
+}
+
+fn generative_remove(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "masks.generativeRemove";
+    let clip = target_clip(s, p)?;
+    let (w, h) = source_size(s, clip);
+    let quality = parse_quality_p(p, CMD)?.unwrap_or(TrackerQuality::Best);
+    let radius = f64_p(p, "radius").filter(|v| v.is_finite()).map(|v| v.clamp(2.0, 256.0));
+    let temporal_window = f64_p(p, "temporalWindow").filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 8.0));
+    let path = object_mask_path(s, clip, p, w, h)?;
+    let def = filmcraft_project::find_effect("generative_object_removal").ok_or_else(|| bad(CMD, "generative_object_removal effect is missing"))?;
+    let seq_id = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
+    let (ei, mi, name) = s.edit("Generative Object Removal", move |pr, st| {
+        let q = pr.sequence_mut(seq_id).ok_or(EngineError::NoSequence)?;
+        let (_, it) = q.find_item_mut(clip).ok_or(filmcraft_edit::EditError::NoItem(clip))?;
+        let ei = match it.effects.iter().position(|e| e.effect == "generative_object_removal") {
+            Some(idx) => idx,
+            None => {
+                it.effects.push(def.instance());
+                it.effects.len() - 1
+            }
+        };
+        let e = &mut it.effects[ei];
+        if let Some(r) = radius
+            && let Some(prm) = e.params.get_mut("inpaint_radius")
+        {
+            prm.value = ParamValue::Float(r);
+        }
+        if let Some(tw) = temporal_window
+            && let Some(prm) = e.params.get_mut("temporal_window")
+        {
+            prm.value = ParamValue::Float(tw);
+        }
+        let n = e.masks.len() + 1;
+        let name = format!("Object Mask ({n})");
+        let mut mask = Mask::new(name.clone(), path);
+        mask.object_mask = true;
+        mask.tracker_quality = quality;
+        mask.feather.value = ParamValue::Float(8.0);
+        e.masks.push(mask);
+        let mi = e.masks.len() - 1;
+        st.selected_mask = Some(MaskSel { clip, effect: ei, mask: mi });
+        st.selected_effect = None;
+        Ok((ei, mi, name))
+    })?;
+    Ok(json!({"clip": clip.0, "effect": ei, "mask": mi, "name": name, "objectMask": true}))
+}
+
 fn add(s: &mut Session, p: &Value) -> Result<Value> {
     let clip = target_clip(s, p)?;
     let (w, h) = source_size(s, clip);
     let shape = str_p(p, "shape").unwrap_or("ellipse").to_ascii_lowercase();
+    let quality = parse_quality_p(p, "masks.add")?.unwrap_or_default();
+    let is_object = matches!(shape.as_str(), "object" | "objectmask" | "object_mask");
     let center = p.get("center").and_then(pt).unwrap_or(Vec2::new(w / 2.0, h / 2.0));
     let r = w.min(h) * 0.2;
     let size = p.get("size").and_then(pt).unwrap_or(Vec2::new(r * 2.0, r * 2.0));
@@ -281,6 +394,7 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
                 };
                 color_region_path(s, clip, p, w, h, seed)?
             }
+            "object" | "objectmask" | "object_mask" => object_mask_path(s, clip, p, w, h)?,
             _ => return Err(bad("masks.add", "a bezier mask needs `path` (pen points)")),
         },
     };
@@ -289,7 +403,8 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let eff = p.get("effect").cloned();
     let seq_id = s.state.active_sequence.ok_or(EngineError::NoSequence)?;
-    let (ei, mi, name) = s.edit("Create Mask", move |pr, st| {
+    let label = if is_object { "Create Object Mask" } else { "Create Mask" };
+    let (ei, mi, name) = s.edit(label, move |pr, st| {
         let q = pr.sequence_mut(seq_id).ok_or(EngineError::NoSequence)?;
         let (_, it) = q.find_item_mut(clip).ok_or(filmcraft_edit::EditError::NoItem(clip))?;
         let ei = effect_index(&it.effects, eff.as_ref(), None, clip).ok_or_else(|| bad("masks.add", "no such effect on clip"))?;
@@ -300,15 +415,23 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
         if e.effect == "motion" {
             return Err(bad("masks.add", "Motion has no masks"));
         }
-        let n = e.masks.iter().filter_map(|m| m.name.strip_prefix("Mask (")?.strip_suffix(')')?.parse::<usize>().ok()).max().unwrap_or(0) + 1;
-        let name = format!("Mask ({n})");
-        e.masks.push(Mask::new(name.clone(), path));
+        let name = if is_object {
+            let n = e.masks.iter().filter_map(|m| m.name.strip_prefix("Object Mask (")?.strip_suffix(')')?.parse::<usize>().ok()).max().unwrap_or(0) + 1;
+            format!("Object Mask ({n})")
+        } else {
+            let n = e.masks.iter().filter_map(|m| m.name.strip_prefix("Mask (")?.strip_suffix(')')?.parse::<usize>().ok()).max().unwrap_or(0) + 1;
+            format!("Mask ({n})")
+        };
+        let mut mask = Mask::new(name.clone(), path);
+        mask.object_mask = is_object;
+        mask.tracker_quality = quality;
+        e.masks.push(mask);
         let mi = e.masks.len() - 1;
         st.selected_mask = Some(MaskSel { clip, effect: ei, mask: mi });
         st.selected_effect = None;
         Ok((ei, mi, name))
     })?;
-    Ok(json!({"clip": clip.0, "effect": ei, "mask": mi, "name": name}))
+    Ok(json!({"clip": clip.0, "effect": ei, "mask": mi, "name": name, "objectMask": is_object}))
 }
 
 fn remove(s: &mut Session, p: &Value) -> Result<Value> {
@@ -347,6 +470,7 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
         Some(m) => Some(TrackMethod::from_name(m).ok_or_else(|| bad("masks.set", format!("unknown tracking method `{m}`")))?),
         None => None,
     };
+    let quality = parse_quality_p(p, "masks.set")?;
     let name = str_p(p, "name").map(str::to_string);
     let inverted = bool_p(p, "inverted");
     let nums: Vec<(&str, f64)> = ["feather", "opacity", "expansion"].into_iter().filter_map(|k| f64_p(p, k).map(|v| (k, v))).collect();
@@ -362,6 +486,9 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
         }
         if let Some(me) = method {
             m.track_method = me;
+        }
+        if let Some(q) = quality {
+            m.tracker_quality = q;
         }
         for (k, v) in nums {
             let v = match k {
@@ -627,6 +754,8 @@ fn list(s: &mut Session, p: &Value) -> Result<Value> {
                         "mode": m.mode.label(),
                         "inverted": m.inverted,
                         "trackMethod": m.track_method.label(),
+                        "trackerQuality": m.tracker_quality.label(),
+                        "objectMask": m.object_mask,
                         "feather": m.feather.f64_at(mt),
                         "opacity": m.opacity.f64_at(mt),
                         "expansion": m.expansion.f64_at(mt),
@@ -661,6 +790,8 @@ pub struct PendingTrack {
     /// (media time, path) in tracking order.
     pub keys: Arc<Mutex<Vec<(Tick, MaskPath)>>>,
     applied: usize,
+    /// `Session::document_epoch` when the job started; a different value means the project was replaced.
+    epoch: u64,
 }
 
 /// Longest side of the frames the tracker works on (speed; the result is in clip pixels).
@@ -686,6 +817,7 @@ fn track(s: &mut Session, p: &Value) -> Result<Value> {
         Some(m) => TrackMethod::from_name(m).ok_or_else(|| bad("masks.track", format!("unknown method `{m}`")))?,
         None => mask.track_method,
     };
+    let quality = parse_quality_p(p, "masks.track")?.unwrap_or(mask.tracker_quality);
     let direction = match str_p(p, "direction").unwrap_or("forward") {
         "forward" => TrackingDirection::Forward,
         "backward" => TrackingDirection::Backward,
@@ -728,7 +860,11 @@ fn track(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let src = s.source(it.item).ok_or_else(|| EngineError::Other("the clip has no media to track".into()))?;
     let size = filmcraft_render::source_size(&s.project, it.item).ok_or_else(|| bad("masks.track", "the clip has no picture"))?;
-    let scale = (TRACK_MAX_WIDTH / size.0.max(1) as f64).min(1.0) as f32;
+    let max_track_w = match quality {
+        TrackerQuality::Best => 1280.0,
+        TrackerQuality::Fast => 560.0,
+    };
+    let scale = (max_track_w / size.0.max(1) as f64).min(1.0) as f32;
     let id = s.jobs.iter().map(|j| j.id).max().unwrap_or(0) + 1;
     let dir_label = match direction {
         TrackingDirection::Forward => "forward",
@@ -771,7 +907,7 @@ fn track(s: &mut Session, p: &Value) -> Result<Value> {
                             break 'passes;
                         };
                         let region: Vec<Vec2> = path.flatten(0.5).into_iter().map(|q| q * k_prev).collect();
-                        let Some(st) = filmcraft_render::track::track_step(&prev, &next, &region, method) else {
+                        let Some(st) = filmcraft_render::track::track_step_with_quality(&prev, &next, &region, method, quality) else {
                             err = Some(format!("lost track after {} frame(s): not enough detail inside the mask", step - 1));
                             break 'passes;
                         };
@@ -800,7 +936,7 @@ fn track(s: &mut Session, p: &Value) -> Result<Value> {
                 seconds: secs,
                 bytes: 0,
                 render_fps: done as f64 / secs.max(1e-6),
-                extra_files: Vec::new(),
+                ..Default::default()
             }),
         };
         *lock(&prog.status) = match &err {
@@ -812,7 +948,7 @@ fn track(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let run = crate::export_tools::guard_job(job.progress.clone(), job.result.clone(), run);
     s.jobs.push(job);
-    s.mask_jobs.push(PendingTrack { job: id, target: MaskSel { clip, effect: ei, mask: mi }, seq: seq_id, keys, applied: 0 });
+    s.mask_jobs.push(PendingTrack { job: id, target: MaskSel { clip, effect: ei, mask: mi }, seq: seq_id, keys, applied: 0, epoch: s.document_epoch });
     let wait = crate::commands::bool_p(p, "wait").unwrap_or(false);
     if wait || cfg!(target_arch = "wasm32") {
         run();
@@ -828,13 +964,33 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Cancel and drop every pending tracking job. Called when the project is replaced, so a job started
+/// on the old project can never write its result into the new one.
+pub fn discard_jobs(s: &mut Session) {
+    use std::sync::atomic::Ordering;
+    for pj in std::mem::take(&mut s.mask_jobs) {
+        if let Some(j) = s.jobs.iter().find(|j| j.id == pj.job) {
+            j.progress.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Write newly tracked paths as Mask Path keyframes (one merged undo step per tracking job) and
-/// drop finished jobs. Called from [`Session::poll_persistence`] (once per UI frame) and after
-/// synchronous runs.
+/// drop finished jobs. Called from [`Session::poll_persistence`] (once per UI frame), before each
+/// top-level [`Session::execute`] (headless sessions) and after synchronous runs.
 pub fn poll(s: &mut Session) {
     use std::sync::atomic::Ordering;
     let mut i = 0;
     while i < s.mask_jobs.len() {
+        if s.mask_jobs[i].epoch != s.document_epoch {
+            // the project was replaced under the job: its result belongs to a document that is gone
+            s.error_toast("masks.track", "the project was replaced; mask tracking stopped");
+            if let Some(j) = s.jobs.iter().find(|j| j.id == s.mask_jobs[i].job) {
+                j.progress.cancel.store(true, Ordering::Relaxed);
+            }
+            s.mask_jobs.remove(i);
+            continue;
+        }
         let finished = s.jobs.iter().find(|j| j.id == s.mask_jobs[i].job).is_none_or(|j| j.progress.finished.load(Ordering::Relaxed));
         let new: Vec<(Tick, MaskPath)> = {
             let pj = &s.mask_jobs[i];

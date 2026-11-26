@@ -19,6 +19,8 @@ pub(super) const UTILITY: &[&str] = &["Video Effects", "Utility"];
 pub(super) const OBSOLETE: &[&str] = &["Video Effects", "Obsolete"];
 /// The Effects panel's Legacy bin.
 pub(super) const LEGACY: &[&str] = &["Legacy", "Video Effects"];
+/// 3D stage compositing, SDF clay modeling, surface relighting, and procedural PBR materials.
+const STAGE_3D_CAT: &[&str] = &["Video Effects", "3D & Material"];
 
 /// Track choices for effects that read another video track (Track Matte Key, Compound Blur…).
 pub const TRACK_CHOICES: &[&str] = &["None", "Video 1", "Video 2", "Video 3", "Video 4", "Video 5", "Video 6", "Video 7", "Video 8"];
@@ -71,6 +73,10 @@ pub fn auto_point(effect: &str, param: &str) -> Option<(f64, f64)> {
         ("checkerboard", "anchor") => (0.0, 0.0),
         ("write_on", "brush") => (0.5, 0.5),
         ("volumetric_rays", "center") => (0.5, 0.25),
+        ("four_color_gradient", "p1") => (0.25, 0.25),
+        ("four_color_gradient", "p2") => (0.75, 0.25),
+        ("four_color_gradient", "p3") => (0.25, 0.75),
+        ("four_color_gradient", "p4") => (0.75, 0.75),
         _ => return None,
     })
 }
@@ -377,7 +383,7 @@ pub(super) fn defs() -> Vec<EffectDef> {
             vec![
                 grp(ch("result", "Result", &["Smooth Motion", "No Motion"], 0), "Stabilization"),
                 grp(fs("smoothness", "Smoothness", 50.0, (0.0, 1000.0), (0.0, 200.0), "%", 0), "Stabilization"),
-                grp(ch("method", "Method", &["Position", "Position, Scale, Rotation", "Perspective", "Subspace Warp"], 1), "Stabilization"),
+                grp(ch("method", "Method", &["Position", "Position, Scale, Rotation", "Perspective", "Subspace Warp", "3D Subspace Warp"], 1), "Stabilization"),
                 grp(b("preserve_scale", "Preserve Scale", false), "Stabilization"),
                 grp(
                     ch("framing", "Framing", &["Stabilize Only", "Stabilize, Crop", "Stabilize, Crop, Auto-scale", "Stabilize, Synthesize Edges"], 2),
@@ -567,6 +573,104 @@ pub(super) fn defs() -> Vec<EffectDef> {
                 b("use_color", "Use Glow Color", false),
                 col("color", "Glow Color", [1.0, 0.8, 0.5, 1.0]),
                 ch("mode", "Blending Mode", &["Add", "Screen"], 0),
+            ],
+        ),
+        video(
+            "impact_bevel_alpha",
+            "Impact Bevel Alpha",
+            LIGHTS,
+            vec![
+                px("thickness", "Edge Thickness", 6.0, 200.0, 50.0),
+                ang("angle", "Light Angle", 135.0),
+                fs("intensity", "Light Intensity", 100.0, (0.0, 400.0), (0.0, 200.0), "%", 0),
+                col("highlight_color", "Highlight Color", [1.0, 1.0, 1.0, 1.0]),
+                col("shadow_color", "Shadow Color", [0.0, 0.0, 0.0, 1.0]),
+                pct("softness", "Softness", 35.0),
+            ],
+        ),
+        video(
+            "impact_emboss",
+            "Impact Emboss",
+            LIGHTS,
+            vec![
+                ang("angle", "Direction", 135.0),
+                px("relief", "Relief", 3.0, 100.0, 25.0),
+                fs("contrast", "Contrast", 100.0, (0.0, 500.0), (0.0, 250.0), "%", 0),
+                pct("color_preserve", "Colorize", 50.0),
+                blend_orig(),
+            ],
+        ),
+        video(
+            "impact_fill",
+            "Impact Fill",
+            LIGHTS,
+            vec![
+                col("color", "Fill Color", [1.0, 0.25, 0.2, 1.0]),
+                pct("opacity", "Opacity", 100.0),
+                ch("mode", "Blend Mode", &["Normal", "Multiply", "Screen", "Overlay"], 0),
+                b("invert_alpha", "Invert Alpha", false),
+                px("feather", "Feather", 0.0, 200.0, 40.0),
+            ],
+        ),
+        video(
+            "impact_gradient_tint",
+            "Impact Gradient Tint",
+            LIGHTS,
+            vec![
+                col("shadow_color", "Shadow Tint", [0.05, 0.08, 0.18, 1.0]),
+                col("midtone_color", "Midtone Tint", [0.45, 0.42, 0.38, 1.0]),
+                col("highlight_color", "Highlight Tint", [1.0, 0.94, 0.82, 1.0]),
+                pct("midpoint", "Midpoint", 50.0),
+                pct("amount", "Amount to Tint", 100.0),
+            ],
+        ),
+        video(
+            "impact_hue_saturation",
+            "Impact Hue & Saturation",
+            LIGHTS,
+            vec![
+                ang("hue", "Master Hue", 0.0),
+                fs("saturation", "Master Saturation", 0.0, (-100.0, 100.0), (-100.0, 100.0), "%", 0),
+                fs("lightness", "Master Lightness", 0.0, (-100.0, 100.0), (-100.0, 100.0), "%", 0),
+                b("colorize", "Colorize", false),
+                ang("colorize_hue", "Colorize Hue", 200.0),
+                pct("colorize_sat", "Colorize Saturation", 40.0),
+            ],
+        ),
+        video(
+            "impact_posterize",
+            "Impact Posterize",
+            LIGHTS,
+            vec![
+                fs("levels", "Level", 6.0, (2.0, 64.0), (2.0, 32.0), "", 1),
+                fs("gamma", "Gamma", 1.0, (0.2, 4.0), (0.4, 2.5), "", 2),
+                pct("smoothness", "Smooth Steps", 15.0),
+                b("luma_only", "Preserve Chroma", false),
+                blend_orig(),
+            ],
+        ),
+        video(
+            "impact_radial_blur",
+            "Impact Radial Blur",
+            LIGHTS,
+            vec![
+                pt("center", "Center", f64::NAN, f64::NAN),
+                fs("amount", "Spin Amount", 15.0, (0.0, 180.0), (0.0, 90.0), "°", 1),
+                ch("quality", "Quality", &["Draft", "Good", "Best"], 1),
+                pct("threshold", "Glow Threshold", 0.0),
+                blend_orig(),
+            ],
+        ),
+        video(
+            "impact_zoom_blur",
+            "Impact Zoom Blur",
+            LIGHTS,
+            vec![
+                pt("center", "Center", f64::NAN, f64::NAN),
+                fs("amount", "Zoom Amount", 25.0, (-100.0, 200.0), (-50.0, 100.0), "%", 1),
+                pct("decay", "Falloff", 40.0),
+                fs("glow", "Highlight Boost", 0.0, (0.0, 200.0), (0.0, 100.0), "%", 0),
+                blend_orig(),
             ],
         ),
         // ---- Perspective ----
@@ -789,6 +893,17 @@ pub(super) fn defs() -> Vec<EffectDef> {
                 b("only", "Stroke Only", false),
             ],
         ),
+        video(
+            "generative_object_removal",
+            "Generative Object Removal",
+            UTILITY,
+            vec![
+                ch("mode", "Content Mode", &["Temporal Optical Flow + Patch", "Spatial Patch Diffusion"], 0),
+                fs("temporal_radius", "Temporal Search", 4.0, (1.0, 12.0), (1.0, 8.0), "", 0),
+                px("expand", "Mask Expansion", 4.0, 100.0, 30.0),
+                pct("lighting_adapt", "Lighting Adaptation", 80.0),
+            ],
+        ),
         // ---- Video ----
         video(
             "metadata_burnin",
@@ -796,6 +911,7 @@ pub(super) fn defs() -> Vec<EffectDef> {
             VIDEO,
             vec![
                 ch("source", "Source", &["Sequence Timecode", "Media Timecode", "Clip Name", "File Name", "Frame Count", "Sequence Name"], 0),
+                ch("time_format", "Time Format", &["Timecode", "Feet + Frames 35mm", "Feet + Frames 16mm", "Frames"], 0),
                 pt("position", "Position", f64::NAN, f64::NAN),
                 ch("alignment", "Alignment", &["Bottom Center", "Bottom Left", "Bottom Right", "Top Center", "Top Left", "Top Right", "Custom"], 0),
                 fs("size", "Size", 6.0, (1.0, 100.0), (1.0, 30.0), "%", 1),
@@ -1014,7 +1130,76 @@ pub(super) fn defs() -> Vec<EffectDef> {
         ),
     ];
     v.extend(immersive());
+    v.extend(substance_3d_defs());
     v
+}
+
+fn substance_3d_defs() -> Vec<EffectDef> {
+    use crate::substance3d::{PROCEDURAL_PBR_PATTERNS, RELIGHT_OUTPUT_MODES, STAGE_MATERIALS, STAGE_SHAPES};
+    vec![
+        video(
+            "stage_3d",
+            "3D Stage Compositor",
+            STAGE_3D_CAT,
+            vec![
+                grp(ch("shape", "3D Shape", STAGE_SHAPES, 0), "Geometry & SDF Clay"),
+                grp(txt("mesh_path", "Custom OBJ Path"), "Geometry & SDF Clay"),
+                grp(fs("sdf_blend", "SDF Smooth Blend", 0.22, (0.02, 0.8), (0.02, 0.8), "", 2), "Geometry & SDF Clay"),
+                grp(ch("material", "Material Preset", STAGE_MATERIALS, 0), "PBR Material"),
+                grp(col("base_color", "Base Color", [0.85, 0.86, 0.88, 1.0]), "PBR Material"),
+                grp(fs("metallic", "Metallic", 0.85, (0.0, 1.0), (0.0, 1.0), "", 2), "PBR Material"),
+                grp(fs("roughness", "Roughness", 0.25, (0.0, 1.0), (0.0, 1.0), "", 2), "PBR Material"),
+                grp(fs("weathering", "Edge Wear & Patina", 0.15, (0.0, 1.0), (0.0, 1.0), "", 2), "PBR Material"),
+                grp(fs("pos_x", "Position X", 0.0, (-100.0, 100.0), (-100.0, 100.0), "%", 1), "3D Transform & Camera"),
+                grp(fs("pos_y", "Position Y", 0.0, (-100.0, 100.0), (-100.0, 100.0), "%", 1), "3D Transform & Camera"),
+                grp(fs("scale", "Scale", 100.0, (10.0, 300.0), (25.0, 200.0), "%", 1), "3D Transform & Camera"),
+                grp(fs("rot_x", "Rotation X", 12.0, (-360.0, 360.0), (-180.0, 180.0), "°", 1), "3D Transform & Camera"),
+                grp(fs("rot_y", "Rotation Y", -24.0, (-360.0, 360.0), (-180.0, 180.0), "°", 1), "3D Transform & Camera"),
+                grp(fs("rot_z", "Rotation Z", 0.0, (-360.0, 360.0), (-180.0, 180.0), "°", 1), "3D Transform & Camera"),
+                grp(fs("fov_deg", "Camera FOV", 45.0, (20.0, 100.0), (25.0, 85.0), "°", 1), "3D Transform & Camera"),
+                grp(b("video_ibl", "Video-Driven IBL", true), "Stage Lighting & Shadow Catcher"),
+                grp(fs("ibl_intensity", "IBL Intensity", 1.0, (0.0, 3.0), (0.0, 2.5), "", 2), "Stage Lighting & Shadow Catcher"),
+                grp(fs("light_azimuth", "Key Light Azimuth", 35.0, (-180.0, 180.0), (-180.0, 180.0), "°", 1), "Stage Lighting & Shadow Catcher"),
+                grp(fs("light_elevation", "Key Light Elevation", 48.0, (5.0, 89.0), (10.0, 85.0), "°", 1), "Stage Lighting & Shadow Catcher"),
+                grp(fs("shadow_catcher", "Ground Shadow Catcher", 0.55, (0.0, 1.0), (0.0, 1.0), "", 2), "Stage Lighting & Shadow Catcher"),
+                grp(fs("ground_y", "Ground Plane Y", -0.72, (-1.5, 1.5), (-1.2, 0.5), "", 2), "Stage Lighting & Shadow Catcher"),
+            ],
+        ),
+        video(
+            "surface_relight",
+            "Surface Relight & PBR Sampler",
+            STAGE_3D_CAT,
+            vec![
+                ch("output_mode", "Output Channel", RELIGHT_OUTPUT_MODES, 0),
+                fs("delight", "Albedo Delighting", 0.65, (0.0, 1.0), (0.0, 1.0), "", 2),
+                fs("normal_strength", "Normal Relief", 1.5, (0.1, 5.0), (0.2, 4.0), "", 2),
+                grp(fs("light_x", "Light X", 0.35, (-1.0, 1.0), (-1.0, 1.0), "", 2), "3D Relighting"),
+                grp(fs("light_y", "Light Y", 0.45, (-1.0, 1.0), (-1.0, 1.0), "", 2), "3D Relighting"),
+                grp(fs("light_z", "Light Height Z", 0.6, (0.05, 2.0), (0.1, 1.5), "", 2), "3D Relighting"),
+                grp(col("light_color", "Light Color", [1.0, 0.96, 0.90, 1.0]), "3D Relighting"),
+                grp(fs("intensity", "Light Intensity", 1.3, (0.0, 4.0), (0.0, 3.0), "", 2), "3D Relighting"),
+                grp(fs("roughness", "Base Roughness", 0.35, (0.04, 1.0), (0.04, 1.0), "", 2), "Surface Response"),
+                grp(fs("metallic", "Metallic", 0.0, (0.0, 1.0), (0.0, 1.0), "", 2), "Surface Response"),
+                grp(fs("ao_strength", "Cavity AO", 0.4, (0.0, 1.0), (0.0, 1.0), "", 2), "Surface Response"),
+                b("make_tileable", "Make Seamless Tileable", false),
+            ],
+        ),
+        video(
+            "procedural_pbr",
+            "Procedural PBR Material",
+            STAGE_3D_CAT,
+            vec![
+                ch("pattern", "Material Graph", PROCEDURAL_PBR_PATTERNS, 0),
+                fs("scale", "Pattern Tiling", 2.0, (0.25, 8.0), (0.5, 6.0), "", 2),
+                fs("roughness", "Roughness", 0.28, (0.04, 1.0), (0.04, 1.0), "", 2),
+                fs("metallic", "Metallic", 0.8, (0.0, 1.0), (0.0, 1.0), "", 2),
+                fs("weathering", "Surface Weathering", 0.25, (0.0, 1.0), (0.0, 1.0), "", 2),
+                fs("light_angle", "Key Light Angle", 35.0, (-180.0, 180.0), (-180.0, 180.0), "°", 1),
+                fs("blend_opacity", "Blend Opacity", 1.0, (0.0, 1.0), (0.0, 1.0), "", 2),
+                b("animate_phase", "Animate Evolution", false),
+            ],
+        ),
+    ]
 }
 
 /// Parameter values written when Ultra Key's Setting is Default, Relaxed or Aggressive.
@@ -1150,7 +1335,7 @@ pub(super) fn apply_badges(v: &mut [EffectDef]) {
                 | "spin"
                 | "wiggle"
                 | "proc_amp"
-        ) || folder == "Lights & Glows";
+        ) || matches!(folder, "Lights & Glows" | "3D & Material");
         let yuv = matches!(id, "proc_amp" | "lumetri" | "video_limiter" | "black_white" | "alpha_adjust" | "luma_key" | "track_matte");
         let accel = match e.category.first().copied() {
             Some("Legacy") => !matches!(id, "camera_blur"),
@@ -1186,7 +1371,7 @@ mod tests {
                 "Unsharp Mask",
             ],
         ),
-        ("Color Correction", &["ASC CDL", "Brightness & Contrast", "Lumetri Color", "Tint", "Video Limiter", "Vignette"]),
+        ("Color Correction", &["ASC CDL", "Brightness & Contrast", "Color Grading", "Tint", "Video Limiter", "Vignette"]),
         ("Distort", &["Corner Pin", "Lens Distortion", "Magnify", "Mirror", "Spherize", "Turbulent Displace", "Twirl", "Warp Stabilizer", "Wave Warp"]),
         ("Generate", &["4-Color Gradient", "Gradient"]),
         ("Image Control", &["Black & White", "Channel Mix", "Color Pass", "Color Replace", "Gamma Correction", "Invert", "Rounded Crop"]),
@@ -1207,7 +1392,27 @@ mod tests {
             ],
         ),
         ("Keying", &["Alpha Adjust", "Color Key", "Logo Cutout", "Luma Key", "Track Matte Key", "Ultra Key"]),
-        ("Lights & Glows", &["Echo Glow", "Edge Glow", "Glint", "Lens Flare", "Light Leaks", "RGB Split", "Volumetric Rays", "Wonder Glow"]),
+        (
+            "Lights & Glows",
+            &[
+                "Echo Glow",
+                "Edge Glow",
+                "Glint",
+                "Impact Bevel Alpha",
+                "Impact Emboss",
+                "Impact Fill",
+                "Impact Gradient Tint",
+                "Impact Hue & Saturation",
+                "Impact Posterize",
+                "Impact Radial Blur",
+                "Impact Zoom Blur",
+                "Lens Flare",
+                "Light Leaks",
+                "RGB Split",
+                "Volumetric Rays",
+                "Wonder Glow",
+            ],
+        ),
         ("Noise & Grain", &["Noise"]),
         ("Perspective", &["Basic 3D", "Drop Shadow", "Long Shadow"]),
         ("Stylize", &["Brush Strokes", "Color Emboss", "Find Edges", "Mosaic", "Posterize", "Roughen Edges", "Strobe Light"]),
@@ -1230,7 +1435,7 @@ mod tests {
                 "Wiggle",
             ],
         ),
-        ("Utility", &["Auto Align", "Cineon Converter", "Clone", "Simple Text", "Stroke"]),
+        ("Utility", &["Auto Align", "Cineon Converter", "Clone", "Generative Object Removal", "Simple Text", "Stroke"]),
         ("Video", &["Metadata & Timecode Burn-in"]),
     ];
 
@@ -1264,12 +1469,12 @@ mod tests {
                 n += 1;
             }
         }
-        assert_eq!(n, 93);
+        assert_eq!(n, 102);
         assert_eq!(CATALOGUE.len(), 16);
         // nothing else sits in the current folders
         for d in effect_defs().iter().filter(|d| d.kind == EffectKind::Video && d.category.first() == Some(&"Video Effects")) {
             let f = d.category[1];
-            if f == "Obsolete" {
+            if matches!(f, "Obsolete" | "ResolveFX" | "3D & Material") {
                 continue;
             }
             let listed = CATALOGUE.iter().any(|(cf, names)| *cf == f && names.contains(&d.name));
@@ -1296,5 +1501,15 @@ mod tests {
         assert_eq!((v("upper_left").x, v("upper_left").y), (0.0, 0.0));
         assert_eq!((v("lower_right").x, v("lower_right").y), (1920.0, 1080.0));
         assert_eq!((v("upper_right").x, v("upper_right").y), (1920.0, 0.0));
+    }
+
+    #[test]
+    fn four_color_gradient_points_resolve_to_the_quarter_positions() {
+        let mut e = find_effect("four_color_gradient").unwrap().instance();
+        crate::resolve_auto_points(&mut e, (1920, 1080), (1920, 1080));
+        let v = |k: &str| e.param(k).unwrap().value.as_vec2().unwrap();
+        for (k, x, y) in [("p1", 480.0, 270.0), ("p2", 1440.0, 270.0), ("p3", 480.0, 810.0), ("p4", 1440.0, 810.0)] {
+            assert_eq!((v(k).x, v(k).y), (x, y), "{k}");
+        }
     }
 }

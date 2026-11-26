@@ -52,7 +52,7 @@ type Run = fn(&mut Session, &Value) -> Result<Value>;
 type Enabled = fn(&Session) -> std::result::Result<(), String>;
 
 fn spec(id: &'static str, label: &'static str, menu: &'static [&'static str], params: &'static str, enabled: Enabled, run: Run, journal: bool) -> CommandSpec {
-    CommandSpec { id, label, menu, shortcut: None, params, enabled, run, journal }
+    CommandSpec { id, label, menu, shortcut: None, params, enabled, run, journal, named: crate::commands::NamedKeys::NONE }
 }
 
 macro_rules! camera_keys {
@@ -67,6 +67,7 @@ macro_rules! camera_keys {
                 enabled: has_seq,
                 run: |s, p| cut(s, &on_page(with_camera(p, $n))),
                 journal: true,
+                named: crate::commands::NamedKeys::NONE,
             },
             CommandSpec {
                 id: concat!("multicam.cutToCamera", $n),
@@ -77,6 +78,7 @@ macro_rules! camera_keys {
                 enabled: has_seq,
                 run: |s, p| cut_to_camera(s, &on_page(with_camera(p, $n))),
                 journal: true,
+                named: crate::commands::NamedKeys::NONE,
             },
         )*]
     };
@@ -234,6 +236,7 @@ fn base_commands() -> Vec<CommandSpec> {
             enabled: always,
             run: grid_info,
             journal: false,
+            named: crate::commands::NamedKeys::NONE,
         },
         CommandSpec {
             id: "multicam.inspect",
@@ -244,6 +247,7 @@ fn base_commands() -> Vec<CommandSpec> {
             enabled: always,
             run: inspect,
             journal: false,
+            named: crate::commands::NamedKeys::NONE,
         },
     ]
 }

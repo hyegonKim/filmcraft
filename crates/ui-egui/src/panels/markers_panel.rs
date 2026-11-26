@@ -10,6 +10,7 @@ use serde_json::json;
 #[serde(default)]
 pub struct State {
     pub source: bool,
+    pub sequence_index: bool,
     pub search: String,
     #[serde(skip)]
     pub owner: Option<Owner>,
@@ -27,11 +28,17 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let ui = &mut child;
     ui.horizontal_wrapped(|ui| {
         for (source, label) in [(false, "Sequence"), (true, "Source")] {
-            let response = ui.selectable_label(state.source == source, crate::i18n::t(label));
+            let response = ui.selectable_label(!state.sequence_index && state.source == source, crate::i18n::t(label));
             app.auto.add_response(&format!("markers.scope.{label}"), &response, crate::i18n::t(label));
             if response.clicked() {
+                state.sequence_index = false;
                 state.source = source;
             }
+        }
+        let idx_resp = ui.selectable_label(state.sequence_index, tl!("Sequence Index"));
+        app.auto.add_response("markers.scope.sequenceIndex", &idx_resp, tl!("Sequence Index"));
+        if idx_resp.clicked() {
+            state.sequence_index = true;
         }
         let response = ui.button(tl!("Manage Colors…"));
         app.auto.add_response("markers.manageColors", &response, tl!("Manage Colors"));
@@ -39,6 +46,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             super::palette_manager::open(app);
         }
     });
+    if state.sequence_index {
+        show_sequence_index(app, ui, &mut state);
+        app.ui.markers_panel = state;
+        return;
+    }
     let response = ui.add(egui::TextEdit::singleline(&mut state.search).hint_text(tl!("Search name, notes, author")).desired_width(f32::INFINITY));
     app.auto.add_response("markers.search", &response, tl!("Search markers"));
     let owner = Owner::current(app, state.source);
@@ -202,6 +214,77 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     });
     app.ui.markers_panel = state;
 }
+fn show_sequence_index(app: &mut FilmcraftApp, ui: &mut egui::Ui, state: &mut State) {
+    let r = ui.add(egui::TextEdit::singleline(&mut state.search).hint_text(tl!("Search clips, Content Credentials, metadata")).desired_width(f32::INFINITY));
+    app.auto.add_response("sequenceIndex.search", &r, tl!("Search Sequence Index"));
+    ui.horizontal_wrapped(|ui| {
+        let c2pa = ui.button(tl!("Check Content Credentials"));
+        app.auto.add_response("sequenceIndex.checkC2pa", &c2pa, tl!("Check Content Credentials"));
+        if c2pa.clicked() {
+            app.ui.status = tl!("Checking Content Credentials…").into();
+            if let Err(e) = app.session.execute("media.checkContentCredentials", json!({})) {
+                app.ui.status = e.to_string();
+            }
+        }
+        let idx = ui.button(tl!("Index Media Intelligence"));
+        app.auto.add_response("sequenceIndex.indexMedia", &idx, tl!("Index Media Intelligence"));
+        if idx.clicked()
+            && let Err(e) = app.session.execute("project.indexMediaIntelligence", json!({}))
+        {
+            app.ui.status = e.to_string();
+        }
+    });
+    let Some(seq) = app.session.active_sequence().cloned() else {
+        ui.label(tl!("No sequence open"));
+        return;
+    };
+    let q = state.search.to_lowercase();
+    let mut rows = Vec::new();
+    for (ti, tr) in seq.video_tracks.iter().enumerate() {
+        rows.extend(tr.items.iter().map(|it| (format!("V{}", ti + 1), it)));
+    }
+    for (ti, tr) in seq.audio_tracks.iter().enumerate() {
+        rows.extend(tr.items.iter().map(|it| (format!("A{}", ti + 1), it)));
+    }
+    rows.sort_by_key(|(_, it)| it.start);
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        for (track_lbl, it) in rows {
+            let meta = app.session.project.item(it.item).map(|pi| &pi.metadata);
+            let creds = meta.and_then(|m| m.get("Content Credentials")).map(String::as_str).unwrap_or("—");
+            let intel = meta.and_then(|m| m.get("Media Intelligence")).map(String::as_str).unwrap_or("");
+            if !q.is_empty() && ![it.name.as_str(), creds, intel, track_lbl.as_str()].iter().any(|s| s.to_lowercase().contains(&q)) {
+                continue;
+            }
+            let tc = filmcraft_time::format_time(it.start, seq.settings.frame_rate, seq.settings.drop_frame, filmcraft_time::TimeDisplay::Timecode, 48_000);
+            let selected = app.session.state.selection.contains(&it.id);
+            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::click());
+            let t = app.tokens;
+            if selected || resp.hovered() {
+                ui.painter().rect_filled(rect, 3.0, if selected { t.row_selected } else { t.hover });
+            }
+            ui.painter().text(
+                rect.min + vec2(8.0, 11.0),
+                egui::Align2::LEFT_CENTER,
+                format!("[{track_lbl}] {tc}  {}", it.name),
+                crate::theme::Tokens::ui(12.0),
+                t.text,
+            );
+            ui.painter().text(
+                rect.min + vec2(8.0, 27.0),
+                egui::Align2::LEFT_CENTER,
+                format!("C2PA: {creds}  ·  {intel}"),
+                crate::theme::Tokens::mono(10.5),
+                t.text_dim,
+            );
+            app.auto.add_response(&format!("sequenceIndex.row.{}", it.id.0), &resp, &it.name);
+            if resp.clicked() {
+                app.session.state.selection = vec![it.id];
+                app.session.set_playhead(it.start);
+            }
+        }
+    });
+}
+
 fn bulk(app: &mut FilmcraftApp, owner: Owner, ids: &std::collections::BTreeSet<u64>, command: &str, color: Option<&str>) {
     let mut p = owner.params();
     p["markers"] = json!(ids);
