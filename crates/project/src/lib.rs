@@ -51,7 +51,7 @@ pub use multicam::{Camera, MergedClip, MulticamAudio, MulticamSel, MulticamSourc
 pub use narration::{Narration, VocalPitch};
 pub use plugin::{
     DctlCubeLut, DctlLutInterp, DctlParamKind, DctlPixelCtx, DctlProgram, DctlUiParam, MAX_PLUGIN_TEXT_BYTES, PluginKind, PowerGradeStill, ProjectPlugin,
-    builtin_dctls, builtin_transition_dctls, parse_dctl,
+    builtin_dctls, builtin_transition_dctls, decode_base64, encode_base64, parse_dctl,
 };
 pub use substance3d::{
     MAX_OBJ_BYTES, MAX_OBJ_TRIANGLES, MAX_OBJ_VERTICES, ObjMesh, PROCEDURAL_PBR_PATTERNS, RELIGHT_OUTPUT_MODES, STAGE_MATERIAL_SPECS, STAGE_MATERIALS,

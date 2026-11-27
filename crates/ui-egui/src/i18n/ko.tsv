@@ -3918,6 +3918,13 @@
 	Arrow	화살표
 	Add or select a comment to draw Telestrator markup	텔estrator 마크업을 그리려면 코멘트를 추가하거나 선택하세요
 	No Frame.io review comments	Frame.io 리뷰 코멘트 없음
+	PRM / AEX	PRM / AEX
+	Import .prm/.aex…	.prm/.aex 가져오기…
+	Import C++ Plug-in (.prm / .aex)…	C++ 플러그인(.prm / .aex) 가져오기…
+	Import C++ Premiere (.prm) or After Effects (.aex) binary plug-in	C++ Premiere(.prm) 또는 After Effects(.aex) 바이너리 플러그인 가져오기
+	Adobe C++ Plug-in	Adobe C++ 플러그인
+	Adobe Plug-ins	Adobe 플러그인
+	Imported {badge} C++ plug-in {name}	{badge} C++ 플러그인 {name} 가져옴
 	Reply to thread…	스레드에 답글 달기…
 	Reply	답글
 	{n} drawing(s)	드로잉 {n}개

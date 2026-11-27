@@ -19,6 +19,7 @@ use crate::image::Image;
 pub fn apply(img: &mut Image, e: &EffectInstance, cx: &FxCtx) -> bool {
     match e.effect.as_str() {
         "dctl_transform" => dctl_transform(img, e, cx),
+        "native_adobe_plugin" => crate::native_adobe::apply(img, e, cx),
         "color_space_transform" => color_space_transform(img, e, cx),
         "film_halation" => film_halation(img, e, cx),
         "color_warper" => color_warper(img, e, cx),

@@ -12,6 +12,7 @@ use serde_json::json;
 
 use crate::FilmcraftApp;
 use crate::icons::{self, Icon};
+use crate::native_dialogs::FileDialog;
 use crate::theme::Tokens;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +62,8 @@ fn kind_badge(kind: PluginKind) -> (&'static str, Color32) {
     match kind {
         PluginKind::DctlTransform => ("DCTL", Color32::from_rgb(0xe8, 0x79, 0x3a)),
         PluginKind::DctlTransition => ("DCTL-TR", Color32::from_rgb(0xd9, 0x6b, 0x43)),
+        PluginKind::NativePremierePrm => ("PRM", Color32::from_rgb(0x63, 0x66, 0xf1)),
+        PluginKind::NativeAfterEffectsAex => ("AEX", Color32::from_rgb(0x8b, 0x5c, 0xf6)),
         PluginKind::OpenFxVideo | PluginKind::OpenFxTransition => ("OpenFX", Color32::from_rgb(0x3b, 0x82, 0xf6)),
         PluginKind::AudioVst3 => ("VST3", Color32::from_rgb(0x10, 0xb9, 0x81)),
         PluginKind::OgrafTitle => ("OGraf", Color32::from_rgb(0xa8, 0x55, 0xf7)),
@@ -73,6 +76,7 @@ fn matches_filter(row: &RowEntry, filter: &str) -> bool {
     match filter {
         "3d" => row.is_3d,
         "ofx" => matches!(row.kind, PluginKind::OpenFxVideo | PluginKind::OpenFxTransition | PluginKind::MacroBundle),
+        "adobe" => matches!(row.kind, PluginKind::NativePremierePrm | PluginKind::NativeAfterEffectsAex),
         "dctl" => matches!(row.kind, PluginKind::DctlTransform | PluginKind::DctlTransition),
         "audio" => matches!(row.kind, PluginKind::AudioVst3),
         "ograf" => matches!(row.kind, PluginKind::OgrafTitle | PluginKind::WorkflowScript),
@@ -147,9 +151,10 @@ fn collect_entries(app: &FilmcraftApp) -> Vec<RowEntry> {
         });
     }
 
-    // Project-embedded portable DCTLs
+    // Project-embedded portable DCTLs and C++ (.prm / .aex) binary plug-ins
     for p in &app.session.project.plugins {
         let full_id = format!("plugin:{}", p.id);
+        let is_native = matches!(p.kind, PluginKind::NativePremierePrm | PluginKind::NativeAfterEffectsAex);
         rows.push(RowEntry {
             enabled: p.enabled && !is_plugin_disabled(disabled, &full_id),
             category_allowed: is_kind_enabled_by_prefs(p.kind, prefs),
@@ -157,10 +162,10 @@ fn collect_entries(app: &FilmcraftApp) -> Vec<RowEntry> {
             name: p.name.clone(),
             kind: p.kind,
             is_3d: false,
-            vendor: "Project DCTL".into(),
+            vendor: if is_native { "Project C++ Plug-in".into() } else { "Project DCTL".into() },
             source: "Project",
-            code: Some(p.code.to_string()),
-            apply_effect: Some(("dctl_transform", Some(full_id))),
+            code: (!is_native).then(|| p.code.to_string()),
+            apply_effect: Some((if is_native { "native_adobe_plugin" } else { "dctl_transform" }, Some(full_id))),
         });
     }
 
@@ -172,6 +177,7 @@ fn collect_entries(app: &FilmcraftApp) -> Vec<RowEntry> {
         }
         let apply_effect = match d.kind {
             PluginKind::DctlTransform | PluginKind::DctlTransition => Some(("import_dctl_path", Some(d.path.clone()))),
+            PluginKind::NativePremierePrm | PluginKind::NativeAfterEffectsAex => Some(("import_native_path", Some(d.path.clone()))),
             PluginKind::MacroBundle => Some(("import_drfx_path", Some(d.path.clone()))),
             PluginKind::OgrafTitle => Some(("import_ograf_path", Some(d.path.clone()))),
             _ => None,
@@ -259,11 +265,13 @@ pub fn show_settings_manager(app: &mut FilmcraftApp, ui: &mut egui::Ui) {
 }
 
 fn draw_toolbar(app: &mut FilmcraftApp, ui: &mut egui::Ui, t: &Tokens) {
+    let mut ask_import_native = false;
     ui.horizontal_wrapped(|ui| {
         for (key, label) in [
             ("all", tl!("All")),
             ("3d", tl!("3D & Material")),
             ("ofx", "ResolveFX / OFX"),
+            ("adobe", tl!("PRM / AEX")),
             ("dctl", "DCTL"),
             ("audio", "Fairlight / VST3"),
             ("ograf", "OGraf / Workflow"),
@@ -285,6 +293,11 @@ fn draw_toolbar(app: &mut FilmcraftApp, ui: &mut egui::Ui, t: &Tokens) {
         if lab3d.clicked() {
             app.ui.plugins_ui.stage3d_open = !app.ui.plugins_ui.stage3d_open;
         }
+        let imp_native = ui.button(tl!("Import .prm/.aex…"));
+        app.auto.add("plugins.importNative", imp_native.rect, "Import .prm/.aex");
+        if imp_native.on_hover_text(tl!("Import C++ Premiere (.prm) or After Effects (.aex) binary plug-in")).clicked() {
+            ask_import_native = true;
+        }
         let scan = ui.button(tl!("Scan"));
         app.auto.add("plugins.scan", scan.rect, "Scan");
         if scan.on_hover_text(tl!("Rescan OpenFX, VST3, DCTL, and OGraf folders")).clicked()
@@ -294,6 +307,20 @@ fn draw_toolbar(app: &mut FilmcraftApp, ui: &mut egui::Ui, t: &Tokens) {
             app.ui.status = tlf!("Plugin scan complete ({n} external item(s))", n);
         }
     });
+    if ask_import_native {
+        app.pick_ui(FileDialog::open_file(tl!("Adobe C++ Plug-in"), &["prm", "aex", "plugin"]), |app, paths| {
+            let Some(path) = paths.into_iter().next() else { return };
+            let (has_video_clip, _) = selected_clip_kinds(app);
+            match app.session.execute("plugins.importNativeBinary", json!({ "path": path, "apply": has_video_clip })) {
+                Ok(v) => {
+                    let name = v["name"].as_str().unwrap_or("Plug-in");
+                    let badge = v["badge"].as_str().unwrap_or("PRM");
+                    app.ui.status = tlf!("Imported {badge} C++ plug-in {name}", badge = badge, name = name);
+                }
+                Err(e) => app.ui.status = e.to_string(),
+            }
+        });
+    }
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         let icon_r = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover()).0;
@@ -421,10 +448,13 @@ fn apply_plugin_action(app: &mut FilmcraftApp, fx_id: &str, arg: Option<&str>, l
     let res = if fx_id == "import_dctl_path" {
         let Some(path) = arg else { return };
         app.session.execute("plugins.importDctl", json!({ "path": path, "apply": true }))
-    } else if fx_id == "dctl_transform" {
+    } else if fx_id == "import_native_path" {
+        let Some(path) = arg else { return };
+        app.session.execute("plugins.importNativeBinary", json!({ "path": path, "apply": true }))
+    } else if fx_id == "dctl_transform" || fx_id == "native_adobe_plugin" {
         let vid_clips = selected_video_clip_ids(app);
         let clip_nums: Vec<u64> = vid_clips.iter().map(|c| c.0).collect();
-        let r = app.session.execute("effects.apply", json!({ "clips": clip_nums, "effect": "dctl_transform" }));
+        let r = app.session.execute("effects.apply", json!({ "clips": clip_nums, "effect": fx_id }));
         if r.is_ok()
             && let Some(plugin_ref) = arg
         {
@@ -436,7 +466,7 @@ fn apply_plugin_action(app: &mut FilmcraftApp, fx_id: &str, arg: Option<&str>, l
                         .iter()
                         .filter_map(|&cid| {
                             let (_, item) = seq.find_item(cid)?;
-                            let idx = item.effects.iter().rposition(|e| e.effect == "dctl_transform")?;
+                            let idx = item.effects.iter().rposition(|e| e.effect == fx_id)?;
                             Some((cid.0, idx))
                         })
                         .collect()

@@ -35,6 +35,8 @@ pub enum PluginKind {
     OpenFxTransition,
     DctlTransform,
     DctlTransition,
+    NativePremierePrm,
+    NativeAfterEffectsAex,
     AudioVst3,
     OgrafTitle,
     MacroBundle,
@@ -48,6 +50,8 @@ impl PluginKind {
             Self::OpenFxTransition => "OpenFX Transition",
             Self::DctlTransform => "DCTL Transform",
             Self::DctlTransition => "DCTL Transition",
+            Self::NativePremierePrm => "Premiere Pro C++ (.prm)",
+            Self::NativeAfterEffectsAex => "After Effects C++ (.aex)",
             Self::AudioVst3 => "Fairlight / VST3 Audio",
             Self::OgrafTitle => "OGraf Broadcast Title",
             Self::MacroBundle => "Macro / Template Bundle",
@@ -59,6 +63,8 @@ impl PluginKind {
         match self {
             Self::OpenFxVideo | Self::OpenFxTransition => "OFX",
             Self::DctlTransform | Self::DctlTransition => "DCTL",
+            Self::NativePremierePrm => "PRM",
+            Self::NativeAfterEffectsAex => "AEX",
             Self::AudioVst3 => "VST3",
             Self::OgrafTitle => "OGraf",
             Self::MacroBundle => "DRFX",
@@ -100,9 +106,92 @@ pub struct ProjectPlugin {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_base64: Option<Arc<str>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_path: Option<Arc<str>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub params: Vec<DctlUiParam>,
+    #[serde(default)]
     pub code: Arc<str>,
+}
+
+/// Encodes `bytes` as standard RFC 4648 Base64 so portable `.prm` / `.aex` C++ binary plugins can
+/// travel inside a FilmCraft project across Windows, macOS, Linux, iOS, Android, and WebAssembly.
+pub fn encode_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut i = 0usize;
+    while i + 3 <= bytes.len() {
+        let n = (u32::from(bytes[i]) << 16) | (u32::from(bytes[i + 1]) << 8) | u32::from(bytes[i + 2]);
+        out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
+        out.push(TABLE[((n >> 6) & 0x3F) as usize] as char);
+        out.push(TABLE[(n & 0x3F) as usize] as char);
+        i += 3;
+    }
+    let rem = bytes.len() - i;
+    if rem == 1 {
+        let n = u32::from(bytes[i]) << 16;
+        out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rem == 2 {
+        let n = (u32::from(bytes[i]) << 16) | (u32::from(bytes[i + 1]) << 8);
+        out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
+        out.push(TABLE[((n >> 6) & 0x3F) as usize] as char);
+        out.push('=');
+    }
+    out
+}
+
+fn b64_val(b: u8) -> Option<u8> {
+    match b {
+        b'A'..=b'Z' => Some(b - b'A'),
+        b'a'..=b'z' => Some(b - b'a' + 26),
+        b'0'..=b'9' => Some(b - b'0' + 52),
+        b'+' | b'-' => Some(62),
+        b'/' | b'_' => Some(63),
+        _ => None,
+    }
+}
+
+/// Decodes standard or URL-safe Base64 (ignoring ASCII whitespace) into raw bytes.
+pub fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+    let cleaned: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace() && *b != b'=').collect();
+    if cleaned.len() % 4 == 1 {
+        return Err("invalid base64 length".into());
+    }
+    let mut out = Vec::with_capacity(cleaned.len() * 3 / 4);
+    let mut i = 0usize;
+    while i + 4 <= cleaned.len() {
+        let a = b64_val(cleaned[i]).ok_or_else(|| "invalid base64 character".to_string())?;
+        let b = b64_val(cleaned[i + 1]).ok_or_else(|| "invalid base64 character".to_string())?;
+        let c = b64_val(cleaned[i + 2]).ok_or_else(|| "invalid base64 character".to_string())?;
+        let d = b64_val(cleaned[i + 3]).ok_or_else(|| "invalid base64 character".to_string())?;
+        let n = (u32::from(a) << 18) | (u32::from(b) << 12) | (u32::from(c) << 6) | u32::from(d);
+        out.push(((n >> 16) & 0xFF) as u8);
+        out.push(((n >> 8) & 0xFF) as u8);
+        out.push((n & 0xFF) as u8);
+        i += 4;
+    }
+    let rem = cleaned.len() - i;
+    if rem == 2 {
+        let a = b64_val(cleaned[i]).ok_or_else(|| "invalid base64 character".to_string())?;
+        let b = b64_val(cleaned[i + 1]).ok_or_else(|| "invalid base64 character".to_string())?;
+        let n = (u32::from(a) << 18) | (u32::from(b) << 12);
+        out.push(((n >> 16) & 0xFF) as u8);
+    } else if rem == 3 {
+        let a = b64_val(cleaned[i]).ok_or_else(|| "invalid base64 character".to_string())?;
+        let b = b64_val(cleaned[i + 1]).ok_or_else(|| "invalid base64 character".to_string())?;
+        let c = b64_val(cleaned[i + 2]).ok_or_else(|| "invalid base64 character".to_string())?;
+        let n = (u32::from(a) << 18) | (u32::from(b) << 12) | (u32::from(c) << 6);
+        out.push(((n >> 16) & 0xFF) as u8);
+        out.push(((n >> 8) & 0xFF) as u8);
+    }
+    Ok(out)
 }
 
 /// A Gallery Still / PowerGrade captured on the Color page (`color.grabStill` / `color.applyStill`):
@@ -2269,5 +2358,35 @@ __DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, __TEXTU
         {
             assert!(parse_dctl(hostile).is_err());
         }
+    }
+
+    #[test]
+    fn native_prm_aex_plugin_kind_and_base64_round_trip() {
+        use std::sync::Arc;
+
+        use super::{PluginKind, ProjectPlugin, decode_base64, encode_base64};
+
+        assert_eq!(PluginKind::NativePremierePrm.badge(), "PRM");
+        assert_eq!(PluginKind::NativeAfterEffectsAex.badge(), "AEX");
+        for len in 0..=37 {
+            let raw: Vec<u8> = (0..len).map(|i| (i * 13 + 7) as u8).collect();
+            let enc = encode_base64(&raw);
+            let dec = decode_base64(&enc).expect("decode base64");
+            assert_eq!(dec, raw);
+        }
+        let plug = ProjectPlugin {
+            id: "native1".into(),
+            name: "Threshold RGB".into(),
+            kind: PluginKind::NativeAfterEffectsAex,
+            enabled: true,
+            source_path: Some("ThresholdRGB.aex".into()),
+            binary_base64: Some(Arc::from(encode_base64(b"MZ\x90\x00"))),
+            binary_path: Some(Arc::from("C:/Plug-ins/ThresholdRGB.aex")),
+            params: Vec::new(),
+            code: Arc::from(""),
+        };
+        let json = serde_json::to_string(&plug).expect("serialize ProjectPlugin");
+        let back: ProjectPlugin = serde_json::from_str(&json).expect("deserialize ProjectPlugin");
+        assert_eq!(back, plug);
     }
 }

@@ -26,6 +26,8 @@ pub mod luts;
 pub mod mask;
 pub mod mixer;
 pub mod multicam;
+pub mod native_adobe;
+pub mod native_vm;
 pub mod offline;
 pub mod plan;
 pub mod preview;
@@ -48,6 +50,7 @@ use filmcraft_time::{Tick, TimeDisplay, format_time};
 
 pub use blend::Blend;
 pub use image::Image;
+pub use native_adobe::{NativeAdobePluginSummary, inspect_native_adobe_plugin};
 
 /// Resolves project items to media sources (the engine owns the media pool).
 pub trait SourceProvider: Sync {

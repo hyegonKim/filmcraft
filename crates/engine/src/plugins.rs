@@ -9,7 +9,7 @@ use filmcraft_geom::Vec2;
 use filmcraft_project::graphic::{new_shape_layer, new_text_layer};
 use filmcraft_project::{
     ClipId, DctlParamKind, DctlPixelCtx, EffectInstance, MAX_PLUGIN_TEXT_BYTES, Param, ParamValue, PluginKind, PowerGradeStill, ProjectPlugin, TrackKind,
-    builtin_dctls, find_effect, parse_dctl,
+    builtin_dctls, decode_base64, encode_base64, find_effect, parse_dctl,
 };
 use filmcraft_time::{Tick, TimeDisplay, format_time};
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,7 @@ pub struct DiscoveredPlugin {
 pub fn is_kind_enabled_by_prefs(kind: PluginKind, prefs: &PluginPrefs) -> bool {
     match kind {
         PluginKind::OpenFxVideo | PluginKind::OpenFxTransition | PluginKind::MacroBundle => prefs.enable_openfx,
+        PluginKind::NativePremierePrm | PluginKind::NativeAfterEffectsAex => prefs.enable_openfx,
         PluginKind::DctlTransform | PluginKind::DctlTransition => prefs.enable_dctl,
         PluginKind::AudioVst3 => prefs.enable_audio_plugins,
         PluginKind::OgrafTitle | PluginKind::WorkflowScript => true,
@@ -113,8 +114,12 @@ impl PluginRegistry {
 #[cfg(not(target_arch = "wasm32"))]
 fn system_plugin_roots() -> Vec<(PathBuf, &'static str)> {
     let mut v = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        v.push((PathBuf::from(home).join(".local/share/filmcraft/plugins"), "User Native Plugins"));
+    }
     #[cfg(target_os = "windows")]
     {
+        v.push((PathBuf::from(r"C:\Program Files\Adobe\Common\Plug-ins\7.0\MediaCore"), "Adobe MediaCore"));
         v.push((PathBuf::from(r"C:\Program Files\Common Files\OFX\Plugins"), "System OpenFX"));
         v.push((PathBuf::from(r"C:\Program Files\Common Files\VST3"), "System VST3"));
         v.push((PathBuf::from(r"C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\LUT"), "DaVinci LUT/DCTL"));
@@ -124,6 +129,7 @@ fn system_plugin_roots() -> Vec<(PathBuf, &'static str)> {
     }
     #[cfg(target_os = "macos")]
     {
+        v.push((PathBuf::from("/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore"), "Adobe MediaCore"));
         v.push((PathBuf::from("/Library/OFX/Plugins"), "System OpenFX"));
         v.push((PathBuf::from("/Library/Audio/Plug-Ins/VST3"), "System VST3"));
         v.push((PathBuf::from("/Library/Application Support/Blackmagic Design/DaVinci Resolve/LUT"), "DaVinci LUT/DCTL"));
@@ -181,6 +187,12 @@ fn scan_dir(dir: &Path, vendor: &str, depth: usize, out: &mut Vec<DiscoveredPlug
             } else if lower.ends_with(".drfx") || lower.ends_with(".setting") {
                 let stem = path.file_stem().map_or_else(|| file_name.clone(), |s| s.to_string_lossy().to_string());
                 push_discovered(out, PluginKind::MacroBundle, &stem, &path, vendor);
+            } else if lower.ends_with(".prm") {
+                let stem = path.file_stem().map_or_else(|| file_name.clone(), |s| s.to_string_lossy().to_string());
+                push_discovered(out, PluginKind::NativePremierePrm, &stem, &path, vendor);
+            } else if lower.ends_with(".aex") {
+                let stem = path.file_stem().map_or_else(|| file_name.clone(), |s| s.to_string_lossy().to_string());
+                push_discovered(out, PluginKind::NativeAfterEffectsAex, &stem, &path, vendor);
             } else if lower == "manifest.xml"
                 && let Some(parent_name) = path.parent().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string())
             {
@@ -218,7 +230,8 @@ fn query(id: &'static str, label: &'static str, params: &'static str, run: Run) 
     CommandSpec { id, label, menu: &[], shortcut: None, params, enabled: always, run, journal: false, named: NamedKeys::NONE }
 }
 
-const COLOR_NODE_EFFECTS: &[&str] = &["lumetri", "color_space_transform", "film_halation", "color_warper", "qualifier_3d", "dctl_transform", "surface_relight"];
+const COLOR_NODE_EFFECTS: &[&str] =
+    &["lumetri", "color_space_transform", "film_halation", "color_warper", "qualifier_3d", "dctl_transform", "native_adobe_plugin", "surface_relight"];
 
 pub fn is_color_node_effect(id: &str) -> bool {
     COLOR_NODE_EFFECTS.contains(&id)
@@ -230,6 +243,14 @@ pub(crate) fn commands() -> Vec<CommandSpec> {
         query("plugins.scan", "Scan Plugin Folders", "{}", scan_plugins),
         query("plugins.validateDctl", "Validate DCTL Shader", r#"{"code":str}"#, validate_dctl),
         spec("plugins.importDctl", "Import DCTL Plugin…", &[], r#"{"path":str?,"code":str?,"name":str?,"apply":bool?,"clips":[id]?}"#, always, import_dctl),
+        spec(
+            "plugins.importNativeBinary",
+            "Import C++ Plug-in (.prm / .aex)…",
+            &[],
+            r#"{"path":str?,"data":str?,"name":str?,"embed":bool?,"apply":bool?,"clips":[id]?}"#,
+            always,
+            import_native_binary,
+        ),
         spec("plugins.importDrfx", "Import DRFX Bundle…", &[], r#"{"path":str}"#, always, import_drfx),
         spec("plugins.importOgraf", "Import OGraf Broadcast Graphic…", &[], r#"{"path":str?,"json":str?,"name":str?,"seconds":n?}"#, has_seq, import_ograf),
         spec("plugins.remove", "Remove Project Plugin", &[], r#"{"id":str}"#, always, remove_plugin),
@@ -438,6 +459,8 @@ fn import_dctl(s: &mut Session, p: &Value) -> Result<Value> {
                 name: name.clone(),
                 kind,
                 source_path: path_opt.clone(),
+                binary_base64: None,
+                binary_path: None,
                 enabled: true,
                 params: prog.ui_params.clone(),
                 code: Arc::from(code.as_str()),
@@ -471,6 +494,91 @@ fn import_dctl(s: &mut Session, p: &Value) -> Result<Value> {
         "ref": format!("plugin:{id}"),
         "name": name,
         "kind": kind,
+        "appliedClips": targets.len(),
+    }))
+}
+
+fn import_native_binary(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "plugins.importNativeBinary";
+    const MAX_NATIVE_BYTES: usize = 64 << 20;
+    const AUTO_EMBED_CAP: usize = 4 << 20;
+    if !s.prefs.plugins.enable_openfx {
+        return Err(EngineError::Disabled(CMD.into(), "Video plugins are disabled in Preferences ▸ Plugins".into()));
+    }
+    let path_opt = str_p(p, "path").map(str::to_string);
+    let name_arg = str_p(p, "name").map(str::to_string);
+    let bytes = match (str_p(p, "data"), path_opt.as_deref()) {
+        (Some(b64), _) => decode_base64(b64).map_err(|e| bad(CMD, format!("invalid base64 `data`: {e}")))?,
+        (None, Some(path)) => s.services.read_file(path).map_err(|e| bad(CMD, format!("could not read `{path}`: {e}")))?,
+        (None, None) => return Err(bad(CMD, "supply `path` or base64 `data`")),
+    };
+    if bytes.len() > MAX_NATIVE_BYTES {
+        return Err(bad(CMD, format!("native binary exceeds {MAX_NATIVE_BYTES} bytes")));
+    }
+    let hint = path_opt.as_deref().or(name_arg.as_deref());
+    let summary = filmcraft_render::inspect_native_adobe_plugin(&bytes, hint).map_err(|e| bad(CMD, e))?;
+    let name = name_arg.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| summary.name.clone());
+    let embed = bool_p(p, "embed").unwrap_or(path_opt.is_none() || bytes.len() <= AUTO_EMBED_CAP);
+    let b64_arc: Option<Arc<str>> = embed.then(|| Arc::from(encode_base64(&bytes)));
+    let bin_path_arc: Option<Arc<str>> = path_opt.as_deref().map(Arc::from);
+
+    let apply_now = bool_p(p, "apply").unwrap_or(false) || p.get("clips").is_some();
+    let targets = if apply_now && s.active_sequence().is_some() { target_video_clips(s, p, CMD).unwrap_or_default() } else { Vec::new() };
+    let active_seq = s.state.active_sequence;
+    let prefix = if summary.kind == PluginKind::NativePremierePrm { "prm" } else { "aex" };
+
+    let mut id = String::new();
+    s.edit("Import C++ Plug-in", |pr, _| {
+        if let Some(existing) =
+            pr.plugins.iter().find(|pl| (b64_arc.is_some() && pl.binary_base64 == b64_arc) || (bin_path_arc.is_some() && pl.binary_path == bin_path_arc))
+        {
+            id = existing.id.clone();
+        } else {
+            id = format!("{prefix}{}", pr.alloc_id());
+            pr.plugins.push(ProjectPlugin {
+                id: id.clone(),
+                name: name.clone(),
+                kind: summary.kind,
+                enabled: true,
+                source_path: path_opt.clone(),
+                binary_base64: b64_arc.clone(),
+                binary_path: bin_path_arc.clone(),
+                params: summary.ui_params.clone(),
+                code: Arc::from(""),
+            });
+        }
+        if !targets.is_empty()
+            && let Some(seq_id) = active_seq
+            && let Some(seq) = pr.sequence_mut(seq_id)
+            && let Some(def) = find_effect("native_adobe_plugin")
+        {
+            const SLOTS: [&str; 8] = ["p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8"];
+            for cid in &targets {
+                if let Some((_, item)) = seq.find_item_mut(*cid) {
+                    let mut inst = def.instance();
+                    inst.params.insert("plugin_ref".into(), Param::new(ParamValue::Text(format!("plugin:{id}"))));
+                    for (slot_i, up) in summary.ui_params.iter().take(8).enumerate() {
+                        if let Some(val) = dctl_param_default_scalar(&up.kind) {
+                            inst.params.insert(SLOTS[slot_i].into(), Param::new(ParamValue::Float(val)));
+                        }
+                    }
+                    let insert_at = item.effects.iter().position(|ef| ef.def().is_some_and(|d| d.intrinsic)).unwrap_or(item.effects.len());
+                    item.effects.insert(insert_at, inst);
+                }
+            }
+        }
+        Ok(())
+    })?;
+
+    Ok(json!({
+        "id": id,
+        "ref": format!("plugin:{id}"),
+        "name": name,
+        "kind": summary.kind,
+        "badge": summary.kind.badge(),
+        "arch": summary.arch,
+        "entrypoint": summary.entrypoint_symbol,
+        "params": summary.ui_params.len(),
         "appliedClips": targets.len(),
     }))
 }
@@ -518,6 +626,8 @@ fn import_drfx(s: &mut Session, p: &Value) -> Result<Value> {
                         name: stem.clone(),
                         kind: *kind,
                         source_path: Some(src_path.clone()),
+                        binary_base64: None,
+                        binary_path: None,
                         enabled: true,
                         params: params.clone(),
                         code: Arc::from(code.as_str()),
@@ -963,5 +1073,102 @@ __DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, float p
         let (_, item) = seq.find_item(cid).expect("inserted graphic clip");
         assert_eq!(item.name, "Breaking News Lower Third");
         assert!(item.effects.iter().any(|e| e.effect == filmcraft_project::graphic::TEXT_LAYER));
+    }
+
+    fn build_minimal_pe64_aex() -> Vec<u8> {
+        let code: &[u8] = &[
+            0x83, 0xF9, 0x0B, // cmp ecx, 11 (PF_Cmd_RENDER)
+            0x75, 0x1A, // jne ok
+            0x49, 0x8B, 0x01, // mov rax, [r9] (params[0])
+            0x48, 0x8B, 0x40, 0x50, // mov rax, [rax + 0x50] (src data)
+            0x4C, 0x8B, 0x54, 0x24, 0x28, // mov r10, [rsp + 0x28] (output PF_LayerDef*)
+            0x4D, 0x8B, 0x52, 0x18, // mov r10, [r10 + 0x18] (dst data)
+            0x8B, 0x10, // mov edx, [rax]
+            0x81, 0xCA, 0x00, 0xFF, 0x00, 0x00, // or edx, 0x0000_FF00 (max Red in ARGB8!)
+            0x41, 0x89, 0x12, // mov [r10], edx
+            0x31, 0xC0, // xor eax, eax
+            0xC3, // ret
+        ];
+        let mut img = vec![0u8; 0x3000];
+        img[0..2].copy_from_slice(b"MZ");
+        img[0x3C..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+        let pe = 0x80usize;
+        img[pe..pe + 4].copy_from_slice(b"PE\0\0");
+        img[pe + 4..pe + 6].copy_from_slice(&0x8664u16.to_le_bytes());
+        img[pe + 6..pe + 8].copy_from_slice(&2u16.to_le_bytes());
+        img[pe + 20..pe + 22].copy_from_slice(&0xF0u16.to_le_bytes());
+        img[pe + 22..pe + 24].copy_from_slice(&0x2022u16.to_le_bytes());
+        let opt = pe + 24;
+        img[opt..opt + 2].copy_from_slice(&0x020Bu16.to_le_bytes());
+        img[opt + 24..opt + 32].copy_from_slice(&0x0000_0001_8000_0000u64.to_le_bytes());
+        img[opt + 32..opt + 36].copy_from_slice(&0x1000u32.to_le_bytes());
+        img[opt + 36..opt + 40].copy_from_slice(&0x0400u32.to_le_bytes());
+        img[opt + 56..opt + 60].copy_from_slice(&0x4000u32.to_le_bytes());
+        img[opt + 60..opt + 64].copy_from_slice(&0x0400u32.to_le_bytes());
+        img[opt + 108..opt + 112].copy_from_slice(&16u32.to_le_bytes());
+        img[opt + 112..opt + 116].copy_from_slice(&0x2000u32.to_le_bytes());
+        img[opt + 116..opt + 120].copy_from_slice(&0x200u32.to_le_bytes());
+        let sh = opt + 0xF0;
+        img[sh..sh + 5].copy_from_slice(b".text");
+        img[sh + 8..sh + 12].copy_from_slice(&0x1000u32.to_le_bytes());
+        img[sh + 12..sh + 16].copy_from_slice(&0x1000u32.to_le_bytes());
+        img[sh + 16..sh + 20].copy_from_slice(&0x0800u32.to_le_bytes());
+        img[sh + 20..sh + 24].copy_from_slice(&0x0400u32.to_le_bytes());
+        let sh1 = sh + 40;
+        img[sh1..sh1 + 6].copy_from_slice(b".edata");
+        img[sh1 + 8..sh1 + 12].copy_from_slice(&0x1000u32.to_le_bytes());
+        img[sh1 + 12..sh1 + 16].copy_from_slice(&0x2000u32.to_le_bytes());
+        img[sh1 + 16..sh1 + 20].copy_from_slice(&0x0400u32.to_le_bytes());
+        img[sh1 + 20..sh1 + 24].copy_from_slice(&0x0C00u32.to_le_bytes());
+        img[0x0400..0x0400 + code.len()].copy_from_slice(code);
+        let eo = 0x0C00usize;
+        img[eo + 16..eo + 20].copy_from_slice(&1u32.to_le_bytes());
+        img[eo + 20..eo + 24].copy_from_slice(&1u32.to_le_bytes());
+        img[eo + 24..eo + 28].copy_from_slice(&1u32.to_le_bytes());
+        img[eo + 28..eo + 32].copy_from_slice(&0x2040u32.to_le_bytes());
+        img[eo + 32..eo + 36].copy_from_slice(&0x2044u32.to_le_bytes());
+        img[eo + 36..eo + 40].copy_from_slice(&0x2048u32.to_le_bytes());
+        img[eo + 0x40..eo + 0x44].copy_from_slice(&0x1000u32.to_le_bytes());
+        img[eo + 0x44..eo + 0x48].copy_from_slice(&0x2050u32.to_le_bytes());
+        img[eo + 0x48..eo + 0x4A].copy_from_slice(&0u16.to_le_bytes());
+        img[eo + 0x50..eo + 0x50 + 14].copy_from_slice(b"EntryPointFunc");
+        img
+    }
+
+    #[test]
+    fn native_prm_and_aex_scan_import_and_apply_to_timeline_clips() {
+        let mut s = Session::default();
+        s.execute("file.openDemoProject", json!({})).expect("demo project");
+        let vid_clip = s.active_sequence().expect("seq").video_tracks.iter().flat_map(|t| t.items.iter()).next().expect("video clip").id;
+        s.state.selection = vec![vid_clip];
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prm_path = dir.path().join("MaxRed.prm");
+        let aex_path = dir.path().join("MaxRedAE.aex");
+        let bin = build_minimal_pe64_aex();
+        std::fs::write(&prm_path, &bin).expect("write .prm");
+        std::fs::write(&aex_path, &bin).expect("write .aex");
+
+        // 1. Directory scanner discovers `.prm` and `.aex`
+        s.prefs.plugins.scan_system_folders = false;
+        s.prefs.plugins.custom_search_path = dir.path().to_string_lossy().to_string();
+        let scan_res = s.execute("plugins.scan", json!({})).expect("plugins.scan");
+        assert_eq!(scan_res["discovered"], json!(2));
+        assert!(s.plugins.discovered.iter().any(|d| d.kind == PluginKind::NativePremierePrm && d.name == "MaxRed"));
+        assert!(s.plugins.discovered.iter().any(|d| d.kind == PluginKind::NativeAfterEffectsAex && d.name == "MaxRedAE"));
+
+        // 2. Desktop path import + apply to selected video clip
+        let imp_prm = s.execute("plugins.importNativeBinary", json!({ "path": prm_path.to_string_lossy(), "apply": true })).expect("import .prm");
+        assert_eq!(imp_prm["badge"], json!("PRM"));
+        assert_eq!(imp_prm["appliedClips"], json!(1));
+        assert!(s.project.plugins.iter().any(|p| p.kind == PluginKind::NativePremierePrm && p.binary_base64.is_some()));
+
+        // 3. Web/mobile portable base64 import (`name` + `data`)
+        let b64 = encode_base64(&bin);
+        let imp_aex = s.execute("plugins.importNativeBinary", json!({ "name": "WebPortable.aex", "data": b64 })).expect("import base64 .aex");
+        assert_eq!(imp_aex["badge"], json!("AEX"));
+
+        let (_, item) = s.active_sequence().expect("seq").find_item(vid_clip).expect("clip");
+        assert!(item.effects.iter().any(|e| e.effect == "native_adobe_plugin"));
     }
 }
