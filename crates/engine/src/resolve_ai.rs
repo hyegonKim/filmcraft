@@ -12,9 +12,7 @@ use std::f64::consts::{FRAC_1_SQRT_2, PI};
 use filmcraft_edit as edit;
 use filmcraft_edit::multicam::Cut;
 use filmcraft_project::transcript::normalize_word;
-use filmcraft_project::{
-    ClipId, EffectInstance, ItemId, ItemKind, Param, ParamValue, ProjectItem, SequenceSettings, TrackKind, Transcript, find_effect,
-};
+use filmcraft_project::{ClipId, EffectInstance, ItemId, ItemKind, Param, ParamValue, ProjectItem, SequenceSettings, TrackKind, Transcript, find_effect};
 use filmcraft_render::SourceProvider;
 use filmcraft_time::{TICKS_PER_SECOND, Tick, TimeRange};
 use serde_json::{Value, json};
@@ -154,7 +152,13 @@ fn collect_fallback_candidates(it: &ProjectItem, dur: Tick, order_counter: &mut 
                 let default_len = Tick::from_seconds_f64(3.0);
                 let span = mk.duration.max(default_len).min((dur - s0).max(Tick(1)));
                 *order_counter += 1;
-                out.push(ScriptCandidate { item: it.id, range: TimeRange::new(s0, span), tokens: toks, text: label.trim().to_string(), order_key: *order_counter });
+                out.push(ScriptCandidate {
+                    item: it.id,
+                    range: TimeRange::new(s0, span),
+                    tokens: toks,
+                    text: label.trim().to_string(),
+                    order_key: *order_counter,
+                });
             }
         }
     }
@@ -329,11 +333,8 @@ fn intelli_script(s: &mut Session, p: &Value) -> Result<Value> {
     }
 
     let aligned = align_script_dp(&lines, &cands);
-    let matched_pairs: Vec<(usize, &ScriptCandidate, f64)> = aligned
-        .iter()
-        .enumerate()
-        .filter_map(|(line_i, opt)| opt.map(|(cand_i, sc)| (line_i, &cands[cand_i], sc)))
-        .collect();
+    let matched_pairs: Vec<(usize, &ScriptCandidate, f64)> =
+        aligned.iter().enumerate().filter_map(|(line_i, opt)| opt.map(|(cand_i, sc)| (line_i, &cands[cand_i], sc))).collect();
     if matched_pairs.is_empty() {
         return Err(bad(CMD, "no transcript or clip metadata matched the supplied script"));
     }
@@ -357,16 +358,12 @@ fn intelli_script(s: &mut Session, p: &Value) -> Result<Value> {
             let link_id = (has_v && has_a).then(|| pr.alloc_id());
 
             let mut primary_cid = 0u64;
-            if has_v
-                && let Some(mut vi) = pr.make_track_item(cand.item, TrackKind::Video, cursor, src_range, rate)
-            {
+            if has_v && let Some(mut vi) = pr.make_track_item(cand.item, TrackKind::Video, cursor, src_range, rate) {
                 vi.link = link_id;
                 primary_cid = vi.id.0;
                 v_items.push(vi);
             }
-            if has_a
-                && let Some(mut ai) = pr.make_track_item(cand.item, TrackKind::Audio, cursor, src_range, rate)
-            {
+            if has_a && let Some(mut ai) = pr.make_track_item(cand.item, TrackKind::Audio, cursor, src_range, rate) {
                 ai.link = link_id;
                 if primary_cid == 0 {
                     primary_cid = ai.id.0;
@@ -739,12 +736,7 @@ fn measure_clip_dialogue_profile(item: &filmcraft_project::TrackItem, sr: u32, p
         mid_off = peq.f64_at("mid_gain", Tick::ZERO);
         high_off = peq.f64_at("high_gain", Tick::ZERO);
     }
-    DialogueProfile {
-        lufs: base_lufs,
-        low_db: base_lufs - 5.0 + low_off,
-        mid_db: base_lufs - 1.5 + mid_off,
-        presence_db: base_lufs - 6.0 + high_off,
-    }
+    DialogueProfile { lufs: base_lufs, low_db: base_lufs - 5.0 + low_off, mid_db: base_lufs - 1.5 + mid_off, presence_db: base_lufs - 6.0 + high_off }
 }
 
 fn resolve_audio_clip_id(seq: &filmcraft_project::Sequence, raw: ClipId) -> Option<ClipId> {
@@ -902,13 +894,7 @@ mod tests {
         let mut s = Session::default();
         s.execute("file.openDemoProject", json!({})).expect("demo project");
 
-        let media_ids: Vec<ItemId> = s
-            .project
-            .items
-            .iter()
-            .filter_map(|(&id, it)| matches!(it.kind, ItemKind::Media(_)).then_some(id))
-            .take(2)
-            .collect();
+        let media_ids: Vec<ItemId> = s.project.items.iter().filter_map(|(&id, it)| matches!(it.kind, ItemKind::Media(_)).then_some(id)).take(2).collect();
         assert!(media_ids.len() >= 2);
 
         let tr_a = Transcript {
@@ -943,9 +929,7 @@ mod tests {
         .unwrap();
 
         let script = "Welcome to FilmCraft.\nAudio matching saves hours.\nColor grading shines.";
-        let res = s
-            .execute("ai.intelliScript", json!({ "script": script, "sequenceName": "AI Script Assembly" }))
-            .expect("intelliScript");
+        let res = s.execute("ai.intelliScript", json!({ "script": script, "sequenceName": "AI Script Assembly" })).expect("intelliScript");
         assert_eq!(res["matchedLines"], json!(3));
         let clips = res["clips"].as_array().unwrap();
         assert_eq!(clips[0]["item"], json!(media_ids[0].0));
@@ -998,8 +982,9 @@ mod tests {
             let v0 = pr.make_track_item(vid_src, TrackKind::Video, Tick::ZERO, TimeRange::new(Tick::ZERO, Tick::from_seconds_f64(6.0)), rate).unwrap();
             let v1 = pr.make_track_item(vid_src, TrackKind::Video, Tick::ZERO, TimeRange::new(Tick::ZERO, Tick::from_seconds_f64(6.0)), rate).unwrap();
             let a0 = pr.make_track_item(item1, TrackKind::Audio, Tick::ZERO, TimeRange::new(Tick::ZERO, Tick::from_seconds_f64(3.0)), rate).unwrap();
-            let mut a1 =
-                pr.make_track_item(item2, TrackKind::Audio, Tick::from_seconds_f64(3.0), TimeRange::new(Tick::ZERO, Tick::from_seconds_f64(3.0)), rate).unwrap();
+            let mut a1 = pr
+                .make_track_item(item2, TrackKind::Audio, Tick::from_seconds_f64(3.0), TimeRange::new(Tick::ZERO, Tick::from_seconds_f64(3.0)), rate)
+                .unwrap();
             a1.gain_db = 12.0;
 
             let seq_mc = pr.sequence_mut(mc_seq_id).unwrap();
@@ -1028,8 +1013,9 @@ mod tests {
             mc_timeline_clip = mc_item.id;
 
             let ref_it = pr.make_track_item(item1, TrackKind::Audio, Tick::ZERO, TimeRange::new(Tick::ZERO, Tick::from_seconds_f64(3.0)), rate).unwrap();
-            let tgt_it =
-                pr.make_track_item(item2, TrackKind::Audio, Tick::from_seconds_f64(3.5), TimeRange::new(Tick::ZERO, Tick::from_seconds_f64(2.5)), rate).unwrap();
+            let tgt_it = pr
+                .make_track_item(item2, TrackKind::Audio, Tick::from_seconds_f64(3.5), TimeRange::new(Tick::ZERO, Tick::from_seconds_f64(2.5)), rate)
+                .unwrap();
             ref_audio_clip = ref_it.id;
             tgt_audio_clip = tgt_it.id;
 
@@ -1044,9 +1030,7 @@ mod tests {
         .unwrap();
 
         // 1. Test `multicam.smartSwitch` using real decoded WAV audio
-        let sw = s
-            .execute("multicam.smartSwitch", json!({ "clip": mc_timeline_clip.0, "minCutSeconds": 1.5, "thresholdDb": -45.0 }))
-            .expect("smartSwitch");
+        let sw = s.execute("multicam.smartSwitch", json!({ "clip": mc_timeline_clip.0, "minCutSeconds": 1.5, "thresholdDb": -45.0 })).expect("smartSwitch");
         assert_eq!(sw["usedDecodedAudio"], json!(true));
         assert!(sw["editPoints"].as_u64().unwrap() >= 1, "expected switch from Angle 0 to Angle 1: {sw}");
 
@@ -1055,9 +1039,7 @@ mod tests {
         assert_eq!(s.active_sequence().unwrap().video_tracks[0].items.len(), 1);
 
         // 2. Test `audio.matchDialogue` matching quiet 3.5kHz clip to loud 180Hz reference clip
-        let md = s
-            .execute("audio.matchDialogue", json!({ "reference": ref_audio_clip.0, "targets": [tgt_audio_clip.0] }))
-            .expect("matchDialogue");
+        let md = s.execute("audio.matchDialogue", json!({ "reference": ref_audio_clip.0, "targets": [tgt_audio_clip.0] })).expect("matchDialogue");
         let matched = &md["matchedTargets"][0];
         assert!(matched["gainDb"].as_f64().unwrap() > 8.0, "quieter target boosted toward reference: {matched}");
         assert!(matched["lowEqDb"].as_f64().unwrap() > 1.0, "low shelf boosted to match 180Hz reference: {matched}");

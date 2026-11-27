@@ -804,10 +804,7 @@ fn extract_directives(cleaned: &str, mut declared_luts: BTreeMap<String, (String
             straight_alpha = true;
             continue;
         }
-        if t.starts_with("DEFINE_DCTL_ALPHA_MODE_PREMULTIPLY")
-            || t.starts_with("DEFINE_UI_TOOLTIP")
-            || t.starts_with("DEFINE_ACES_PARAM")
-            || t.starts_with('#')
+        if t.starts_with("DEFINE_DCTL_ALPHA_MODE_PREMULTIPLY") || t.starts_with("DEFINE_UI_TOOLTIP") || t.starts_with("DEFINE_ACES_PARAM") || t.starts_with('#')
         {
             continue;
         }
@@ -1373,9 +1370,7 @@ fn validate_expr_calls(expr: &Expr, helpers: &BTreeMap<String, DctlHelperFn>, us
             if name == "_tex2D" {
                 *uses_tex2d = true;
             }
-            if matches!(name.as_str(), "APPLY_LUT" | "APPLY_LUT_TRILINEAR")
-                && (args.len() < 4 || !matches!(args.get(3), Some(Expr::Var(_))))
-            {
+            if matches!(name.as_str(), "APPLY_LUT" | "APPLY_LUT_TRILINEAR") && (args.len() < 4 || !matches!(args.get(3), Some(Expr::Var(_)))) {
                 return Err(format!("`{name}` expects `(r, g, b, lutIdent)`"));
             }
             if !is_builtin_dctl_fn(name) && !helpers.contains_key(name) {
@@ -1739,8 +1734,7 @@ fn eval_apply_lut(name: &str, args: &[Expr], rt: &mut EvalRuntime<'_>, owned: &B
         Some(Expr::Var(v)) => v.as_str(),
         _ => "",
     };
-    let explicit_trilinear = name == "APPLY_LUT_TRILINEAR"
-        || args.get(4).is_some_and(|e| (eval_expr(e, rt, owned, call_depth).as_f32() - 1.0).abs() < 0.5);
+    let explicit_trilinear = name == "APPLY_LUT_TRILINEAR" || args.get(4).is_some_and(|e| (eval_expr(e, rt, owned, call_depth).as_f32() - 1.0).abs() < 0.5);
     let eval_with = |lut: &DctlCubeLut, force_tri: bool, decl_interp: Option<DctlLutInterp>| -> [f32; 3] {
         let mode = if force_tri { DctlLutInterp::Trilinear } else { decl_interp.unwrap_or(lut.interp) };
         match mode {
@@ -1756,11 +1750,8 @@ fn eval_apply_lut(name: &str, args: &[Expr], rt: &mut EvalRuntime<'_>, owned: &B
     if let Some(inline_lut) = rt.prog.luts.get(lut_ident) {
         return DctlVal::Vec3(eval_with(inline_lut, explicit_trilinear, None));
     }
-    let fallback = if decl.is_some_and(|(tag, _)| tag.to_ascii_lowercase().contains("identity")) {
-        DctlCubeLut::identity(2)
-    } else {
-        DctlCubeLut::default_film_shaper()
-    };
+    let fallback =
+        if decl.is_some_and(|(tag, _)| tag.to_ascii_lowercase().contains("identity")) { DctlCubeLut::identity(2) } else { DctlCubeLut::default_film_shaper() };
     DctlVal::Vec3(eval_with(&fallback, explicit_trilinear, decl_interp))
 }
 

@@ -129,14 +129,7 @@ fn draw_resolve_color_header(app: &mut FilmcraftApp, ui: &mut egui::Ui, clip: Cl
 
 /// Interactive DaVinci Resolve-style `160×160` Color Warper Spider-Web Grid (12 radial hue spokes
 /// + 4 concentric chroma rings + draggable target/warped pin handle).
-fn draw_color_warper_spider_web(
-    app: &mut FilmcraftApp,
-    ui: &mut egui::Ui,
-    clip: ClipId,
-    it: &filmcraft_project::TrackItem,
-    mt: Tick,
-    t: &Tokens,
-) {
+fn draw_color_warper_spider_web(app: &mut FilmcraftApp, ui: &mut egui::Ui, clip: ClipId, it: &filmcraft_project::TrackItem, mt: Tick, t: &Tokens) {
     let Some((warper_idx, warper)) = it.effects.iter().enumerate().find(|(_, fx)| fx.effect == "color_warper") else {
         return;
     };
@@ -211,9 +204,8 @@ fn draw_color_warper_spider_web(
         let ptr_sat = (rel.length() / radius * 100.0).clamp(0.0, 100.0);
         let existing_origin: Option<(f32, f32)> = ui.data(|d| d.get_temp(drag_key));
         let begin = existing_origin.is_none();
-        let (orig_hue, orig_sat) = existing_origin.unwrap_or_else(|| {
-            if pos.distance(warped_pt) <= 16.0 { (target_hue, sat_center) } else { (ptr_hue, ptr_sat) }
-        });
+        let (orig_hue, orig_sat) =
+            existing_origin.unwrap_or_else(|| if pos.distance(warped_pt) <= 16.0 { (target_hue, sat_center) } else { (ptr_hue, ptr_sat) });
         if resp.dragged() {
             ui.data_mut(|d| d.insert_temp(drag_key, (orig_hue, orig_sat)));
             let dh = ((ptr_hue - orig_hue + 540.0).rem_euclid(360.0) - 180.0).clamp(-180.0, 180.0);

@@ -65,9 +65,12 @@ fn effects_list_reports_folders_and_badges() {
     assert_eq!(find("crop")["category"], json!(["Legacy", "Video Effects"]));
     assert_eq!(find("luma_key")["badges"], json!({"accelerated": true, "float32": true, "yuv": true}));
     assert_eq!(find("lens_flare")["folder"], "Lights & Glows");
-    let n =
-        arr.iter().filter(|e| e["kind"] == "Video" && e["category"][0] == "Video Effects" && e["folder"] != "Obsolete" && e["folder"] != Value::Null).count();
-    assert_eq!(n, 102, "Premiere 27's current Video Effects");
+    let listed = |e: &&Value| e["kind"] == "Video" && e["category"][0] == "Video Effects" && e["folder"] != "Obsolete" && e["folder"] != Value::Null;
+    let in_folder = |folder: &str| arr.iter().filter(listed).filter(|e| e["folder"] == folder).count();
+    // FilmCraft's own ResolveFX and 3D & Material folders sit beside Premiere's.
+    let (resolve, material) = (in_folder("ResolveFX"), in_folder("3D & Material"));
+    assert_eq!((resolve, material), (6, 3), "FilmCraft's own Video Effects folders");
+    assert_eq!(arr.iter().filter(listed).count() - resolve - material, 102, "Premiere 27's current Video Effects");
 }
 
 #[test]

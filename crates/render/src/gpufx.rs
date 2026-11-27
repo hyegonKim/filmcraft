@@ -865,9 +865,7 @@ impl FxOp {
             FxOp::Qualifier3d { key_hue, hue_half, hue_soft, sat_lo, sat_hi, lum_lo, lum_hi, soft, in_ev, in_sat, in_temp, out_ev, out_sat, .. } => {
                 fin(&[*key_hue, *hue_half, *hue_soft, *sat_lo, *sat_hi, *lum_lo, *lum_hi, *soft, *in_ev, *in_sat, *in_temp, *out_ev, *out_sat])
             }
-            FxOp::DynamicZoom { inv_s, cx_px, cy_px, .. } => {
-                fin(&[*inv_s, *cx_px, *cy_px]) && cx_px.abs() < 1e7 && cy_px.abs() < 1e7
-            }
+            FxOp::DynamicZoom { inv_s, cx_px, cy_px, .. } => fin(&[*inv_s, *cx_px, *cy_px]) && cx_px.abs() < 1e7 && cy_px.abs() < 1e7,
         }
     }
 
@@ -1289,8 +1287,7 @@ impl FxOp {
         }
         match self {
             FxOp::ColorSpaceTransform { mat, in_code, out_code, tone_mode, gamut_comp, max_nits, mix } => {
-                let (mat, in_code, out_code, tone_mode, gamut_comp, max_nits, mix) =
-                    (*mat, *in_code, *out_code, *tone_mode, *gamut_comp, *max_nits, *mix);
+                let (mat, in_code, out_code, tone_mode, gamut_comp, max_nits, mix) = (*mat, *in_code, *out_code, *tone_mode, *gamut_comp, *max_nits, *mix);
                 if mix <= 0.0 || (in_code == out_code && tone_mode == 0 && !gamut_comp) {
                     return;
                 }

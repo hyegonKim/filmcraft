@@ -327,9 +327,7 @@ fn steps(op: &FxOp, w: u32, h: u32) -> Vec<Step> {
         }
         FxOp::ColorSpaceTransform { mat, in_code, out_code, tone_mode, gamut_comp, max_nits, mix } => {
             if *mix > 0.0 && !(*in_code == *out_code && *tone_mode == 0 && !*gamut_comp) {
-                let p = [
-                    mat[0][0], mat[0][1], mat[0][2], 0.0, mat[1][0], mat[1][1], mat[1][2], 0.0, mat[2][0], mat[2][1], mat[2][2], 0.0, *max_nits, *mix,
-                ];
+                let p = [mat[0][0], mat[0][1], mat[0][2], 0.0, mat[1][0], mat[1][1], mat[1][2], 0.0, mat[2][0], mat[2][1], mat[2][2], 0.0, *max_nits, *mix];
                 out.push(step(OP_COLOR_SPACE_TRANSFORM, [*in_code, *out_code, *tone_mode, *gamut_comp as u32], &p));
             }
         }
@@ -339,9 +337,7 @@ fn steps(op: &FxOp, w: u32, h: u32) -> Vec<Step> {
             }
         }
         FxOp::Qualifier3d { key_hue, hue_half, hue_soft, sat_lo, sat_hi, lum_lo, lum_hi, soft, in_ev, in_sat, in_temp, out_ev, out_sat, show_matte } => {
-            let p = [
-                *key_hue, *hue_half, *hue_soft, *soft, *sat_lo, *sat_hi, *lum_lo, *lum_hi, *in_ev, *in_sat, *in_temp, *out_ev, *out_sat,
-            ];
+            let p = [*key_hue, *hue_half, *hue_soft, *soft, *sat_lo, *sat_hi, *lum_lo, *lum_hi, *in_ev, *in_sat, *in_temp, *out_ev, *out_sat];
             out.push(step(OP_QUALIFIER_3D, [*show_matte as u32, 0, 0, 0], &p));
         }
         FxOp::DynamicZoom { inv_s, cx_px, cy_px, identity } => {

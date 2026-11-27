@@ -584,10 +584,8 @@ fn import_ograf(s: &mut Session, p: &Value) -> Result<Value> {
     let name = str_p(p, "name").or_else(|| manifest.get("name").and_then(Value::as_str)).map_or(fallback_name, str::to_string);
     let fields = extract_ograf_fields(&manifest);
 
-    let non_empty: Vec<String> = fields
-        .iter()
-        .filter_map(|(lbl, val)| if val.trim().is_empty() { None } else { Some(val.trim().to_string()).or_else(|| Some(lbl.clone())) })
-        .collect();
+    let non_empty: Vec<String> =
+        fields.iter().filter_map(|(lbl, val)| if val.trim().is_empty() { None } else { Some(val.trim().to_string()).or_else(|| Some(lbl.clone())) }).collect();
     let headline = non_empty.first().cloned().unwrap_or_else(|| name.clone());
     let subtitle = non_empty.get(1).cloned().or_else(|| manifest.get("description").and_then(Value::as_str).map(str::to_string));
 
@@ -936,9 +934,7 @@ __DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, float p
         let drfx_path = dir.path().join("LookPack.drfx");
         std::fs::write(&drfx_path, &zip_bytes).expect("write drfx");
 
-        let drfx_res = s
-            .execute("plugins.importDrfx", json!({ "path": drfx_path.to_string_lossy() }))
-            .expect("importDrfx");
+        let drfx_res = s.execute("plugins.importDrfx", json!({ "path": drfx_path.to_string_lossy() })).expect("importDrfx");
         assert_eq!(drfx_res["importedDctls"], json!(2));
         assert_eq!(drfx_res["entries"].as_array().unwrap().len(), 3);
         assert_eq!(s.project.plugins.len(), 2);
@@ -959,9 +955,7 @@ __DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, float p
         let ograf_path = dir.path().join("LowerThird.ograf.json");
         std::fs::write(&ograf_path, ograf_manifest.to_string()).expect("write ograf");
 
-        let ograf_res = s
-            .execute("plugins.importOgraf", json!({ "path": ograf_path.to_string_lossy(), "seconds": 4.0 }))
-            .expect("importOgraf");
+        let ograf_res = s.execute("plugins.importOgraf", json!({ "path": ograf_path.to_string_lossy(), "seconds": 4.0 })).expect("importOgraf");
         let cid = ClipId(ograf_res["clip"].as_u64().expect("clip id"));
         assert_eq!(ograf_res["name"], json!("Breaking News Lower Third"));
         assert_eq!(ograf_res["fields"].as_array().unwrap().len(), 2);

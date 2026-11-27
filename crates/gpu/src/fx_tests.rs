@@ -361,7 +361,13 @@ fn cases() -> Vec<(&'static str, Vec<(&'static str, ParamValue)>, bool)> {
         ),
         (
             "color_space_transform",
-            vec![("input_space", ch(4)), ("output_space", ch(1)), ("tone_mapping", ch(1)), ("max_input_nits", fl(1000.0)), ("gamut_compression", ParamValue::Bool(true))],
+            vec![
+                ("input_space", ch(4)),
+                ("output_space", ch(1)),
+                ("tone_mapping", ch(1)),
+                ("max_input_nits", fl(1000.0)),
+                ("gamut_compression", ParamValue::Bool(true)),
+            ],
             false,
         ),
         (
@@ -371,12 +377,25 @@ fn cases() -> Vec<(&'static str, Vec<(&'static str, ParamValue)>, bool)> {
         ),
         (
             "color_space_transform",
-            vec![("input_space", ch(8)), ("output_space", ch(4)), ("tone_mapping", ch(2)), ("max_input_nits", fl(2000.0)), ("gamut_compression", ParamValue::Bool(true))],
+            vec![
+                ("input_space", ch(8)),
+                ("output_space", ch(4)),
+                ("tone_mapping", ch(2)),
+                ("max_input_nits", fl(2000.0)),
+                ("gamut_compression", ParamValue::Bool(true)),
+            ],
             false,
         ),
         (
             "color_warper",
-            vec![("target_hue", fl(210.0)), ("hue_rotate", fl(35.0)), ("chroma_push", fl(25.0)), ("luma_lift", fl(-15.0)), ("pin_falloff", fl(50.0)), ("sat_center", fl(55.0))],
+            vec![
+                ("target_hue", fl(210.0)),
+                ("hue_rotate", fl(35.0)),
+                ("chroma_push", fl(25.0)),
+                ("luma_lift", fl(-15.0)),
+                ("pin_falloff", fl(50.0)),
+                ("sat_center", fl(55.0)),
+            ],
             false,
         ),
         ("color_warper", vec![], false),
@@ -397,7 +416,14 @@ fn cases() -> Vec<(&'static str, Vec<(&'static str, ParamValue)>, bool)> {
         ("qualifier_3d", vec![("highlight_matte", ParamValue::Bool(true))], false),
         (
             "dynamic_zoom",
-            vec![("mode", ch(0)), ("ease", ch(3)), ("start_scale", fl(115.0)), ("end_scale", fl(145.0)), ("start_center", pt(30.0, 18.0)), ("end_center", pt(36.0, 22.0))],
+            vec![
+                ("mode", ch(0)),
+                ("ease", ch(3)),
+                ("start_scale", fl(115.0)),
+                ("end_scale", fl(145.0)),
+                ("start_center", pt(30.0, 18.0)),
+                ("end_center", pt(36.0, 22.0)),
+            ],
             false,
         ),
         ("dynamic_zoom", vec![("start_scale", fl(100.0)), ("end_scale", fl(100.0))], false),

@@ -289,12 +289,7 @@ fn render_dctl_transition(t: &Tx) -> Image {
             sample_to: prog.uses_tex2d.then_some(&sample_to),
         };
         let raw = prog.eval_pixel(&pctx).into_rgba(pa[3] + (pb[3] - pa[3]) * p);
-        let clamped = [
-            raw[0].clamp(-0.25, 48.0),
-            raw[1].clamp(-0.25, 48.0),
-            raw[2].clamp(-0.25, 48.0),
-            raw[3].clamp(0.0, 1.0),
-        ];
+        let clamped = [raw[0].clamp(-0.25, 48.0), raw[1].clamp(-0.25, 48.0), raw[2].clamp(-0.25, 48.0), raw[3].clamp(0.0, 1.0)];
         let c1 = mix(pa, clamped, end_in);
         mix(c1, pb, end_out)
     })

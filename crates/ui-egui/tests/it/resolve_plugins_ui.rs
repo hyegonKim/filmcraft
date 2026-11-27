@@ -223,10 +223,7 @@ fn dctl_dynamic_effect_controls_labels_and_ograf_apply_work() {
         "    return make_float3(p_R * g, p_G * g, p_B * g);\n",
         "}\n"
     );
-    h.state_mut()
-        .session
-        .execute("plugins.importDctl", json!({ "name": "Dynamic Label Test", "code": dctl_src, "apply": true }))
-        .expect("importDctl");
+    h.state_mut().session.execute("plugins.importDctl", json!({ "name": "Dynamic Label Test", "code": dctl_src, "apply": true })).expect("importDctl");
     let (fx_idx, collapse_keys) = {
         let (_, it) = h.state().session.active_sequence().unwrap().find_item(vid_clip).unwrap();
         let idx = it.effects.iter().position(|e| e.effect == "dctl_transform").expect("dctl_transform on clip");
@@ -255,7 +252,8 @@ fn dctl_dynamic_effect_controls_labels_and_ograf_apply_work() {
     )
     .unwrap();
     let drfx_path = dir.path().join("BundleLook.drfx");
-    let bundle_dctl = b"__DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, float p_R, float p_G, float p_B) { return make_float3(p_B, p_G, p_R); }\n";
+    let bundle_dctl =
+        b"__DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, float p_R, float p_G, float p_B) { return make_float3(p_B, p_G, p_R); }\n";
     std::fs::write(&drfx_path, store_only_zip("Looks/SwapRB.dctl", bundle_dctl)).unwrap();
 
     h.state_mut().session.plugins.discovered.push(filmcraft_engine::plugins::DiscoveredPlugin {

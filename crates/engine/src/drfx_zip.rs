@@ -86,10 +86,7 @@ fn read_from_central_dir(b: &[u8], mut off: usize, count: usize) -> Result<Vec<Z
         let name_bytes = b.get(name_start..name_end).ok_or("truncated ZIP entry name")?;
         let name = String::from_utf8_lossy(name_bytes).replace('\\', "/");
 
-        off = name_end
-            .checked_add(extra_len)
-            .and_then(|x| x.checked_add(comment_len))
-            .ok_or("ZIP central header overflow")?;
+        off = name_end.checked_add(extra_len).and_then(|x| x.checked_add(comment_len)).ok_or("ZIP central header overflow")?;
 
         if name.ends_with('/') || name.is_empty() {
             continue;
@@ -136,14 +133,7 @@ fn read_from_local_headers(b: &[u8]) -> Result<Vec<ZipEntry>, String> {
     Ok(out)
 }
 
-fn extract_local_payload(
-    b: &[u8],
-    local_off: usize,
-    method: u16,
-    comp_sz: usize,
-    uncomp_sz: usize,
-    total_uncompressed: &mut usize,
-) -> Result<Vec<u8>, String> {
+fn extract_local_payload(b: &[u8], local_off: usize, method: u16, comp_sz: usize, uncomp_sz: usize, total_uncompressed: &mut usize) -> Result<Vec<u8>, String> {
     if u32_le(b, local_off) != Some(0x0403_4b50) {
         return Err("missing ZIP local file header".into());
     }

@@ -1147,13 +1147,7 @@ pub(crate) fn param_row(
     }
 }
 
-fn dctl_param_value_widget(
-    vui: &mut egui::Ui,
-    up: &filmcraft_project::DctlUiParam,
-    v: f64,
-    id: egui::Id,
-    t: Tokens,
-) -> Option<Value> {
+fn dctl_param_value_widget(vui: &mut egui::Ui, up: &filmcraft_project::DctlUiParam, v: f64, id: egui::Id, t: Tokens) -> Option<Value> {
     use filmcraft_project::DctlParamKind;
     match &up.kind {
         DctlParamKind::Bool { .. } => {
