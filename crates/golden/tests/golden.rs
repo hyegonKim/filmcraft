@@ -713,7 +713,7 @@ goldens!(
 #[test]
 fn lumetri_presets_grid() {
     use filmcraft_render::lumetri_presets as lp;
-    let img = lp::grid(&lp::presets(), 6, 96, 54);
+    let img = lp::grid(&lp::presets(), 6, 48, 27);
     let rgba = Rgba8::new(img.w as u32, img.h as u32, img.over_black_rgba8());
     let name = "lumetri_presets_grid";
     let d =
