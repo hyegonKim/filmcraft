@@ -13,6 +13,7 @@ pub mod caption;
 pub mod effect;
 pub mod essential;
 pub mod find;
+pub mod frameio;
 pub mod graphic;
 pub mod graphic_design;
 pub mod gtemplate;
@@ -41,6 +42,7 @@ pub use caption::{Caption, CaptionAlign, CaptionAnchor, CaptionFormat, CaptionSt
 pub use effect::{EffectDef, EffectInstance, EffectKind, ParamDef, ParamKind, effect_defs, find_effect, interchange_name, search_aliases};
 pub use essential::{AudioType, EssentialSound};
 pub use find::{FindOp, FindQuery, FindRow, SearchBin};
+pub use frameio::{FrameIoReviewComment, ReviewStatus, TelestratorAnnotation, TelestratorShape, replies_to, root_comments};
 pub use graphic_design::{CharStyle, GraphicMeta, LayerExtra, Pin, PinTarget, Roll, RollMode, SourceGraphic, StyleRun};
 pub use keyframe::{Interpolation, Keyframe, Param, ParamValue};
 pub use mask::{Mask, MaskMode, MaskPath, MaskVertex, TrackMethod, TrackerQuality};
@@ -136,6 +138,9 @@ pub struct Project {
     /// Color-page Gallery Stills / PowerGrades (`color.grabStill` / `color.applyStill`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub power_grades: Vec<PowerGradeStill>,
+    /// Frame.io (`FFC_framemob`) review comments, reply threads & Telestrator annotations per sequence.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub review_comments: BTreeMap<ItemId, Vec<FrameIoReviewComment>>,
 }
 
 impl Default for Project {
@@ -167,6 +172,7 @@ impl Project {
             notes: String::new(),
             plugins: Vec::new(),
             power_grades: Vec::new(),
+            review_comments: BTreeMap::new(),
         }
     }
 
@@ -200,6 +206,10 @@ impl Project {
         self.luts.iter().filter_map(|l| l.id.strip_prefix("lut")?.parse().ok()).for_each(&mut see);
         self.plugins.iter().filter_map(|p| p.id.strip_prefix("dctl")?.parse().ok()).for_each(&mut see);
         self.power_grades.iter().for_each(|pg| see(pg.id));
+        for (seq_id, list) in &self.review_comments {
+            see(seq_id.0);
+            list.iter().filter_map(|c| c.id.strip_prefix("rev-")?.parse().ok()).for_each(&mut see);
+        }
         fn mixer(m: &MixerStrip) -> impl Iterator<Item = u64> + '_ {
             m.sends.iter().map(|s| s.target.0).chain(m.output.map(|t| t.0))
         }

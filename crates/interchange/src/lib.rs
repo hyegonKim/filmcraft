@@ -31,6 +31,7 @@ pub mod edl;
 pub mod essence;
 pub mod fcp7;
 pub mod fcpxml;
+pub mod frameio;
 pub mod omf;
 pub mod otio;
 pub mod prproj;

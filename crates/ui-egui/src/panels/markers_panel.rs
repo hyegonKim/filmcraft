@@ -11,6 +11,8 @@ use serde_json::json;
 pub struct State {
     pub source: bool,
     pub sequence_index: bool,
+    pub review_mode: bool,
+    pub review: super::review_panel::ReviewUiState,
     pub search: String,
     #[serde(skip)]
     pub owner: Option<Owner>,
@@ -28,17 +30,25 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let ui = &mut child;
     ui.horizontal_wrapped(|ui| {
         for (source, label) in [(false, "Sequence"), (true, "Source")] {
-            let response = ui.selectable_label(!state.sequence_index && state.source == source, crate::i18n::t(label));
+            let response = ui.selectable_label(!state.sequence_index && !state.review_mode && state.source == source, crate::i18n::t(label));
             app.auto.add_response(&format!("markers.scope.{label}"), &response, crate::i18n::t(label));
             if response.clicked() {
                 state.sequence_index = false;
+                state.review_mode = false;
                 state.source = source;
             }
         }
-        let idx_resp = ui.selectable_label(state.sequence_index, tl!("Sequence Index"));
+        let idx_resp = ui.selectable_label(state.sequence_index && !state.review_mode, tl!("Sequence Index"));
         app.auto.add_response("markers.scope.sequenceIndex", &idx_resp, tl!("Sequence Index"));
         if idx_resp.clicked() {
             state.sequence_index = true;
+            state.review_mode = false;
+        }
+        let rev_resp = ui.selectable_label(state.review_mode, tl!("Frame.io Review"));
+        app.auto.add_response("markers.scope.frameIoReview", &rev_resp, tl!("Frame.io Review"));
+        if rev_resp.clicked() {
+            state.review_mode = true;
+            state.sequence_index = false;
         }
         let response = ui.button(tl!("Manage Colors…"));
         app.auto.add_response("markers.manageColors", &response, tl!("Manage Colors"));
@@ -46,6 +56,11 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
             super::palette_manager::open(app);
         }
     });
+    if state.review_mode {
+        super::review_panel::show(app, ui, &mut state.review);
+        app.ui.markers_panel = state;
+        return;
+    }
     if state.sequence_index {
         show_sequence_index(app, ui, &mut state);
         app.ui.markers_panel = state;

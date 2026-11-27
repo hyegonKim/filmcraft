@@ -4270,6 +4270,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::paste_media::commands());
     v.extend(crate::plugins::commands());
     v.extend(crate::substance3d::commands());
+    v.extend(crate::review::commands());
     v.extend(crate::resolve_workflows::commands());
     v.extend(crate::resolve_ai::commands());
     // Edit ▸ Label ▸ <colour>, Paste Attributes, subclips, Video / Audio Options, Replace With Clip…

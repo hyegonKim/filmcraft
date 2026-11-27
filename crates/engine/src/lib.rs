@@ -54,6 +54,7 @@ pub mod relink;
 pub mod remix;
 pub mod resolve_ai;
 pub mod resolve_workflows;
+pub mod review;
 pub mod scene_detect;
 pub mod scopes;
 pub mod sequence_extras;

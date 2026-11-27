@@ -3892,3 +3892,32 @@
 	Create Rough Cut from Script…	대본으로 러프컷 시퀀스 생성…
 	Smart Multicam Audio Switch	스마트 멀티캠 오디오 전환
 	Match Dialogue Tone & Loudness	대사 톤 및 라우드니스 매칭
+
+# Frame.io Team Review & Telestrator
+	Frame.io Review	Frame.io 리뷰
+	Import Frame.io Review…	Frame.io 리뷰 가져오기…
+	Export Frame.io Review…	Frame.io 리뷰 내보내기…
+	Add Review Comment	리뷰 코멘트 추가
+	Set Review Comment Status	리뷰 코멘트 상태 설정
+	Add Review Telestrator Annotation	리뷰 텔estrator 주석 추가
+	List Review Comments	리뷰 코멘트 목록
+	Needs Review	검토 필요
+	In Progress	진행 중
+	Approved	승인됨
+	Export JSON	JSON 내보내기
+	Export CSV	CSV 내보내기
+	Import Frame.io…	Frame.io 가져오기…
+	Copied {n} Frame.io review comment(s) to clipboard	클립보드에 Frame.io 리뷰 코멘트 {n}개 복사됨
+	Paste Frame.io JSON or CSV:	Frame.io JSON 또는 CSV 붙여넣기:
+	Import Review Notes	리뷰 노트 가져오기
+	Imported {n} Frame.io review comment(s)	Frame.io 리뷰 코멘트 {n}개 가져옴
+	Add frame-accurate review note…	프레임 단위 리뷰 노트 추가…
+	Add Note	노트 추가
+	Telestrator:	텔estrator:
+	Freehand	자유곡선
+	Arrow	화살표
+	Add or select a comment to draw Telestrator markup	텔estrator 마크업을 그리려면 코멘트를 추가하거나 선택하세요
+	No Frame.io review comments	Frame.io 리뷰 코멘트 없음
+	Reply to thread…	스레드에 답글 달기…
+	Reply	답글
+	{n} drawing(s)	드로잉 {n}개

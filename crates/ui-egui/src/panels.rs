@@ -495,3 +495,4 @@ pub mod marker_properties;
 
 pub mod markers_panel;
 pub mod palette_manager;
+pub mod review_panel;
